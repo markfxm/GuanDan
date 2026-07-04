@@ -1,0 +1,16 @@
+node_modules/
+dist/
+logs/
+outputs/
+work/
+.superpowers/
+
+*.log
+*.pid
+
+.env
+.env.*
+!.env.example
+
+Thumbs.db
+.DS_Store
