@@ -131,6 +131,21 @@ it("detects consecutive pairs from three consecutive pairs", () => {
   expect(group?.cards.map((card) => card.id).sort()).toEqual(cards.map((card) => card.id).sort());
 });
 
+it("detects AA2233 as low consecutive pairs", () => {
+  const cards = [
+    suited("A", "spades"),
+    suited("A", "clubs"),
+    suited("2", "spades"),
+    suited("2", "diamonds"),
+    suited("3", "spades"),
+    suited("3", "clubs"),
+  ];
+
+  const group = detectGroups(cards, "10").find((candidate) => candidate.type === "consecutive-pairs");
+
+  expect(group?.cards.map((card) => card.id).sort()).toEqual(cards.map((card) => card.id).sort());
+});
+
 it("detects plates from two consecutive triples", () => {
   const cards = [
     suited("A", "spades"),

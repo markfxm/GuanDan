@@ -157,7 +157,7 @@ export function buildApi() {
 
     const room = createRoom({ rank: rank as GameRank, seed, pendingTributeItems });
     rooms.set(room.id, room);
-    return { room: getPublicRoom(room, 0) };
+    return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
   });
 
   app.get<{ Params: { id: string } }>("/api/rooms/:id", async (request, reply) => {
@@ -166,7 +166,7 @@ export function buildApi() {
       return reply.code(404).send({ error: "Room not found." });
     }
 
-    return { room: getPublicRoom(room, 0) };
+    return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
   });
 
   app.post<{ Params: { id: string }; Body: PlayBody }>("/api/rooms/:id/play", async (request, reply) => {
@@ -181,7 +181,7 @@ export function buildApi() {
 
     try {
       playCards(room, request.body.seat, request.body.cardIds);
-      return { room: getPublicRoom(room, 0) };
+      return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid play." });
     }
@@ -205,7 +205,7 @@ export function buildApi() {
 
     try {
       advanceOpeningTribute(room, seat, cardIds);
-      return { room: getPublicRoom(room, 0) };
+      return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid tribute action." });
     }
@@ -223,7 +223,7 @@ export function buildApi() {
 
     try {
       passTurn(room, request.body.seat);
-      return { room: getPublicRoom(room, 0) };
+      return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid pass." });
     }
@@ -235,8 +235,13 @@ export function buildApi() {
       return reply.code(404).send({ error: "Room not found." });
     }
 
-    runAiUntilHumanTurn(room, 0);
-    return { room: getPublicRoom(room, 0) };
+    try {
+      runAiUntilHumanTurn(room, 0);
+      return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
+    } catch (error) {
+      request.log.error(error, "AI turn failed");
+      return reply.code(409).send({ error: error instanceof Error ? error.message : "AI turn failed." });
+    }
   });
 
   app.post<{ Params: { id: string } }>("/api/rooms/:id/ai-step", async (request, reply) => {
@@ -245,8 +250,13 @@ export function buildApi() {
       return reply.code(404).send({ error: "Room not found." });
     }
 
-    runAiStep(room);
-    return { room: getPublicRoom(room, 0) };
+    try {
+      runAiStep(room);
+      return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
+    } catch (error) {
+      request.log.error(error, "AI step failed");
+      return reply.code(409).send({ error: error instanceof Error ? error.message : "AI step failed." });
+    }
   });
 
   return app;

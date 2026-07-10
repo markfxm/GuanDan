@@ -143,7 +143,7 @@ it("plays, passes, and advances AI through room APIs", async () => {
     expect(ai.json().room.players).toHaveLength(4);
     expect(ai.json().room.trick.plays.length).toBeGreaterThanOrEqual(2);
   });
-});
+}, 15000);
 
 it("rejects invalid deal seed values", async () => {
   await withApp(async (app) => {

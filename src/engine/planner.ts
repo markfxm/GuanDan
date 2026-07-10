@@ -1,5 +1,6 @@
-import type { Card, GameRank } from "./cards";
+import { isHeartRankWild, type Card, type GameRank } from "./cards";
 import { detectGroups, type CardGroup, type GroupPurpose, type GroupType } from "./groups";
+import { comparePlanQuality, isLegalBombReduction, measurePlanQuality } from "./planQuality";
 
 export type PlanArchetype = "balanced" | "fast" | "control" | "linked" | "wildcard";
 
@@ -155,7 +156,7 @@ export function generatePlans(cards: Card[], gameRank: GameRank, count = 5): Pla
 
 function buildPlanGroups(cards: Card[], gameRank: GameRank, archetype: ArchetypeDefinition): CardGroup[] {
   const candidates = detectGroups(cards, gameRank);
-  const selected = selectBestCover(cards, candidates, archetype);
+  const selected = selectBestCover(cards, candidates, gameRank, archetype);
 
   assertCompletePlan(cards, selected);
 
@@ -166,21 +167,65 @@ type CandidateEntry = {
   group: CardGroup;
   mask: number;
   score: number;
+  quality: ReturnType<typeof measurePlanQuality>;
+  exactSelectionMask: bigint;
+  protectedEffects: ProtectedBombEffect[];
 };
 
 type CoverResult = {
   groups: CardGroup[];
   score: number;
+  quality: ReturnType<typeof measurePlanQuality>;
 };
 
-function selectBestCover(cards: Card[], candidates: CardGroup[], archetype: ArchetypeDefinition): CardGroup[] {
+type ExactProtectedTracker = {
+  group: CardGroup;
+};
+
+type ProtectedBombTracker = {
+  group: CardGroup;
+  allMask: number;
+  cardMaskById: Map<string, number>;
+};
+
+type ProtectedBombState = {
+  exactSelected: boolean;
+  consumedMask: number;
+  keptBombMask: number;
+};
+
+type ProtectedBombEffect =
+  | { kind: "none" }
+  | { kind: "illegal" }
+  | { kind: "exact" }
+  | { kind: "subset-bomb"; mask: number }
+  | { kind: "legal-straight"; mask: number };
+
+function selectBestCover(
+  cards: Card[],
+  candidates: CardGroup[],
+  gameRank: GameRank,
+  archetype: ArchetypeDefinition,
+): CardGroup[] {
   if (cards.length > 30) {
     throw new Error("Plan generation supports hands of 30 cards or fewer.");
   }
 
   const cardIndexById = new Map(cards.map((card, index) => [card.id, index]));
   const fullMask = (1 << cards.length) - 1;
+  const exactProtectedGroups = exactProtectedGroupsForSearch(candidates, gameRank);
+  const protectedBombs = protectedNaturalBombs(
+    candidates,
+    gameRank,
+    new Set(
+      exactProtectedGroups
+        .map((tracker) => bombSignature(tracker.group, gameRank))
+        .filter((rank): rank is string => rank !== undefined),
+    ),
+  );
+  const protectedStates = protectedBombs.map((bomb) => initialProtectedBombState(bomb));
   const entries = sortedCandidates(candidates, archetype)
+    .filter((group) => preservesNaturalStructures(group, cards, gameRank))
     .map((group): CandidateEntry | undefined => {
       let mask = 0;
 
@@ -193,22 +238,57 @@ function selectBestCover(cards: Card[], candidates: CardGroup[], archetype: Arch
         mask |= 1 << index;
       }
 
-      return { group, mask, score: scoreGroup(group, archetype) };
+      const score = scoreGroup(group, archetype);
+      const exactSelectionMask = exactProtectedGroups.reduce(
+        (selectedMask, tracker, index) =>
+          group.id === tracker.group.id ? selectedMask | (1n << BigInt(index)) : selectedMask,
+        0n,
+      );
+      const protectedEffects = protectedBombs.map((bomb) =>
+        protectedBombEffectForGroup(group, bomb, candidates, gameRank)
+      );
+      if (protectedEffects.some((effect) => effect.kind === "illegal")) {
+        return undefined;
+      }
+      return {
+        group,
+        mask,
+        score,
+        quality: measurePlanQuality([], [group], gameRank, score),
+        exactSelectionMask,
+        protectedEffects,
+      };
     })
     .filter((entry): entry is CandidateEntry => entry !== undefined);
 
   const entriesByFirstOpenCard = cards.map((_, index) =>
     entries.filter((entry) => (entry.mask & (1 << index)) !== 0),
   );
-  const memo = new Map<number, CoverResult | undefined>();
-
-  const search = (usedMask: number): CoverResult | undefined => {
+  const memo = new Map<string, CoverResult | undefined>();
+  const search = (
+    usedMask: number,
+    exactSelectionMask: bigint,
+    bombStates: ProtectedBombState[],
+  ): CoverResult | undefined => {
     if (usedMask === fullMask) {
-      return { groups: [], score: 0 };
+      return {
+        groups: [],
+        score: 0,
+        quality: {
+          protectedLoss:
+            exactProtectedGroups.length - bitCountBigInt(exactSelectionMask) +
+            countProtectedLoss(bombStates, protectedBombs),
+          lowSingleCount: 0,
+          groupCount: 0,
+          retainedControl: 0,
+          fallbackScore: 0,
+        },
+      };
     }
 
-    const cached = memo.get(usedMask);
-    if (cached !== undefined || memo.has(usedMask)) {
+    const memoKey = protectedStateKey(usedMask, exactSelectionMask, bombStates);
+    const cached = memo.get(memoKey);
+    if (cached !== undefined || memo.has(memoKey)) {
       return cached;
     }
 
@@ -220,7 +300,12 @@ function selectBestCover(cards: Card[], candidates: CardGroup[], archetype: Arch
         continue;
       }
 
-      const tail = search(usedMask | entry.mask);
+      const nextBombStates = advanceProtectedStates(bombStates, entry.protectedEffects);
+      if (nextBombStates === undefined) {
+        continue;
+      }
+
+      const tail = search(usedMask | entry.mask, exactSelectionMask | entry.exactSelectionMask, nextBombStates);
       if (tail === undefined) {
         continue;
       }
@@ -228,18 +313,18 @@ function selectBestCover(cards: Card[], candidates: CardGroup[], archetype: Arch
       const candidate = {
         groups: [entry.group, ...tail.groups],
         score: entry.score + tail.score,
+        quality: addPlanQuality(entry.quality, tail.quality),
       };
-
-      if (best === undefined || compareCovers(candidate, best) < 0) {
+      if (best === undefined || compareTailCovers(candidate, best) < 0) {
         best = candidate;
       }
     }
 
-    memo.set(usedMask, best);
+    memo.set(memoKey, best);
     return best;
   };
 
-  const result = search(0);
+  const result = search(0, 0n, protectedStates);
   if (result === undefined) {
     throw new Error(INCOMPLETE_PLAN_ERROR);
   }
@@ -257,18 +342,341 @@ function firstOpenCardIndex(usedMask: number, cardCount: number): number {
   return cardCount;
 }
 
-function compareCovers(left: CoverResult, right: CoverResult): number {
-  const scoreDelta = right.score - left.score;
-  if (Math.abs(scoreDelta) > 0.0001) {
-    return scoreDelta;
+function compareTailCovers(left: CoverResult, right: CoverResult): number {
+  const qualityDelta = comparePlanQuality(left.quality, right.quality);
+  if (qualityDelta !== 0) {
+    return qualityDelta;
   }
 
-  const groupCountDelta = left.groups.length - right.groups.length;
-  if (groupCountDelta !== 0) {
-    return groupCountDelta;
+  return deterministicGroupIds(left.groups).localeCompare(deterministicGroupIds(right.groups));
+}
+
+function addPlanQuality(
+  left: ReturnType<typeof measurePlanQuality>,
+  right: ReturnType<typeof measurePlanQuality>,
+): ReturnType<typeof measurePlanQuality> {
+  return {
+    protectedLoss: right.protectedLoss,
+    lowSingleCount: left.lowSingleCount + right.lowSingleCount,
+    groupCount: left.groupCount + right.groupCount,
+    retainedControl: left.retainedControl + right.retainedControl,
+    fallbackScore: left.fallbackScore + right.fallbackScore,
+  };
+}
+
+function preservesNaturalStructures(
+  group: CardGroup,
+  cards: Card[],
+  gameRank: GameRank,
+): boolean {
+  if (group.type === "pair" && group.wildcards.length === 0) {
+    return naturalRankCount(group.cards[0]?.rank, cards, gameRank) !== 2
+      ? false
+      : true;
   }
 
-  return left.groups.map((group) => group.id).join("|").localeCompare(right.groups.map((group) => group.id).join("|"));
+  if (group.type !== "full-house" || group.wildcards.length > 0) {
+    return true;
+  }
+
+  const counts = rankCounts(group.cards);
+  const pairRank = [...counts.entries()].find(([, count]) => count === 2)?.[0];
+  if (pairRank === undefined) {
+    return true;
+  }
+
+  return naturalRankCount(pairRank, cards, gameRank) === 2;
+}
+
+function naturalRankCount(rank: Card["rank"] | undefined, cards: Card[], gameRank: GameRank): number {
+  if (rank === undefined) {
+    return 0;
+  }
+
+  return cards.filter(
+    (card) => card.kind === "suited" && card.rank === rank && !isHeartRankWild(card, gameRank),
+  ).length;
+}
+
+function rankCounts(cards: Card[]): Map<Card["rank"], number> {
+  const counts = new Map<Card["rank"], number>();
+
+  for (const card of cards) {
+    counts.set(card.rank, (counts.get(card.rank) ?? 0) + 1);
+  }
+
+  return counts;
+}
+
+function exactProtectedGroupsForSearch(groups: CardGroup[], gameRank: GameRank): ExactProtectedTracker[] {
+  const strongestBombByRank = new Map<string, CardGroup>();
+  const exactGroups = groups
+    .filter((group) => group.type === "joker-bomb" || group.type === "straight-flush" && group.wildcards.length === 0)
+    .map((group) => ({ group }));
+
+  for (const group of groups) {
+    if (group.type !== "bomb" || group.cards.length < 4) {
+      continue;
+    }
+
+    const signature = bombSignature(group, gameRank);
+    if (signature === undefined || isNaturalSameRankBomb(group, gameRank)) {
+      continue;
+    }
+
+    const current = strongestBombByRank.get(signature);
+    if (
+      current === undefined ||
+      group.cards.length > current.cards.length ||
+      group.cards.length === current.cards.length && group.wildcards.length > current.wildcards.length
+    ) {
+      strongestBombByRank.set(signature, group);
+    }
+  }
+
+  return [
+    ...exactGroups,
+    ...[...strongestBombByRank.values()].map((group) => ({ group })),
+  ];
+}
+
+function bombSignature(group: CardGroup, gameRank: GameRank): string | undefined {
+  const naturalCards = group.cards.filter((card) => card.kind === "suited" && !isHeartRankWild(card, gameRank));
+  if (naturalCards.length === 0) {
+    return undefined;
+  }
+
+  return naturalCards[0].rank;
+}
+
+function protectedNaturalBombs(
+  groups: CardGroup[],
+  gameRank: GameRank,
+  excludedRanks: Set<string>,
+): ProtectedBombTracker[] {
+  const strongestBombByRank = new Map<string, CardGroup>();
+
+  for (const group of groups) {
+    if (!isNaturalSameRankBomb(group, gameRank)) {
+      continue;
+    }
+
+    const signature = group.cards[0]?.rank;
+    if (signature === undefined || excludedRanks.has(signature)) {
+      continue;
+    }
+
+    const current = strongestBombByRank.get(signature);
+    if (
+      current === undefined ||
+      group.cards.length > current.cards.length ||
+      group.cards.length === current.cards.length && group.id.localeCompare(current.id) < 0
+    ) {
+      strongestBombByRank.set(signature, group);
+    }
+  }
+
+  return [...strongestBombByRank.values()]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((group) => {
+      const cardMaskById = new Map(
+        group.cards
+          .map((card, index) => [card.id, 1 << index] as const),
+      );
+      return {
+        group,
+        allMask: (1 << group.cards.length) - 1,
+        cardMaskById,
+      };
+    });
+}
+
+function protectedBombEffectForGroup(
+  group: CardGroup,
+  bomb: ProtectedBombTracker,
+  allGroups: CardGroup[],
+  gameRank: GameRank,
+): ProtectedBombEffect {
+  const overlapMask = overlapMaskForGroup(group, bomb);
+  if (overlapMask === 0) {
+    return { kind: "none" };
+  }
+
+  if (
+    group.type === "bomb" &&
+    group.cards.every((card) => bomb.cardMaskById.has(card.id))
+  ) {
+    return overlapMask === bomb.allMask
+      ? { kind: "exact" }
+      : { kind: "subset-bomb", mask: overlapMask };
+  }
+
+  if (
+    group.type === "straight" &&
+    isLegalBombReduction(bomb.group, group, allGroups, gameRank)
+  ) {
+    return { kind: "legal-straight", mask: overlapMask };
+  }
+
+  return { kind: "illegal" };
+}
+
+function overlapMaskForGroup(group: CardGroup, bomb: ProtectedBombTracker): number {
+  let mask = 0;
+
+  for (const card of group.cards) {
+    mask |= bomb.cardMaskById.get(card.id) ?? 0;
+  }
+
+  return mask;
+}
+
+function initialProtectedBombState(_bomb: ProtectedBombTracker): ProtectedBombState {
+  return {
+    exactSelected: false,
+    consumedMask: 0,
+    keptBombMask: 0,
+  };
+}
+
+function advanceProtectedStates(
+  states: ProtectedBombState[],
+  effects: ProtectedBombEffect[],
+): ProtectedBombState[] | undefined {
+  const nextStates = states.map((state) => ({ ...state }));
+
+  for (let index = 0; index < effects.length; index += 1) {
+    const effect = effects[index];
+    const state = nextStates[index];
+
+    if (effect.kind === "none") {
+      continue;
+    }
+
+    if (effect.kind === "exact") {
+      if (state.exactSelected || state.consumedMask !== 0 || state.keptBombMask !== 0) {
+        return undefined;
+      }
+      state.exactSelected = true;
+      state.keptBombMask = -1;
+      continue;
+    }
+
+    if (effect.kind === "subset-bomb") {
+      if (state.exactSelected || state.keptBombMask !== 0) {
+        return undefined;
+      }
+      state.keptBombMask = effect.mask;
+      continue;
+    }
+
+    if (effect.kind === "illegal") {
+      return undefined;
+    }
+
+    if (state.exactSelected || (state.keptBombMask > 0 && (state.keptBombMask & effect.mask) !== 0)) {
+      return undefined;
+    }
+
+    state.consumedMask |= effect.mask;
+  }
+
+  return nextStates;
+}
+
+function countProtectedLoss(states: ProtectedBombState[], bombs: ProtectedBombTracker[]): number {
+  let protectedLoss = 0;
+
+  for (let index = 0; index < bombs.length; index += 1) {
+    const bomb = bombs[index];
+    const state = states[index];
+    const consumedCount = bitCount(state.consumedMask);
+
+    if (state.exactSelected) {
+      continue;
+    }
+
+    if (bomb.group.cards.length === 4) {
+      if (consumedCount !== 1) {
+        protectedLoss += 1;
+      }
+      continue;
+    }
+
+    if (
+      consumedCount === 0 ||
+      consumedCount > bomb.group.cards.length - 4 ||
+      state.keptBombMask !== (bomb.allMask ^ state.consumedMask) ||
+      bitCount(state.keptBombMask) < 4
+    ) {
+      protectedLoss += 1;
+    }
+  }
+
+  return protectedLoss;
+}
+
+function sortedCardIds(group: CardGroup): string {
+  return group.cards.map((card) => card.id).sort().join(",");
+}
+
+function protectedStateKey(
+  usedMask: number,
+  exactSelectionMask: bigint,
+  bombStates: ProtectedBombState[],
+): string {
+  const bombKey = bombStates
+    .map((state) => `${Number(state.exactSelected)}:${state.consumedMask}:${state.keptBombMask}`)
+    .join("|");
+  return `${usedMask}#${exactSelectionMask.toString()}#${bombKey}`;
+}
+
+function bitCount(value: number): number {
+  let count = 0;
+  let current = value >>> 0;
+
+  while (current > 0) {
+    current &= current - 1;
+    count += 1;
+  }
+
+  return count;
+}
+
+function bitCountBigInt(value: bigint): number {
+  let count = 0;
+  let current = value;
+
+  while (current > 0n) {
+    current &= current - 1n;
+    count += 1;
+  }
+
+  return count;
+}
+
+function isNaturalSameRankBomb(group: CardGroup, gameRank: GameRank): boolean {
+  if (group.type !== "bomb" || group.cards.length < 4 || group.wildcards.length > 0) {
+    return false;
+  }
+
+  const firstCard = group.cards[0];
+  if (firstCard?.kind !== "suited" || isHeartRankWild(firstCard, gameRank)) {
+    return false;
+  }
+
+  return group.cards.every(
+    (card) => card.kind === "suited" && card.rank === firstCard.rank && !isHeartRankWild(card, gameRank),
+  );
+}
+
+function groupsOverlap(left: CardGroup, right: CardGroup): boolean {
+  const rightIds = new Set(right.cards.map((card) => card.id));
+  return left.cards.some((card) => rightIds.has(card.id));
+}
+
+function deterministicGroupIds(groups: CardGroup[]): string {
+  return groups.map((group) => group.id).sort().join("|");
 }
 
 function assertCompletePlan(cards: Card[], groups: CardGroup[]): void {
@@ -316,7 +724,7 @@ function scoreGroup(group: CardGroup, archetype: ArchetypeDefinition): number {
   );
 }
 
-function wildcardStructureBonus(group: CardGroup): number {
+export function wildcardStructureBonus(group: CardGroup): number {
   if (group.wildcards.length === 0) {
     return 0;
   }
@@ -325,17 +733,43 @@ function wildcardStructureBonus(group: CardGroup): number {
     return 1200;
   }
 
-  if (group.type === "straight" || group.type === "plate" || group.type === "consecutive-pairs") {
-    return 450;
+  if (group.type === "straight") {
+    return 600;
   }
 
   if (group.type === "bomb" && group.cards.length <= 5) {
-    return -500;
+    return 450;
   }
 
-  if (group.type === "full-house" || group.type === "pair") {
+  if (group.type === "plate" || group.type === "consecutive-pairs") {
+    return 300;
+  }
+
+  if (group.type === "full-house") {
+    return fullHouseWildcardBonus(group);
+  }
+
+  if (group.type === "pair") {
     return -350;
   }
 
   return 0;
+}
+
+function fullHouseWildcardBonus(group: CardGroup): number {
+  const wildcardIds = new Set(group.wildcards.map((card) => card.id));
+  const naturalCounts = new Map<Card["rank"], number>();
+  for (const card of group.cards) {
+    if (wildcardIds.has(card.id)) {
+      continue;
+    }
+
+    naturalCounts.set(card.rank, (naturalCounts.get(card.rank) ?? 0) + 1);
+  }
+
+  if ([...naturalCounts.values()].some((count) => count === 2)) {
+    return 150;
+  }
+
+  return -350;
 }

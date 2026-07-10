@@ -27,6 +27,9 @@ it("classifies common Guandan play types", () => {
   expect(
     classifyPlay([suited("9", "spades"), suited("9", "clubs"), suited("8", "spades"), suited("8", "clubs"), suited("7", "spades"), suited("7", "clubs")], "10")?.type,
   ).toBe("consecutive-pairs");
+  expect(
+    classifyPlay([suited("A", "spades"), suited("A", "clubs"), suited("2", "spades"), suited("2", "diamonds"), suited("3", "spades"), suited("3", "clubs")], "10")?.type,
+  ).toBe("consecutive-pairs");
   expect(classifyPlay([joker("SJ", 1), joker("SJ", 2)], "10")?.type).toBe("pair");
   expect(classifyPlay([joker("BJ", 1), joker("BJ", 2), joker("SJ", 1), joker("SJ", 2)], "10")?.type).toBe("joker-bomb");
 });
@@ -63,6 +66,14 @@ it("classifies a full-house with heart-rank wildcard by its strongest valid majo
 
 it("lets bombs and straight flushes beat ordinary plays with Jiangsu ordering", () => {
   const pair = classifyPlay([suited("A", "spades"), suited("A", "clubs")], "10");
+  const plate = classifyPlay([
+    suited("9", "spades"),
+    suited("9", "clubs"),
+    suited("9", "hearts"),
+    suited("8", "spades"),
+    suited("8", "clubs"),
+    suited("8", "hearts"),
+  ], "10");
   const fourBomb = classifyPlay([suited("K", "spades"), suited("K", "clubs"), suited("K", "hearts"), suited("K", "diamonds")], "10");
   const fiveBomb = classifyPlay([suited("Q", "spades"), suited("Q", "clubs"), suited("Q", "hearts"), suited("Q", "diamonds"), suited("Q", "spades", 2)], "10");
   const straightFlush = classifyPlay(["9", "8", "7", "6", "5"].map((rank) => suited(rank as Rank, "hearts")), "10");
@@ -78,7 +89,9 @@ it("lets bombs and straight flushes beat ordinary plays with Jiangsu ordering", 
   expect(fourBomb && pair && canBeatPlay(fourBomb, pair, "10")).toBe(true);
   expect(straightFlush).toBeDefined();
   expect(fiveBomb).toBeDefined();
+  expect(plate).toBeDefined();
   expect(sixBomb).toBeDefined();
+  expect(fiveBomb && plate && canBeatPlay(fiveBomb, plate, "10")).toBe(true);
   expect(playPower(straightFlush!, "10")).toBeGreaterThan(playPower(fiveBomb!, "10"));
   expect(playPower(sixBomb!, "10")).toBeGreaterThan(playPower(straightFlush!, "10"));
 });

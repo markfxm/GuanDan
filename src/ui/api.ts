@@ -29,6 +29,13 @@ export type TrickPlay = {
   trickIndex?: number;
 };
 
+export type AiPlanState = {
+  seat: Seat;
+  name: string;
+  score: number;
+  groups: CardGroup[];
+};
+
 export type TributeItem = {
   payer: Seat;
   receiver: Seat;
@@ -65,6 +72,7 @@ export type PublicRoom = {
     plays: TrickPlay[];
   };
   finishOrder: Seat[];
+  aiPlans: Partial<Record<Seat, AiPlanState>>;
   playHistory: TrickPlay[];
   replayHands: Record<Seat, Card[]>;
   settlement?: {
@@ -143,6 +151,7 @@ function normalizePublicRoom(room: PublicRoom): PublicRoom {
   return {
     ...room,
     currentTrickIndex: typeof room.currentTrickIndex === "number" ? room.currentTrickIndex : 0,
+    aiPlans: room.aiPlans ?? {},
     playHistory: Array.isArray(room.playHistory) ? room.playHistory : [],
     replayHands: room.replayHands ?? {
       0: room.humanHand ?? [],
@@ -167,7 +176,9 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
   if (!response.ok) {
     const statusText = response.statusText ? ` ${response.statusText}` : "";
-    throw new Error(`API request failed: ${response.status}${statusText}`);
+    const payload = await response.json().catch(() => undefined) as { error?: unknown } | undefined;
+    const detail = typeof payload?.error === "string" ? `: ${payload.error}` : "";
+    throw new Error(`API request failed: ${response.status}${statusText}${detail}`);
   }
 
   return response.json() as Promise<T>;

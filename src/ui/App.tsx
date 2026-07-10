@@ -1,10 +1,9 @@
 ﻿import { Bot, CirclePlay, DoorOpen, Hand, StepForward } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Bomb, Eye, EyeOff } from "lucide-react";
 import { RANKS, type Card, type GameRank, type Suit } from "../engine/cards";
 import type { ScoredPlan } from "../engine/scorer";
 import { CardFace } from "./CardFace";
-import { ExplainPanel } from "./ExplainPanel";
 import { groupCardsForHandDisplay } from "./handLayout";
 import { createGameRoom, generatePlans, passRoomTurn, playRoomCards, runRoomAiStep, submitOpeningTribute, type PublicRoom, type Seat, type TrickPlay } from "./api";
 import { draggedCardIds, ManualGroupTray, setDraggedCardIds } from "./ManualGroupTray";
@@ -19,8 +18,8 @@ import {
 } from "./manualGrouping";
 import { PlanView } from "./PlanView";
 
-const DEFAULT_RANK: GameRank = "10";
-const AI_PAUSE_MS = 10_000;
+const DEFAULT_RANK: GameRank = "2";
+const AI_PAUSE_MS = 4_000;
 const AI_LEAD_PAUSE_MS = 3_000;
 const SEAT_NAMES: Record<Seat, string> = { 0: "南", 1: "西", 2: "北", 3: "东" };
 const PLAYER_NAMES: Record<Seat, string> = { 0: "南方玩家", 1: "西方玩家", 2: "北方玩家", 3: "东方玩家" };
@@ -29,6 +28,15 @@ const OUTCOME_LABELS = {
   "single-down": "单下",
   "single-win": "单胜",
 } as const;
+
+type ReplayStep =
+  | { kind: "plan"; plan: NonNullable<PublicRoom["aiPlans"][Seat]> }
+  | { kind: "play"; play: TrickPlay; playIndex: number };
+
+type BombEffectState = {
+  seat: Seat;
+  eventId: string;
+};
 
 export function App() {
   const [gameRank, setGameRank] = useState<GameRank>(DEFAULT_RANK);
@@ -43,30 +51,53 @@ export function App() {
   const [showSettlementDialog, setShowSettlementDialog] = useState(false);
   const [manualGroups, setManualGroups] = useState<ManualCardGroup[]>([]);
   const [plansCollapsed, setPlansCollapsed] = useState(false);
-  const [explainCollapsed, setExplainCollapsed] = useState(false);
   const [showReplayDialog, setShowReplayDialog] = useState(false);
   const [replaySeat, setReplaySeat] = useState<Seat>();
   const [replayStep, setReplayStep] = useState(0);
   const [replayPlaying, setReplayPlaying] = useState(true);
   const [replaySpeed, setReplaySpeed] = useState(1);
   const [replayScale, setReplayScale] = useState(1);
+  const [bombEffect, setBombEffect] = useState<BombEffectState>();
+  const bombEffectTimerRef = useRef<number>();
 
   const visibleHumanHand = useMemo(() => ungroupedCards(room?.humanHand ?? [], manualGroups), [room?.humanHand, manualGroups]);
   const groupedHand = useMemo(() => groupCardsForHandDisplay(visibleHumanHand, gameRank), [visibleHumanHand, gameRank]);
   const groupedManualGroups = useMemo(() => classifyManualGroups(manualGroups, room?.humanHand ?? [], gameRank), [manualGroups, room?.humanHand, gameRank]);
   const selectedPlan = useMemo(() => plans.find((plan) => plan.id === selectedPlanId) ?? plans[0], [plans, selectedPlanId]);
+  const humanHandPlanKey = room?.humanHand.map((card) => card.id).sort().join("|") ?? "";
   const tributePending = room?.openingTribute?.status === "pending";
   const tributeRevealBlocking = false;
   const roomReadyForPlay = !tributePending && !tributeRevealBlocking;
   const humanTributeTurn = tributePending && room?.openingTribute?.activeSeat === 0 && !tributeRevealBlocking;
   const humanTurn = room?.currentTurn === 0 && room.status === "playing" && roomReadyForPlay;
   const aiTurn = room !== undefined && room.status === "playing" && roomReadyForPlay && room.currentTurn !== 0 && room.players.find((player) => player.seat === room.currentTurn)?.isAI === true;
-  const replayAvailable = room !== undefined && room.status === "finished" && room.playHistory.length > 0;
+  const replayAvailable = room !== undefined && room.status === "finished" && replayStepCount(room) > 0;
+
+  const applyRealtimeRoomUpdate = useCallback((previousRoom: PublicRoom, nextRoom: PublicRoom) => {
+    const nextBombEffect = detectNewBombPlay(previousRoom, nextRoom);
+    setRoom(nextRoom);
+    if (nextBombEffect === undefined) {
+      return;
+    }
+
+    if (bombEffectTimerRef.current !== undefined) {
+      window.clearTimeout(bombEffectTimerRef.current);
+    }
+    setBombEffect(nextBombEffect);
+    bombEffectTimerRef.current = window.setTimeout(() => {
+      setBombEffect(undefined);
+      bombEffectTimerRef.current = undefined;
+    }, bombEffectDurationMs());
+  }, []);
 
   useEffect(() => {
     if (room === undefined) {
       setPlans([]);
       setManualGroups([]);
+      return;
+    }
+
+    if (!humanTurn) {
       return;
     }
 
@@ -76,7 +107,7 @@ export function App() {
         setSelectedPlanId(nextPlans[0]?.id);
       })
       .catch(() => setPlans([]));
-  }, [room]);
+  }, [humanHandPlanKey, humanTurn, room?.id, room?.rank]);
 
   useEffect(() => {
     setManualGroups([]);
@@ -87,6 +118,11 @@ export function App() {
     setReplayPlaying(true);
     setReplaySpeed(1);
     setReplayScale(1);
+    setBombEffect(undefined);
+    if (bombEffectTimerRef.current !== undefined) {
+      window.clearTimeout(bombEffectTimerRef.current);
+      bombEffectTimerRef.current = undefined;
+    }
   }, [room?.id]);
 
   useEffect(() => {
@@ -105,11 +141,11 @@ export function App() {
 
     await runAction("AI 正在出牌...", async () => {
       const nextRoom = await runRoomAiStep(room.id);
-      setRoom(nextRoom);
+      applyRealtimeRoomUpdate(room, nextRoom);
       setStatus(statusForRoom(nextRoom));
       setShowSettlementDialog(nextRoom.status === "finished");
     });
-  }, [room]);
+  }, [applyRealtimeRoomUpdate, room]);
 
   const handleOpeningTributeStep = useCallback(
     async (cardIds: string[] = []) => {
@@ -159,14 +195,12 @@ export function App() {
       }
 
       event.preventDefault();
-      const shouldExpand = plansCollapsed && explainCollapsed;
-      setPlansCollapsed(!shouldExpand);
-      setExplainCollapsed(!shouldExpand);
+      setPlansCollapsed((collapsed) => !collapsed);
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [explainCollapsed, plansCollapsed]);
+  }, []);
 
   useEffect(() => {
     const tribute = room?.openingTribute;
@@ -178,19 +212,19 @@ export function App() {
   }, [handleOpeningTributeStep, loading, room?.openingTribute]);
 
   useEffect(() => {
-    if (!showReplayDialog || replaySeat === undefined || !replayPlaying || room === undefined || room.playHistory.length <= 1) {
+    if (!showReplayDialog || replaySeat === undefined || !replayPlaying || room === undefined || replayStepCount(room) <= 1) {
       return undefined;
     }
 
     const timer = window.setInterval(() => {
-      setReplayStep((current) => Math.min(current + 1, room.playHistory.length - 1));
+      setReplayStep((current) => Math.min(current + 1, replayStepCount(room) - 1));
     }, Math.max(450, 1600 / replaySpeed));
 
     return () => window.clearInterval(timer);
   }, [replayPlaying, replaySeat, replaySpeed, room, showReplayDialog]);
 
   useEffect(() => {
-    if (room !== undefined && replayStep >= room.playHistory.length - 1) {
+    if (room !== undefined && replayStep >= replayStepCount(room) - 1) {
       setReplayPlaying(false);
     }
   }, [replayStep, room]);
@@ -210,7 +244,7 @@ export function App() {
       if (event.key === "ArrowRight") {
         event.preventDefault();
         setReplayPlaying(false);
-        setReplayStep((current) => Math.min(room.playHistory.length - 1, current + 1));
+        setReplayStep((current) => Math.min(replayStepCount(room) - 1, current + 1));
         return;
       }
 
@@ -256,7 +290,7 @@ export function App() {
 
     await runAction("正在出牌...", async () => {
       const nextRoom = await playRoomCards(room.id, selectedCardIds);
-      setRoom(nextRoom);
+      applyRealtimeRoomUpdate(room, nextRoom);
       setSelectedCardIds([]);
       setStatus(statusForRoom(nextRoom));
       setShowSettlementDialog(nextRoom.status === "finished");
@@ -270,7 +304,7 @@ export function App() {
 
     await runAction("正在过牌...", async () => {
       const nextRoom = await passRoomTurn(room.id);
-      setRoom(nextRoom);
+      applyRealtimeRoomUpdate(room, nextRoom);
       setSelectedCardIds([]);
       setStatus(statusForRoom(nextRoom));
       setShowSettlementDialog(nextRoom.status === "finished");
@@ -347,7 +381,7 @@ export function App() {
         </div>
       </header>
 
-      <div className={`game-grid${plansCollapsed ? " plans-collapsed" : ""}${explainCollapsed ? " explain-collapsed" : ""}`}>
+      <div className={`game-grid${plansCollapsed ? " plans-collapsed" : ""}`}>
         <section className="workspace-column table-column" aria-labelledby="table-title">
           <div className="column-heading">
             <div>
@@ -378,6 +412,7 @@ export function App() {
               </button>
               <button
                 className={`replay-button${replayAvailable ? " ready" : ""}`}
+                data-testid="replay-button"
                 type="button"
                 onClick={() => {
                   setReplayStep(0);
@@ -403,10 +438,13 @@ export function App() {
                     {SEAT_NAMES[player.seat]} · {player.name}
                   </span>
                   <span className="seat-count">{player.handCount} 张</span>
+                  <LowCardFlag count={player.handCount} seat={player.seat} />
                   <FinishBadge finishOrder={room.finishOrder} seat={player.seat} />
                   {player.isAI ? <Bot aria-label="AI" size={16} /> : <Hand aria-label="玩家" size={16} />}
                 </div>
               ))}
+
+              {bombEffect !== undefined && <BombEffect effect={bombEffect} />}
 
               <TrickBoard room={room} />
             </div>
@@ -521,35 +559,6 @@ export function App() {
           {!plansCollapsed && <PlanView plans={plans} selectedPlanId={selectedPlan?.id} gameRank={gameRank} onSelectPlan={setSelectedPlanId} />}
         </section>
 
-        <section
-          className={`workspace-column explain-column collapsible-column${explainCollapsed ? " collapsed" : ""}`}
-          aria-labelledby="explain-title"
-          data-testid="explain-column"
-        >
-          <div className="column-heading">
-            <div>
-              <p className="eyebrow">Log</p>
-              <h2 id="explain-title">牌局信息</h2>
-            </div>
-            <button
-              className="icon-button"
-              type="button"
-              aria-label={explainCollapsed ? "显示牌局信息" : "隐藏牌局信息"}
-              title={explainCollapsed ? "显示牌局信息" : "隐藏牌局信息"}
-              onClick={() => setExplainCollapsed((collapsed) => !collapsed)}
-            >
-              {explainCollapsed ? <Eye aria-hidden="true" size={18} /> : <EyeOff aria-hidden="true" size={18} />}
-            </button>
-          </div>
-          {!explainCollapsed && <ExplainPanel plan={selectedPlan} />}
-          {room !== undefined && !explainCollapsed && (
-            <div className="action-log">
-              {room.actionLog.slice(0, 8).map((line, index) => (
-                <p key={`${line}-${index}`}>{line}</p>
-              ))}
-            </div>
-          )}
-        </section>
       </div>
       {room?.settlement !== undefined && showSettlementDialog && (
         <div className="modal-backdrop">
@@ -589,7 +598,7 @@ export function App() {
           }}
           onNext={() => {
             setReplayPlaying(false);
-            setReplayStep((current) => Math.min(room.playHistory.length - 1, current + 1));
+            setReplayStep((current) => Math.min(replayStepCount(room) - 1, current + 1));
           }}
           onSpeedChange={() => setReplaySpeed((current) => (current >= 4 ? 1 : current * 2))}
           onScaleChange={(nextScale) => setReplayScale(nextScale)}
@@ -670,16 +679,22 @@ function ReplayDialog({
   onSpeedChange: () => void;
   onScaleChange: (scale: number) => void;
 }) {
-  const currentPlay = room.playHistory[stepIndex];
-  const visibleRoundPlays = replayRoundPlays(room.playHistory, stepIndex);
+  const steps = replaySteps(room);
+  const stepCount = steps.length;
+  const currentStep = steps[stepIndex];
+  const currentPlan = currentStep?.kind === "plan" ? currentStep.plan : undefined;
+  const currentPlay = currentStep?.kind === "play" ? currentStep.play : undefined;
+  const currentPlayIndex = currentStep?.kind === "play" ? currentStep.playIndex : 0;
+  const visibleRoundPlays = currentStep?.kind === "play" ? replayRoundPlays(room.playHistory, currentPlayIndex) : [];
   const playBySeat = new Map<Seat, TrickPlay>();
   for (const play of visibleRoundPlays) {
     playBySeat.set(play.seat, play);
   }
-  const perspectiveHand =
-    perspectiveSeat === undefined ? [] : groupCardsForHandDisplay(replayRemainingHand(room, perspectiveSeat, stepIndex), room.rank);
+  const perspectiveHand = perspectiveSeat === undefined || currentPlan !== undefined ? [] : groupCardsForHandDisplay(replayRemainingHand(room, perspectiveSeat, currentPlayIndex), room.rank);
   const perspectiveHandLabel =
-    perspectiveSeat === undefined
+    currentPlan !== undefined
+      ? `${PLAYER_NAMES[currentPlan.seat]}本局组牌`
+      : perspectiveSeat === undefined
       ? ""
       : `${PLAYER_NAMES[perspectiveSeat]}${currentPlay?.seat === perspectiveSeat && currentPlay.action === "play" ? "本步出牌前手牌" : "本步出牌后手牌"}`;
 
@@ -716,7 +731,7 @@ function ReplayDialog({
             <strong>选择回顾视角</strong>
             <div className="replay-seat-buttons">
               {([0, 1, 2, 3] as Seat[]).map((seat) => (
-                <button type="button" key={seat} onClick={() => onSelectSeat(seat)}>
+                <button type="button" data-testid={`replay-seat-button-${seat}`} key={seat} onClick={() => onSelectSeat(seat)}>
                   {PLAYER_NAMES[seat].replace("玩家", "视角")}
                 </button>
               ))}
@@ -726,21 +741,23 @@ function ReplayDialog({
           <>
             <div className="replay-meta">
               <strong>以{PLAYER_NAMES[perspectiveSeat]}视角回顾</strong>
-              <span>
-                第 {Math.min(stepIndex + 1, room.playHistory.length)} / {room.playHistory.length} 步
+              <span data-testid="replay-step-count">
+                第 {Math.min(stepIndex + 1, stepCount)} / {stepCount} 步
               </span>
-              {currentPlay !== undefined && <span>{replayActionText(currentPlay)}</span>}
+              {currentStep !== undefined && <span>{replayStepText(currentStep)}</span>}
             </div>
 
             <div className={`replay-table perspective-seat-${perspectiveSeat}`} data-testid="replay-table">
               {([0, 1, 2, 3] as Seat[]).map((seat) => (
                 <div
-                  className={`replay-seat replay-seat-${seat}${seat === perspectiveSeat ? " perspective" : ""}${currentPlay?.seat === seat ? " current" : ""}`}
+                  className={`replay-seat replay-seat-${seat}${seat === perspectiveSeat ? " perspective" : ""}${currentStepSeat(currentStep) === seat ? " current" : ""}`}
                   data-testid={`replay-seat-${seat}`}
                   key={seat}
                 >
                   <strong>{SEAT_NAMES[seat]}</strong>
-                  {playBySeat.get(seat) !== undefined ? (
+                  {currentPlan?.seat === seat ? (
+                    <span>组牌</span>
+                  ) : playBySeat.get(seat) !== undefined ? (
                     playBySeat.get(seat)?.action === "pass" ? (
                       <span>过牌</span>
                     ) : (
@@ -759,15 +776,33 @@ function ReplayDialog({
 
             <section className="replay-hand-panel" aria-label={perspectiveHandLabel}>
               <strong>{perspectiveHandLabel}</strong>
-              <div className="replay-hand" data-testid="replay-perspective-hand">
-                {perspectiveHand.map((group) => (
-                  <div className="hand-stack" key={group.rank}>
-                    {group.cards.map((card) => (
-                      <CardFace card={card} gameRank={room.rank} key={card.id} />
+              {currentPlan !== undefined ? (
+                <div className="replay-plan">
+                  <div className="replay-plan-summary">
+                    <strong>{currentPlan.name}</strong>
+                    <span>得分 {currentPlan.score}</span>
+                  </div>
+                  <div className="replay-hand replay-plan-groups" data-testid="replay-plan-groups">
+                    {currentPlan.groups.map((group) => (
+                      <div className="group-cards replay-cards replay-plan-group" key={group.id}>
+                        {group.cards.map((card) => (
+                          <CardFace card={card} gameRank={room.rank} key={card.id} />
+                        ))}
+                      </div>
                     ))}
                   </div>
-                ))}
-              </div>
+                </div>
+              ) : (
+                <div className="replay-hand" data-testid="replay-perspective-hand">
+                  {perspectiveHand.map((group) => (
+                    <div className="hand-stack" key={group.rank}>
+                      {group.cards.map((card) => (
+                        <CardFace card={card} gameRank={room.rank} key={card.id} />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
             </section>
 
             <div className="replay-controls">
@@ -777,7 +812,7 @@ function ReplayDialog({
               <button type="button" onClick={onTogglePlay}>
                 {playing ? "暂停" : "播放"}
               </button>
-              <button type="button" onClick={onNext} disabled={stepIndex >= room.playHistory.length - 1}>
+              <button type="button" onClick={onNext} disabled={stepIndex >= stepCount - 1}>
                 前进
               </button>
               <button type="button" onClick={onSpeedChange}>
@@ -873,6 +908,93 @@ function FinishBadge({ finishOrder, seat }: { finishOrder: Seat[]; seat: Seat })
   return <span className="finish-badge">{labels[placeIndex] ?? `${placeIndex + 1}游`}</span>;
 }
 
+function LowCardFlag({ count, seat }: { count: number; seat: Seat }) {
+  const [displayCount, setDisplayCount] = useState<number | undefined>(count >= 1 && count <= 9 ? count : undefined);
+  const [lowering, setLowering] = useState(false);
+
+  useEffect(() => {
+    if (count >= 1 && count <= 9) {
+      setDisplayCount(count);
+      setLowering(false);
+      return undefined;
+    }
+
+    if (count === 0 && displayCount !== undefined) {
+      setLowering(true);
+      const timer = window.setTimeout(() => {
+        setDisplayCount(undefined);
+        setLowering(false);
+      }, flagLowerDurationMs());
+      return () => window.clearTimeout(timer);
+    }
+
+    setDisplayCount(undefined);
+    setLowering(false);
+    return undefined;
+  }, [count]);
+
+  if (displayCount === undefined) {
+    return null;
+  }
+
+  return (
+    <div className={`low-card-flag low-card-flag-${seat}${lowering ? " lowering" : ""}`} data-testid={`low-card-flag-${seat}`} role="status">
+      <span className="low-card-flag-pole" aria-hidden="true" />
+      <span className="low-card-flag-cloth">还剩下 {displayCount} 张了</span>
+    </div>
+  );
+}
+
+function BombEffect({ effect }: { effect: BombEffectState }) {
+  return (
+    <div
+      aria-label={`${PLAYER_NAMES[effect.seat]}炸弹动画`}
+      className={`bomb-effect bomb-effect-seat-${effect.seat}`}
+      data-testid="bomb-effect"
+      key={effect.eventId}
+    >
+      <span className="bomb-effect-flash" aria-hidden="true" />
+      <span className="bomb-effect-core" aria-hidden="true"><Bomb size={34} strokeWidth={2.5} /></span>
+      <strong>轰！</strong>
+      <span className="bomb-effect-smoke smoke-one" aria-hidden="true" />
+      <span className="bomb-effect-smoke smoke-two" aria-hidden="true" />
+      <span className="bomb-effect-smoke smoke-three" aria-hidden="true" />
+    </div>
+  );
+}
+
+function detectNewBombPlay(previousRoom: PublicRoom, nextRoom: PublicRoom): BombEffectState | undefined {
+  if (previousRoom.id !== nextRoom.id || nextRoom.playHistory.length <= previousRoom.playHistory.length) {
+    return undefined;
+  }
+
+  const newPlays = nextRoom.playHistory.slice(previousRoom.playHistory.length);
+  for (let index = newPlays.length - 1; index >= 0; index -= 1) {
+    const play = newPlays[index];
+    const type = play?.group?.type;
+    if (play?.action !== "play" || (type !== "bomb" && type !== "joker-bomb" && type !== "straight-flush")) {
+      continue;
+    }
+
+    return {
+      seat: play.seat,
+      eventId: `${nextRoom.id}:${previousRoom.playHistory.length + index}:${play.group?.id ?? type}`,
+    };
+  }
+
+  return undefined;
+}
+
+function bombEffectDurationMs(): number {
+  const configured = (globalThis as { __GUANDAN_BOMB_EFFECT_MS__?: number }).__GUANDAN_BOMB_EFFECT_MS__;
+  return typeof configured === "number" && Number.isFinite(configured) ? configured : 2_000;
+}
+
+function flagLowerDurationMs(): number {
+  const configured = (globalThis as { __GUANDAN_FLAG_LOWER_MS__?: number }).__GUANDAN_FLAG_LOWER_MS__;
+  return typeof configured === "number" && Number.isFinite(configured) ? configured : 260;
+}
+
 function statusForRoom(room: PublicRoom): string {
   if (room.status === "finished") {
     return "本局结束。";
@@ -956,6 +1078,40 @@ function cardText(card: Card): string {
   };
 
   return `${suitNames[card.suit]}${card.rank}`;
+}
+
+function replayPlans(room: PublicRoom): NonNullable<PublicRoom["aiPlans"][Seat]>[] {
+  const aiPlans = room.aiPlans ?? {};
+  return ([0, 1, 2, 3] as Seat[])
+    .map((seat) => aiPlans[seat])
+    .filter((plan): plan is NonNullable<PublicRoom["aiPlans"][Seat]> => plan !== undefined);
+}
+
+function replaySteps(room: PublicRoom): ReplayStep[] {
+  return [
+    ...replayPlans(room).map((plan) => ({ kind: "plan" as const, plan })),
+    ...room.playHistory.map((play, playIndex) => ({ kind: "play" as const, play, playIndex })),
+  ];
+}
+
+function replayStepCount(room: PublicRoom): number {
+  return replaySteps(room).length;
+}
+
+function replayStepText(step: ReplayStep): string {
+  if (step.kind === "plan") {
+    return `${PLAYER_NAMES[step.plan.seat]}组牌`;
+  }
+
+  return replayActionText(step.play);
+}
+
+function currentStepSeat(step: ReplayStep | undefined): Seat | undefined {
+  if (step === undefined) {
+    return undefined;
+  }
+
+  return step.kind === "plan" ? step.plan.seat : step.play.seat;
 }
 
 function replayActionText(play: TrickPlay): string {

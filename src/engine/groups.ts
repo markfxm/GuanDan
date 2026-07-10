@@ -275,6 +275,10 @@ function sequenceWindows(gameRank: GameRank, size: number): SequenceWindow[] {
     windows.push({ ranks: ["A", "5", "4", "3", "2"], strengthRank: "5" });
   }
 
+  if (size === 3) {
+    windows.push({ ranks: ["A", "3", "2"], strengthRank: "3" });
+  }
+
   return windows;
 }
 
@@ -303,6 +307,35 @@ function detectStraights(cards: Card[], gameRank: GameRank, wildcards: Card[], s
             cards: [...selected, ...wildcards.slice(0, missing)],
             strengthRank: window.strengthRank,
           });
+        }
+      }
+
+      if (wildcards.length > 0) {
+        for (const wildcardRank of window.ranks) {
+          const replacementOptions: Card[][] = [];
+          let replacementMissing = 1;
+
+          for (const rank of window.ranks) {
+            if (rank === wildcardRank) {
+              continue;
+            }
+
+            const options = suit === undefined ? rankCards(cards, rank, gameRank) : suitedRankCards(cards, rank, suit, gameRank);
+            if (options.length === 0) {
+              replacementMissing += 1;
+            } else {
+              replacementOptions.push(options);
+            }
+          }
+
+          if (replacementMissing <= wildcards.length && replacementOptions.length > 0) {
+            for (const selected of cartesianPick(replacementOptions)) {
+              candidates.push({
+                cards: [...selected, ...wildcards.slice(0, replacementMissing)],
+                strengthRank: window.strengthRank,
+              });
+            }
+          }
         }
       }
     }
