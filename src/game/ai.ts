@@ -1,6 +1,7 @@
 import { isHeartRankWild, rankStrength, type Card, type GameRank } from "../engine/cards";
 import { detectGroups, type CardGroup } from "../engine/groups";
 import { canBeatPlay, playPower } from "./playRules";
+import { evaluateAiRole } from "../ai/tactics/roleEvaluator";
 import {
   assertActionDoesNotBreakProtectedGroupsFromAnalysis,
   assessProtectedGroupUseFromAnalysis,
@@ -145,19 +146,7 @@ const TOP_STRAIGHT_RANKS = ["A", "K", "Q", "J", "10"] as const;
 type TopStraightRank = (typeof TOP_STRAIGHT_RANKS)[number];
 
 export function classifyAiRole(hand: Card[], gameRank: GameRank): AiRole {
-  const groups = detectGroups(hand, gameRank);
-  const powerCount = powerResourceCount(hand, gameRank);
-  const controlScore = controlResourceScore(hand, groups, gameRank);
-
-  if (powerCount >= 3 || controlScore >= 2) {
-    return "attacker";
-  }
-
-  if (powerCount <= 1 && controlScore < 2) {
-    return "support";
-  }
-
-  return "balanced";
+  return evaluateAiRole({ hand, gameRank }).role;
 }
 
 export function chooseAiAction(input: AiDecisionInput): AiAction {
