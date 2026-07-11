@@ -204,6 +204,29 @@ it("uses a heart-rank wildcard to complete a straight gap", () => {
   expect(straight?.wildcards).toContain(wildcard);
 });
 
+it("allows a wildcard straight to replace an available natural card", () => {
+  const wildcard = suited("9", "hearts");
+  const naturalStraight = [
+    suited("A", "spades"),
+    suited("K", "clubs"),
+    suited("Q", "diamonds"),
+    suited("J", "spades"),
+    suited("10", "clubs"),
+  ];
+  const naturalIds = new Set(naturalStraight.map((card) => card.id));
+
+  const replacement = detectGroups([...naturalStraight, wildcard], "9").find((group) =>
+    group.type === "straight" &&
+    group.cards.includes(wildcard) &&
+    group.cards.filter((card) => naturalIds.has(card.id)).length === 4,
+  );
+
+  expect(replacement?.wildcards).toContain(wildcard);
+  expect(replacement?.cards.some((card) => naturalIds.has(card.id) === false && card.id !== wildcard.id)).toBe(false);
+  expect(replacement?.cards.some((card) => naturalIds.has(card.id))).toBe(true);
+  expect(replacement?.cards.filter((card) => naturalIds.has(card.id))).toHaveLength(4);
+});
+
 it("uses a heart-rank wildcard to complete a straight-flush gap", () => {
   const wildcard = suited("9", "hearts");
   const cards = [suited("A", "spades"), suited("K", "spades"), suited("J", "spades"), suited("10", "spades"), wildcard];

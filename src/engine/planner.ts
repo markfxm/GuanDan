@@ -225,7 +225,6 @@ function selectBestCover(
   );
   const protectedStates = protectedBombs.map((bomb) => initialProtectedBombState(bomb));
   const entries = sortedCandidates(candidates, archetype)
-    .filter((group) => preservesNaturalStructures(group, cards, gameRank))
     .map((group): CandidateEntry | undefined => {
       let mask = 0;
 
@@ -293,10 +292,14 @@ function selectBestCover(
     }
 
     const nextCardIndex = firstOpenCardIndex(usedMask, cards.length);
+    const remainingCards = cards.filter((_, index) => (usedMask & (1 << index)) === 0);
     let best: CoverResult | undefined;
 
     for (const entry of entriesByFirstOpenCard[nextCardIndex]) {
       if ((entry.mask & usedMask) !== 0) {
+        continue;
+      }
+      if (!preservesNaturalStructures(entry.group, remainingCards, gameRank)) {
         continue;
       }
 

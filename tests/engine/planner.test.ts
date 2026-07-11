@@ -189,6 +189,28 @@ it("keeps a natural bomb intact instead of splitting it into a full-house", () =
   expect(fullHouse).toBeUndefined();
 });
 
+it("uses a remaining pair after a straight consumes one card from its original triple", () => {
+  const hand = [
+    suited("10", "spades"),
+    suited("J", "clubs"),
+    suited("Q", "diamonds"),
+    suited("K", "spades"),
+    suited("A", "clubs"),
+    suited("K", "clubs"),
+    suited("K", "diamonds"),
+    suited("7", "spades"),
+    suited("7", "clubs"),
+    suited("7", "diamonds"),
+  ];
+
+  const plan = generatePlans(hand, "2", 1)[0];
+  const fullHouse = plan?.groups.find((group) => group.type === "full-house");
+
+  expect(plan?.groups.some((group) => group.type === "straight")).toBe(true);
+  expect(fullHouse?.cards.filter((card) => card.rank === "K")).toHaveLength(2);
+  expect(fullHouse?.cards.filter((card) => card.rank === "7")).toHaveLength(3);
+});
+
 it("keeps 778899 together as a consecutive-pairs wood board in linked plans", () => {
   const woodBoardCards = [
     suited("9", "spades"),
@@ -313,9 +335,9 @@ it("selects the strict lexicographic optimum for the screenshot hand in linked p
     .sort();
 
   expect(quality.protectedLoss).toBe(0);
-  expect(quality.lowSingleCount).toBe(2);
-  expect(straightRankSets?.sort()).toEqual(["3,4,5,6,7", "4,5,6,7,8"]);
-  expect(lowSuitedSingles).toEqual(["4", "9"]);
+  expect(quality.lowSingleCount).toBe(0);
+  expect(straightRankSets?.sort()).toEqual(["3,4,5,6,7", "5,6,7,8,9"]);
+  expect(lowSuitedSingles).toEqual([]);
   expect(usedIds.sort()).toEqual(hand.map((card) => card.id).sort());
   expect(new Set(usedIds).size).toBe(hand.length);
 });
