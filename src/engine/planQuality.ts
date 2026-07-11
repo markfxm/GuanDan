@@ -1,5 +1,6 @@
 import { isHeartRankWild, type Card, type GameRank } from "./cards";
 import { detectGroups, type CardGroup } from "./groups";
+import { isLegalBombReduction as evaluateLegalBombReduction } from "../ai/policy/powerGroupPolicy";
 
 export type PlanQuality = {
   protectedLoss: number;
@@ -52,52 +53,7 @@ export function isLegalBombReduction(
   allGroups: CardGroup[],
   gameRank: GameRank,
 ): boolean {
-  if (!isNaturalSameRankBomb(sourceBomb, gameRank) || consumingGroup.type !== "straight") {
-    return false;
-  }
-
-  const sourceBombIds = new Set(sourceBomb.cards.map((card) => card.id));
-  const consumedCards = consumingGroup.cards.filter((card) => sourceBombIds.has(card.id));
-  if (consumedCards.length === 0) {
-    return false;
-  }
-
-  if (allGroups.some((group) => group.type === "straight-flush" && sameCardSet(group, consumingGroup))) {
-    return false;
-  }
-
-  if (sourceBomb.cards.length >= 5) {
-    return consumedCards.length <= sourceBomb.cards.length - 4;
-  }
-
-  if (sourceBomb.cards.length !== 4 || consumedCards.length !== 1) {
-    return false;
-  }
-
-  const otherStraightCards = consumingGroup.cards.filter((card) => !sourceBombIds.has(card.id));
-  if (otherStraightCards.length !== 4) {
-    return false;
-  }
-
-  const consumingGroupKey = groupIdentity(consumingGroup);
-
-  for (const card of otherStraightCards) {
-    if (card.kind !== "suited" || isHeartRankWild(card, gameRank)) {
-      return false;
-    }
-
-    for (const group of allGroups) {
-      if (!LOOSE_SINGLE_BLOCKING_TYPES.has(group.type) || groupIdentity(group) === consumingGroupKey) {
-        continue;
-      }
-
-      if (group.cards.some((groupCard) => groupCard.id === card.id)) {
-        return false;
-      }
-    }
-  }
-
-  return true;
+  return evaluateLegalBombReduction(sourceBomb, consumingGroup, allGroups, gameRank);
 }
 
 export function measurePlanQuality(

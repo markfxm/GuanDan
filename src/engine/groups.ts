@@ -52,6 +52,16 @@ const GROUP_PURPOSES: Record<GroupType, GroupPurpose> = {
   "joker-bomb": "recovery",
 };
 
+let detectGroupsCallCount = 0;
+
+export function resetDetectGroupsCallCount(): void {
+  detectGroupsCallCount = 0;
+}
+
+export function getDetectGroupsCallCount(): number {
+  return detectGroupsCallCount;
+}
+
 function groupId(type: GroupType, cards: Card[]): string {
   return `${type}:${cards
     .map((card) => card.id)
@@ -131,6 +141,7 @@ function collectSuitedByRank(cards: Card[]): RankedCards[] {
 }
 
 export function detectGroups(cards: Card[], gameRank: GameRank): CardGroup[] {
+  detectGroupsCallCount += 1;
   const groups: CardGroup[] = cards.map((card) => createGroup("single", [card], gameRank, card.rank));
   const groupIndexById = new Map(groups.map((group, index) => [group.id, index]));
   const wildcards = sortedCards(cards.filter((card) => isHeartRankWild(card, gameRank)));

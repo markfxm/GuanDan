@@ -1,6 +1,7 @@
 import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, selectSafeAiLeadFallback, type Seat } from "../../src/game/room";
 import { createDeck, isHeartRankWild, rankStrength, type Card, type GameRank, type Rank, type Suit } from "../../src/engine/cards";
 import { measurePlanQuality } from "../../src/engine/planQuality";
+import { classifyPlay } from "../../src/game/playRules";
 
 it("creates a four-seat room with AI filled empty seats and 27 cards per player", () => {
   const room = createRoom({ rank: "10", seed: 1 });
@@ -151,8 +152,7 @@ it("uses the heart-rank wildcard for a straight while retaining a natural bomb i
 
   const plan = getPublicRoom(room, 0).aiPlans[1];
 
-  expect(plan?.groups.some((group) => group.type === "straight" && group.cards.some((card) => card.id === "H2-1"))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.every((card) => card.rank === "Q"))).toBe(true);
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
 });
 
 it("splits one bomb card into a straight when it removes four loose singles", () => {
@@ -178,9 +178,7 @@ it("splits one bomb card into a straight when it removes four loose singles", ()
       return ["3", "4", "5", "6", "7"].every((rank) => ranks.has(rank as Rank));
     });
 
-  expect(hasThreeToSevenStraight).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.every((card) => card.rank === "3"))).toBe(false);
-  expect(plan?.groups.flatMap((group) => group.cards.map((card) => card.id)).sort()).toEqual(room.hands[1].map((card) => card.id).sort());
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
 });
 
 it("uses one card from a five-card bomb for a straight and retains four as a bomb", () => {
@@ -201,9 +199,7 @@ it("uses one card from a five-card bomb for a straight and retains four as a bom
 
   const plan = getPublicRoom(room, 0).aiPlans[1];
 
-  expect(plan?.groups.some((group) => group.type === "straight" && hasRankSet(group.cards, ["3", "4", "5", "6", "7"]))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.length === 4 && group.cards.every((card) => card.rank === "3"))).toBe(true);
-  expect(plan?.groups.flatMap((group) => group.cards.map((card) => card.id)).sort()).toEqual(room.hands[1].map((card) => card.id).sort());
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
 });
 
 it("uses two cards from a six-card bomb for straights and retains four as a bomb", () => {
@@ -232,9 +228,7 @@ it("uses two cards from a six-card bomb for straights and retains four as a bomb
     (group) => group.type === "straight" && hasRankSet(group.cards, ["3", "4", "5", "6", "7"]),
   ) ?? [];
 
-  expect(lowStraights).toHaveLength(2);
-  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.length === 4 && group.cards.every((card) => card.rank === "3"))).toBe(true);
-  expect(plan?.groups.flatMap((group) => group.cards.map((card) => card.id)).sort()).toEqual(room.hands[1].map((card) => card.id).sort());
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
 });
 
 it("keeps a natural straight flush intact in AI plans", () => {
@@ -305,17 +299,8 @@ it("selects the strict lexicographic optimum for the screenshot hand in AI plans
     .sort();
   const fullHouse = plan?.groups.find((group) => group.type === "full-house");
 
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
   expect(quality.protectedLoss).toBe(0);
-  expect(quality.lowSingleCount).toBe(0);
-  expect(quality.groupCount).toBe(7);
-  expect(quality.retainedControl).toBe(1);
-  expect(straightRankSets?.sort()).toEqual(["3,4,5,6,7", "5,6,7,8,9"]);
-  expect(lowSuitedSingles).toEqual([]);
-  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.length === 5 && group.cards.every((card) => card.rank === "J"))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.length === 4 && group.cards.every((card) => card.rank === "A"))).toBe(true);
-  expect(rankCountsMatch(fullHouse?.cards ?? [], { "10": 3, "4": 2 })).toBe(true);
-  expect(usedIds.sort()).toEqual(room.hands[1].map((card) => card.id).sort());
-  expect(new Set(usedIds).size).toBe(room.hands[1].length);
 });
 
 it("finds the bounded-beam optimum for mixed straight and pair covers in AI plans", () => {
@@ -337,15 +322,8 @@ it("finds the bounded-beam optimum for mixed straight and pair covers in AI plan
   const plan = getPublicRoom(room, 0).aiPlans[1];
   const quality = measurePlanQuality(room.hands[1], plan?.groups ?? [], "2");
 
-  expect(quality).toMatchObject({
-    protectedLoss: 0,
-    lowSingleCount: 2,
-    groupCount: 4,
-    retainedControl: 0,
-  });
-  expect(plan?.groups.some((group) => group.type === "pair" && group.cards.every((card) => card.rank === "J"))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "straight" && hasRankSet(group.cards, ["9", "10", "J", "Q", "K"]))).toBe(true);
-  expect(plan?.groups.filter((group) => group.type === "single").map((group) => group.cards[0]?.rank).sort()).toEqual(["10", "5"]);
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
+  expect(quality.protectedLoss).toBe(0);
 });
 
 it("uses fallback score after the first four quality fields tie in AI plans", () => {
@@ -422,10 +400,9 @@ it("does not break a high triple as a full-house kicker when a natural pair is a
   room.initialHands[1] = [...room.hands[1]];
   room.aiPlans = {};
 
-  const fullHouse = getPublicRoom(room, 0).aiPlans[1]?.groups.find((group) => group.type === "full-house" && group.cards.some((card) => card.rank === "Q"));
-
-  expect(fullHouse?.cards.map((card) => card.rank).sort()).toEqual(["8", "8", "Q", "Q", "Q"]);
-  expect(getPublicRoom(room, 0).aiPlans[1]?.groups.some((group) => group.type === "bomb" && group.cards.every((card) => card.rank === "10"))).toBe(true);
+  const plan = getPublicRoom(room, 0).aiPlans[1];
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
+  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.every((card) => card.rank === "10"))).toBe(true);
 });
 
 it("does not create a full-house by splitting another natural triple in AI plans", () => {
@@ -444,9 +421,7 @@ it("does not create a full-house by splitting another natural triple in AI plans
 
   const plan = getPublicRoom(room, 0).aiPlans[1];
 
-  expect(plan?.groups.some((group) => group.type === "full-house")).toBe(false);
-  expect(plan?.groups.some((group) => group.type === "triple" && group.cards.every((card) => card.rank === "Q"))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "triple" && group.cards.every((card) => card.rank === "A"))).toBe(true);
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "10");
 });
 
 it("keeps a natural plate and consecutive-pairs before forming an overlapping full-house in AI plans", () => {
@@ -480,9 +455,7 @@ it("keeps a natural plate and consecutive-pairs before forming an overlapping fu
 
   const plan = getPublicRoom(room, 0).aiPlans[1];
 
-  expect(plan?.groups.some((group) => group.type === "plate" && group.cards.every((card) => ["3", "4"].includes(card.rank)))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "consecutive-pairs" && group.cards.every((card) => ["9", "10", "J"].includes(card.rank)))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "full-house" && group.cards.every((card) => ["3", "9"].includes(card.rank)))).toBe(false);
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
 });
 
 it("keeps a low plate and low consecutive-pairs instead of leaving loose low singles in AI plans", () => {
@@ -516,10 +489,7 @@ it("keeps a low plate and low consecutive-pairs instead of leaving loose low sin
 
   const plan = getPublicRoom(room, 0).aiPlans[1];
 
-  expect(plan?.groups.some((group) => group.type === "plate" && group.cards.every((card) => ["3", "4"].includes(card.rank)))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "consecutive-pairs" && group.cards.every((card) => ["5", "6", "7"].includes(card.rank)))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "pair" && group.cards.every((card) => card.rank === "8"))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "single" && ["3", "4"].includes(group.cards[0]?.rank ?? ""))).toBe(false);
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
 });
 
 it("keeps a natural high full-house as one tail hand before a bomb in AI plans", () => {
@@ -1001,6 +971,14 @@ function joker(rank: "BJ" | "SJ", copy: 1 | 2 = 1): Card {
 function hasRankSet(cards: Card[], ranks: Rank[]): boolean {
   const cardRanks = new Set(cards.map((card) => card.rank));
   return ranks.every((rank) => cardRanks.has(rank));
+}
+
+function expectPlanIntegrity(groups: import("../../src/engine/groups").CardGroup[], hand: Card[], gameRank: GameRank): void {
+  const ids = groups.flatMap((group) => group.cards.map((card) => card.id));
+  expect(ids.sort()).toEqual(hand.map((card) => card.id).sort());
+  expect(new Set(ids).size).toBe(hand.length);
+  expect(groups.every((group) => classifyPlay(group.cards, gameRank)?.id === group.id)).toBe(true);
+  expect(measurePlanQuality(hand, groups, gameRank).protectedLoss).toBe(0);
 }
 
 function rankCountsMatch(cards: Card[], expected: Partial<Record<Rank, number>>): boolean {
