@@ -131,6 +131,21 @@ it("detects consecutive pairs from three consecutive pairs", () => {
   expect(group?.cards.map((card) => card.id).sort()).toEqual(cards.map((card) => card.id).sort());
 });
 
+it("detects AA2233 as low consecutive pairs", () => {
+  const cards = [
+    suited("A", "spades"),
+    suited("A", "clubs"),
+    suited("2", "spades"),
+    suited("2", "diamonds"),
+    suited("3", "spades"),
+    suited("3", "clubs"),
+  ];
+
+  const group = detectGroups(cards, "10").find((candidate) => candidate.type === "consecutive-pairs");
+
+  expect(group?.cards.map((card) => card.id).sort()).toEqual(cards.map((card) => card.id).sort());
+});
+
 it("detects plates from two consecutive triples", () => {
   const cards = [
     suited("A", "spades"),
@@ -187,6 +202,29 @@ it("uses a heart-rank wildcard to complete a straight gap", () => {
 
   expect(straight?.cards).toContain(wildcard);
   expect(straight?.wildcards).toContain(wildcard);
+});
+
+it("allows a wildcard straight to replace an available natural card", () => {
+  const wildcard = suited("9", "hearts");
+  const naturalStraight = [
+    suited("A", "spades"),
+    suited("K", "clubs"),
+    suited("Q", "diamonds"),
+    suited("J", "spades"),
+    suited("10", "clubs"),
+  ];
+  const naturalIds = new Set(naturalStraight.map((card) => card.id));
+
+  const replacement = detectGroups([...naturalStraight, wildcard], "9").find((group) =>
+    group.type === "straight" &&
+    group.cards.includes(wildcard) &&
+    group.cards.filter((card) => naturalIds.has(card.id)).length === 4,
+  );
+
+  expect(replacement?.wildcards).toContain(wildcard);
+  expect(replacement?.cards.some((card) => naturalIds.has(card.id) === false && card.id !== wildcard.id)).toBe(false);
+  expect(replacement?.cards.some((card) => naturalIds.has(card.id))).toBe(true);
+  expect(replacement?.cards.filter((card) => naturalIds.has(card.id))).toHaveLength(4);
 });
 
 it("uses a heart-rank wildcard to complete a straight-flush gap", () => {

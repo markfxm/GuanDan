@@ -11,7 +11,154 @@ const card5: Card = { id: "C5-1", kind: "suited", rank: "5", suit: "clubs", copy
 afterEach(() => {
   delete (globalThis as { __GUANDAN_AI_PAUSE_MS__?: number }).__GUANDAN_AI_PAUSE_MS__;
   delete (globalThis as { __GUANDAN_AI_LEAD_PAUSE_MS__?: number }).__GUANDAN_AI_LEAD_PAUSE_MS__;
+  delete (globalThis as { __GUANDAN_BOMB_EFFECT_MS__?: number }).__GUANDAN_BOMB_EFFECT_MS__;
+  delete (globalThis as { __GUANDAN_FLAG_LOWER_MS__?: number }).__GUANDAN_FLAG_LOWER_MS__;
   vi.restoreAllMocks();
+});
+
+it("defaults new rooms to rank 2 and does not render the game information sidebar", async () => {
+  mockFetchQueue([{ room: createRoom({ rank: "2" }) }, { plans: [] }]);
+
+  render(<App />);
+
+  expect(screen.getByLabelText("当前级牌")).toHaveValue("2");
+  expect(screen.queryByRole("heading", { name: "牌局信息" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /开房/ }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+    "/api/rooms",
+    expect.objectContaining({
+      body: JSON.stringify({ rank: "2", pendingTributeItems: [] }),
+    }),
+  ));
+});
+
+it("shows low-card flags only for players holding one through nine cards", async () => {
+  const room = createRoom({
+    players: [
+      { seat: 0, name: "玩家", isAI: false, handCount: 0, team: 0 },
+      { seat: 1, name: "AI 1", isAI: true, handCount: 9, team: 1 },
+      { seat: 2, name: "AI 2", isAI: true, handCount: 10, team: 0 },
+      { seat: 3, name: "AI 3", isAI: true, handCount: 1, team: 1 },
+    ],
+  });
+  mockFetchQueue([{ room }, { plans: [] }]);
+
+  render(<App />);
+  fireEvent.click(screen.getAllByRole("button")[0]);
+
+  expect(await screen.findByTestId("low-card-flag-1")).toHaveTextContent("还剩下 9 张了");
+  expect(screen.getByTestId("low-card-flag-3")).toHaveTextContent("还剩下 1 张了");
+  expect(screen.queryByTestId("low-card-flag-0")).not.toBeInTheDocument();
+  expect(screen.queryByTestId("low-card-flag-2")).not.toBeInTheDocument();
+});
+
+it("updates a low-card flag after a successful real-time play", async () => {
+  const afterPlay = createRoom({
+    currentTurn: 1,
+    humanHand: [cardK, cardQ],
+    players: [
+      { seat: 0, name: "玩家", isAI: false, handCount: 2, team: 0 },
+      { seat: 1, name: "AI 1", isAI: true, handCount: 27, team: 1 },
+      { seat: 2, name: "AI 2", isAI: true, handCount: 27, team: 0 },
+      { seat: 3, name: "AI 3", isAI: true, handCount: 27, team: 1 },
+    ],
+    trick: {
+      leadSeat: 0,
+      lastPlay: group([cardA]),
+      lastPlaySeat: 0,
+      passSeats: [],
+      plays: [{ seat: 0, action: "play", group: group([cardA]) }],
+    },
+    playHistory: [{ seat: 0, action: "play", group: group([cardA]) }],
+  });
+  mockFetchQueue([{ room: createRoom() }, { plans: [] }, { room: afterPlay }]);
+
+  render(<App />);
+  fireEvent.click(screen.getAllByRole("button")[0]);
+  expect(await screen.findByTestId("low-card-flag-0")).toHaveTextContent("还剩下 3 张了");
+
+  fireEvent.click(screen.getByTestId("hand-card-SA-1"));
+  fireEvent.click(screen.getByRole("button", { name: "出牌" }));
+
+  expect(await screen.findByTestId("low-card-flag-0")).toHaveTextContent("还剩下 2 张了");
+  expect(screen.queryByTestId("bomb-effect")).not.toBeInTheDocument();
+});
+
+it("lowers and removes a low-card flag when the player goes out", async () => {
+  (globalThis as { __GUANDAN_FLAG_LOWER_MS__?: number }).__GUANDAN_FLAG_LOWER_MS__ = 40;
+  const initialRoom = createRoom({
+    humanHand: [cardA],
+    players: [
+      { seat: 0, name: "玩家", isAI: false, handCount: 1, team: 0 },
+      { seat: 1, name: "AI 1", isAI: true, handCount: 27, team: 1 },
+      { seat: 2, name: "AI 2", isAI: true, handCount: 27, team: 0 },
+      { seat: 3, name: "AI 3", isAI: true, handCount: 27, team: 1 },
+    ],
+  });
+  const afterPlay = createRoom({
+    currentTurn: 1,
+    humanHand: [],
+    finishOrder: [0],
+    players: [
+      { seat: 0, name: "玩家", isAI: false, handCount: 0, team: 0 },
+      { seat: 1, name: "AI 1", isAI: true, handCount: 27, team: 1 },
+      { seat: 2, name: "AI 2", isAI: true, handCount: 27, team: 0 },
+      { seat: 3, name: "AI 3", isAI: true, handCount: 27, team: 1 },
+    ],
+    playHistory: [{ seat: 0, action: "play", group: group([cardA]) }],
+  });
+  mockFetchQueue([{ room: initialRoom }, { plans: [] }, { room: afterPlay }]);
+
+  render(<App />);
+  fireEvent.click(screen.getAllByRole("button")[0]);
+  await screen.findByTestId("low-card-flag-0");
+  fireEvent.click(screen.getByTestId("hand-card-SA-1"));
+  fireEvent.click(screen.getByRole("button", { name: "出牌" }));
+
+  await waitFor(() => expect(screen.getByTestId("low-card-flag-0")).toHaveClass("lowering"));
+  await waitFor(() => expect(screen.queryByTestId("low-card-flag-0")).not.toBeInTheDocument());
+});
+
+it("shows a two-second table effect for a newly played bomb", async () => {
+  (globalThis as { __GUANDAN_AI_PAUSE_MS__?: number }).__GUANDAN_AI_PAUSE_MS__ = 100_000;
+  (globalThis as { __GUANDAN_BOMB_EFFECT_MS__?: number }).__GUANDAN_BOMB_EFFECT_MS__ = 50;
+  const initialRoom = createRoom({ currentTurn: 1 });
+  const bomb = group([cardA], "bomb");
+  const afterBomb = createRoom({
+    currentTurn: 2,
+    trick: {
+      leadSeat: 1,
+      lastPlay: bomb,
+      lastPlaySeat: 1,
+      passSeats: [],
+      plays: [{ seat: 1, action: "play", group: bomb }],
+    },
+    playHistory: [{ seat: 1, action: "play", group: bomb }],
+  });
+  mockFetchQueue([{ room: initialRoom }, { room: afterBomb }]);
+
+  render(<App />);
+  fireEvent.click(screen.getAllByRole("button")[0]);
+  await screen.findByText("Current Trick");
+  fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+
+  expect(await screen.findByTestId("bomb-effect")).toHaveClass("bomb-effect-seat-1");
+  await waitFor(() => expect(screen.queryByTestId("bomb-effect")).not.toBeInTheDocument());
+});
+
+it("does not replay a bomb effect from pre-existing room history", async () => {
+  const bomb = group([cardA], "straight-flush");
+  const room = createRoom({
+    playHistory: [{ seat: 2, action: "play", group: bomb }],
+  });
+  mockFetchQueue([{ room }, { plans: [] }]);
+
+  render(<App />);
+  fireEvent.click(screen.getAllByRole("button")[0]);
+  await screen.findByText("Current Trick");
+
+  expect(screen.queryByTestId("bomb-effect")).not.toBeInTheDocument();
 });
 
 it("opens a local room and renders AI seats plus the human hand", async () => {
@@ -64,7 +211,7 @@ it("keeps current trick plays visible and lets next step advance one AI action",
       ],
     },
   });
-  mockFetchQueue([{ room: createRoom() }, { plans: [] }, { room: afterHuman }, { plans: [] }, { room: afterAiStep }, { plans: [] }]);
+  mockFetchQueue([{ room: createRoom() }, { plans: [] }, { room: afterHuman }, { room: afterAiStep }]);
 
   render(<App />);
   fireEvent.click(screen.getByRole("button", { name: /开房/ }));
@@ -101,7 +248,7 @@ it("auto-advances after the configured AI pause on AI turns", async () => {
     currentTurn: 0,
     trick: { leadSeat: 0, passSeats: [], plays: [] },
   });
-  mockFetchQueue([{ room: createRoom() }, { plans: [] }, { room: afterHuman }, { plans: [] }, { room: afterAiStep }, { plans: [] }]);
+  mockFetchQueue([{ room: createRoom() }, { plans: [] }, { room: afterHuman }, { room: afterAiStep }, { plans: [] }]);
 
   render(<App />);
   fireEvent.click(screen.getByRole("button", { name: /开房/ }));
@@ -128,7 +275,45 @@ it("shows a turn countdown while waiting for AI to follow", async () => {
   render(<App />);
   fireEvent.click(screen.getAllByRole("button")[0]);
 
-  expect(await screen.findByText("倒计时 10 秒")).toBeInTheDocument();
+  expect(await screen.findByText("倒计时 4 秒")).toBeInTheDocument();
+});
+
+it("does not request new human plans after passing into an AI turn", async () => {
+  const initialRoom = createRoom({
+    currentTurn: 0,
+    trick: {
+      leadSeat: 3,
+      lastPlay: group([card5]),
+      lastPlaySeat: 3,
+      passSeats: [],
+      plays: [{ seat: 3, action: "play", group: group([card5]) }],
+    },
+  });
+  const afterPass = createRoom({
+    currentTurn: 1,
+    trick: {
+      leadSeat: 3,
+      lastPlay: group([card5]),
+      lastPlaySeat: 3,
+      passSeats: [0],
+      plays: [
+        { seat: 3, action: "play", group: group([card5]) },
+        { seat: 0, action: "pass" },
+      ],
+    },
+  });
+  mockFetchQueue([{ room: initialRoom }, { plans: [] }, { room: afterPass }, { plans: [] }]);
+
+  render(<App />);
+  fireEvent.click(screen.getAllByRole("button")[0]);
+  await screen.findByLabelText("黑桃A 1");
+  expect(planRequestCount()).toBe(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "过牌" }));
+  await screen.findByText("等待西位出牌，可停留观看或点下一步。");
+  await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+  expect(planRequestCount()).toBe(1);
 });
 
 it("uses the shorter lead pause after a trick clears for an AI first play", async () => {
@@ -148,7 +333,7 @@ it("uses the shorter lead pause after a trick clears for an AI first play", asyn
       plays: [{ seat: 3, action: "play", group: group([cardA]) }],
     },
   });
-  mockFetchQueue([{ room: leadRoom }, { plans: [] }, { room: afterAiStep }, { plans: [] }]);
+  mockFetchQueue([{ room: leadRoom }, { room: afterAiStep }, { plans: [] }]);
 
   render(<App />);
   fireEvent.click(screen.getAllByRole("button")[0]);
@@ -158,7 +343,7 @@ it("uses the shorter lead pause after a trick clears for an AI first play", asyn
 });
 
 it("renders settlement and starts the next room with the promoted rank", async () => {
-  mockFetchQueue([{ room: createRoom({ status: "finished", settlement: settlement() }) }, { plans: [] }, { room: createRoom({ rank: "K" }) }, { plans: [] }]);
+  mockFetchQueue([{ room: createRoom({ status: "finished", settlement: settlement() }) }, { room: createRoom({ rank: "K" }) }, { plans: [] }]);
 
   render(<App />);
   fireEvent.click(screen.getByRole("button", { name: /开房/ }));
@@ -194,7 +379,7 @@ it("shows finish ranking and next-round tribute in a settlement dialog", async (
       items: [{ payer: 2, receiver: 0 }],
     },
   });
-  mockFetchQueue([{ room: finishedRoom }, { plans: [] }, { room: nextRoom }, { plans: [] }]);
+  mockFetchQueue([{ room: finishedRoom }, { room: nextRoom }]);
 
   render(<App />);
   fireEvent.click(screen.getAllByRole("button")[0]);
@@ -247,27 +432,21 @@ it("renders a manual group tray and selects a whole manual group", async () => {
   expect(screen.getByTestId("manual-card-SK-1").closest(".manual-group-card")).toHaveClass("selected");
 });
 
-it("collapses advice and log sidebars with buttons and the Alt+H shortcut", async () => {
+it("collapses the remaining advice sidebar with its button and Alt+H", async () => {
   mockFetchQueue([{ room: createRoom() }, { plans: [] }]);
 
   render(<App />);
   fireEvent.click(screen.getAllByRole("button")[0]);
   await screen.findByTestId("manual-group-tray");
 
-  expect(screen.getByTestId("plans-column")).not.toHaveClass("collapsed");
-  expect(screen.getByTestId("explain-column")).not.toHaveClass("collapsed");
+  const plansColumn = screen.getByTestId("plans-column");
+  expect(plansColumn).not.toHaveClass("collapsed");
 
-  fireEvent.click(screen.getByRole("button", { name: "隐藏组牌建议" }));
-  expect(screen.getByTestId("plans-column")).toHaveClass("collapsed");
-  expect(screen.getByTestId("explain-column")).not.toHaveClass("collapsed");
+  fireEvent.click(within(plansColumn).getByRole("button"));
+  expect(plansColumn).toHaveClass("collapsed");
 
   fireEvent.keyDown(window, { key: "h", altKey: true });
-  expect(screen.getByTestId("plans-column")).toHaveClass("collapsed");
-  expect(screen.getByTestId("explain-column")).toHaveClass("collapsed");
-
-  fireEvent.keyDown(window, { key: "H", altKey: true });
-  expect(screen.getByTestId("plans-column")).not.toHaveClass("collapsed");
-  expect(screen.getByTestId("explain-column")).not.toHaveClass("collapsed");
+  expect(plansColumn).not.toHaveClass("collapsed");
 });
 
 it("shows finished place badges and hides pending trick placeholders for finished players", async () => {
@@ -340,6 +519,42 @@ it("opens a finished-round replay with perspective, playback speed, pause and re
   expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "暂停" }));
   expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument();
+});
+
+it("shows AI hand planning as the first replay step", async () => {
+  const room = createRoom({
+    status: "finished",
+    finishOrder: [1, 0, 3, 2],
+    replayHands: {
+      0: [],
+      1: [cardK, cardQ],
+      2: [],
+      3: [],
+    },
+    aiPlans: {
+      1: {
+        seat: 1,
+        name: "AI 最少手数组牌",
+        score: 88,
+        groups: [group([cardK, cardQ])],
+      },
+    },
+    playHistory: [{ seat: 1, action: "play", group: group([cardK]), trickIndex: 0 }],
+    settlement: settlement(),
+  });
+  mockFetchQueue([{ room }, { plans: [] }]);
+
+  render(<App />);
+  fireEvent.click(screen.getAllByRole("button")[0]);
+  const replayButton = await screen.findByTestId("replay-button");
+  await waitFor(() => expect(replayButton).toBeEnabled());
+
+  fireEvent.click(replayButton);
+  fireEvent.click(screen.getByTestId("replay-seat-button-1"));
+
+  expect(screen.getByTestId("replay-plan-groups")).toBeInTheDocument();
+  expect(screen.getByText(room.aiPlans[1]?.name ?? "")).toBeInTheDocument();
+  expect(screen.getByTestId("replay-step-count")).toHaveTextContent("1 / 2");
 });
 
 it("rotates replay table to north perspective and keeps same-trick plays visible until the next trick", async () => {
@@ -593,6 +808,7 @@ function createRoom(overrides: Partial<PublicRoom> = {}): PublicRoom {
     currentTrickIndex: 0,
     trick: { leadSeat: 0, passSeats: [], plays: [] },
     finishOrder: [],
+    aiPlans: {},
     playHistory: [],
     replayHands: {
       0: [cardA, cardK, cardQ],
@@ -609,10 +825,13 @@ function createRoom(overrides: Partial<PublicRoom> = {}): PublicRoom {
   };
 }
 
-function group(cards: Card[]): NonNullable<PublicRoom["trick"]["lastPlay"]> {
+function group(
+  cards: Card[],
+  type: NonNullable<PublicRoom["trick"]["lastPlay"]>["type"] = "single",
+): NonNullable<PublicRoom["trick"]["lastPlay"]> {
   return {
-    id: `single:${cards.map((card) => card.id).join(",")}`,
-    type: "single",
+    id: `${type}:${cards.map((card) => card.id).join(",")}`,
+    type,
     label: "单张",
     purpose: "risk",
     cards,
@@ -653,6 +872,10 @@ function mockFetchQueue(bodies: unknown[]) {
       json: async () => body,
     } as Response;
   });
+}
+
+function planRequestCount(): number {
+  return vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/plans").length;
 }
 
 function dragData(cardId = ""): DataTransfer {

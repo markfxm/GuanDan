@@ -3,12 +3,12 @@ import { detectGroups, type CardGroup } from "../engine/groups";
 
 const TYPE_PRIORITY: Record<CardGroup["type"], number> = {
   "joker-bomb": 10,
-  bomb: 9,
+  bomb: 7,
   "straight-flush": 8,
-  plate: 7,
+  plate: 6,
   "consecutive-pairs": 6,
   "full-house": 5,
-  straight: 4,
+  straight: 6,
   triple: 3,
   pair: 2,
   single: 1,

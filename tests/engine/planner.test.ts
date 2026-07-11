@@ -1,5 +1,6 @@
 import { createDeck, type Card, type Rank, type Suit } from "../../src/engine/cards";
 import { generatePlans } from "../../src/engine/planner";
+import { measurePlanQuality } from "../../src/engine/planQuality";
 
 function assertCompletePartition(cards: Card[], count = 5): void {
   const plans = generatePlans(cards, "10", count);
@@ -26,6 +27,18 @@ function suited(rank: Rank, suit: Suit, copy: 1 | 2 = 1): Card {
 
   if (card === undefined) {
     throw new Error(`Missing card ${suit} ${rank} #${copy}`);
+  }
+
+  return card;
+}
+
+function joker(rank: "BJ" | "SJ", copy: 1 | 2 = 1): Card {
+  const card = createDeck().find(
+    (candidate) => candidate.kind === "joker" && candidate.rank === rank && candidate.copy === copy,
+  );
+
+  if (card === undefined) {
+    throw new Error(`Missing joker ${rank} #${copy}`);
   }
 
   return card;
@@ -132,7 +145,7 @@ it("uses a heart-rank wildcard for a straight flush before pairing it with a sma
   expect(wildcardGroup?.cards.map((card) => card.id).sort()).toEqual(["H10-1", "S6-1", "S7-1", "S8-1", "S9-1"]);
 });
 
-it("uses a heart-rank wildcard for a straight flush before upgrading a small bomb", () => {
+it("keeps a protected wildcard bomb before using its wildcard in a straight flush", () => {
   const hand = [
     suited("2", "hearts"),
     suited("10", "spades"),
@@ -149,9 +162,12 @@ it("uses a heart-rank wildcard for a straight flush before upgrading a small bom
 
   const wildcardPlan = generatePlans(hand, "2", 5).find((plan) => plan.id === "wildcard");
   const wildcardGroup = wildcardPlan?.groups.find((group) => group.cards.some((card) => card.id === "H2-1"));
+  const usedIds = wildcardPlan?.groups.flatMap((group) => group.cards.map((card) => card.id)) ?? [];
 
-  expect(wildcardGroup?.type).toBe("straight-flush");
-  expect(wildcardGroup?.cards.map((card) => card.id).sort()).toEqual(["D10-2", "D8-1", "D9-1", "DQ-1", "H2-1"]);
+  expect(wildcardGroup?.type).toBe("bomb");
+  expect(wildcardGroup?.cards.filter((card) => card.rank === "10")).toHaveLength(4);
+  expect(usedIds.sort()).toEqual(hand.map((card) => card.id).sort());
+  expect(new Set(usedIds).size).toBe(hand.length);
 });
 
 it("keeps a natural bomb intact instead of splitting it into a full-house", () => {
@@ -173,6 +189,28 @@ it("keeps a natural bomb intact instead of splitting it into a full-house", () =
   expect(fullHouse).toBeUndefined();
 });
 
+it("uses a remaining pair after a straight consumes one card from its original triple", () => {
+  const hand = [
+    suited("10", "spades"),
+    suited("J", "clubs"),
+    suited("Q", "diamonds"),
+    suited("K", "spades"),
+    suited("A", "clubs"),
+    suited("K", "clubs"),
+    suited("K", "diamonds"),
+    suited("7", "spades"),
+    suited("7", "clubs"),
+    suited("7", "diamonds"),
+  ];
+
+  const plan = generatePlans(hand, "2", 1)[0];
+  const fullHouse = plan?.groups.find((group) => group.type === "full-house");
+
+  expect(plan?.groups.some((group) => group.type === "straight")).toBe(true);
+  expect(fullHouse?.cards.filter((card) => card.rank === "K")).toHaveLength(2);
+  expect(fullHouse?.cards.filter((card) => card.rank === "7")).toHaveLength(3);
+});
+
 it("keeps 778899 together as a consecutive-pairs wood board in linked plans", () => {
   const woodBoardCards = [
     suited("9", "spades"),
@@ -190,7 +228,7 @@ it("keeps 778899 together as a consecutive-pairs wood board in linked plans", ()
   expect(woodBoard?.cards.map((card) => card.id).sort()).toEqual(woodBoardCards.map((card) => card.id).sort());
 });
 
-it("maximizes linked structures with heart-rank wildcard on the uploaded 打 10 hand shape", () => {
+it("keeps protected wildcard bombs in the uploaded rank-10 hand shape", () => {
   const hand = [
     suited("10", "hearts"),
     suited("10", "diamonds"),
@@ -222,21 +260,98 @@ it("maximizes linked structures with heart-rank wildcard on the uploaded 打 10 
   ];
 
   const linkedPlan = generatePlans(hand, "10", 4).find((plan) => plan.id === "linked");
-  const woodBoards = linkedPlan?.groups.filter((group) => group.type === "consecutive-pairs") ?? [];
-  const straightFlushes = linkedPlan?.groups.filter((group) => group.type === "straight-flush") ?? [];
-  const straights = linkedPlan?.groups.filter((group) => group.type === "straight") ?? [];
+  const wildcardGroup = linkedPlan?.groups.find((group) => group.cards.some((card) => card.id === "H10-1"));
+  const usedIds = linkedPlan?.groups.flatMap((group) => group.cards.map((card) => card.id)) ?? [];
 
-  expect(woodBoards.some((group) => hasCardIds(group.cards, ["S2-1", "C2-1", "S3-1", "C3-1"]))).toBe(true);
-  expect(straightFlushes.some((group) => hasCardIds(group.cards, ["D4-1", "D5-1", "D6-1", "D7-1", "H10-1"]))).toBe(true);
-  expect(straights.some((group) => hasRanks(group.cards, ["10", "9", "8", "7", "6"]))).toBe(true);
+  expect(wildcardGroup?.type).toBe("bomb");
+  expect(usedIds.sort()).toEqual(hand.map((card) => card.id).sort());
+  expect(new Set(usedIds).size).toBe(hand.length);
 });
 
-function hasCardIds(cards: Card[], ids: string[]): boolean {
-  const cardIds = new Set(cards.map((card) => card.id));
-  return ids.every((id) => cardIds.has(id));
+it("does not leave a protected straight-flush as overlapping singles", () => {
+  const hand = [
+    suited("7", "spades"),
+    suited("6", "spades"),
+    suited("5", "spades"),
+    suited("4", "spades"),
+    suited("3", "spades"),
+    suited("A", "clubs"),
+  ];
+
+  const linkedPlan = generatePlans(hand, "10", 4).find((plan) => plan.id === "linked");
+
+  expect(linkedPlan?.groups.some(
+    (group) =>
+      group.type === "straight-flush" &&
+      hasRankSet(group.cards, ["3", "4", "5", "6", "7"]) &&
+      group.cards.every((card) => card.kind === "suited" && card.suit === "spades"),
+  )).toBe(true);
+  expect(linkedPlan?.groups.some(
+    (group) => group.type === "single" && ["3", "4", "5", "6", "7"].includes(group.cards[0]?.rank ?? ""),
+  )).toBe(false);
+});
+
+it("selects the strict lexicographic optimum for the screenshot hand in linked plans", () => {
+  const hand = [
+    joker("BJ"),
+    suited("A", "spades"),
+    suited("A", "clubs"),
+    suited("A", "hearts"),
+    suited("A", "diamonds"),
+    suited("K", "clubs"),
+    suited("K", "hearts"),
+    suited("J", "clubs"),
+    suited("J", "clubs", 2),
+    suited("J", "hearts"),
+    suited("J", "hearts", 2),
+    suited("J", "diamonds"),
+    suited("10", "clubs"),
+    suited("10", "clubs", 2),
+    suited("10", "hearts"),
+    suited("9", "spades"),
+    suited("8", "diamonds"),
+    suited("7", "clubs"),
+    suited("7", "hearts"),
+    suited("6", "clubs"),
+    suited("6", "hearts"),
+    suited("5", "spades"),
+    suited("5", "spades", 2),
+    suited("4", "clubs"),
+    suited("4", "clubs", 2),
+    suited("4", "hearts"),
+    suited("3", "clubs"),
+  ];
+
+  const linkedPlan = generatePlans(hand, "2", 4).find((plan) => plan.id === "linked");
+  const straightRankSets = linkedPlan?.groups
+    .filter((group) => group.type === "straight")
+    .map((group) => group.cards.map((card) => card.rank).sort().join(","));
+  const usedIds = linkedPlan?.groups.flatMap((group) => group.cards.map((card) => card.id)) ?? [];
+  const quality = measurePlanQuality(hand, linkedPlan?.groups ?? [], "2");
+  const lowSuitedSingles = linkedPlan?.groups
+    .filter((group) => group.type === "single" && group.cards[0]?.kind === "suited")
+    .map((group) => group.cards[0]?.rank)
+    .filter((rank): rank is Rank => rank !== undefined && ["10", "9", "8", "7", "6", "5", "4", "3", "2"].includes(rank))
+    .sort();
+
+  expect(quality.protectedLoss).toBe(0);
+  expect(quality.lowSingleCount).toBe(0);
+  expect(straightRankSets?.sort()).toEqual(["3,4,5,6,7", "5,6,7,8,9"]);
+  expect(lowSuitedSingles).toEqual([]);
+  expect(usedIds.sort()).toEqual(hand.map((card) => card.id).sort());
+  expect(new Set(usedIds).size).toBe(hand.length);
+});
+
+function rankCountsMatch(cards: Card[], expected: Partial<Record<Rank, number>>): boolean {
+  const counts = new Map<Rank, number>();
+  for (const card of cards) {
+    counts.set(card.rank as Rank, (counts.get(card.rank as Rank) ?? 0) + 1);
+  }
+
+  return Object.entries(expected).every(([rank, count]) => counts.get(rank as Rank) === count);
 }
 
-function hasRanks(cards: Card[], ranks: Rank[]): boolean {
+function hasRankSet(cards: Card[], ranks: Rank[]): boolean {
   const cardRanks = new Set(cards.map((card) => card.rank));
   return ranks.every((rank) => cardRanks.has(rank));
 }
