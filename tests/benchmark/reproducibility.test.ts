@@ -68,7 +68,7 @@ describe("AI benchmark reproducibility", () => {
   });
 
   it("keeps registered strategy runs deterministic across concurrency 1 and 2", async () => {
-    const options = { strategyA: "legacy-reference", strategyB: "legacy-reference", seeds: [1], paired: true, replayMode: "none" as const, timeoutMs: 1 };
+    const options = { strategyA: "legal-random", strategyB: "legal-greedy", seeds: [1], paired: false, replayMode: "none" as const, timeoutMs: 30_000 };
     const direct = await runBenchmark({ ...options, concurrency: 1 });
     const workers = await runBenchmark({ ...options, concurrency: 2 });
     expect(stripVolatile(workers.games)).toEqual(stripVolatile(direct.games));
