@@ -199,6 +199,36 @@ it.each(["http://127.0.0.1:5173", "http://localhost:5173"])(
   },
 );
 
+it("allows OPTIONS requests from a private LAN origin outside production", async () => {
+  await withApp(async (app) => {
+    const origin = "http://192.168.1.20:5173";
+    const response = await app.inject({ method: "OPTIONS", url: "/api/deal", headers: { origin } });
+
+    expect(response.statusCode).toBe(204);
+    expect(response.headers["access-control-allow-origin"]).toBe(origin);
+  });
+});
+
+it("does not allow a private LAN origin in production", async () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+
+  try {
+    await withApp(async (app) => {
+      const response = await app.inject({
+        method: "OPTIONS",
+        url: "/api/deal",
+        headers: { origin: "http://192.168.1.20:5173" },
+      });
+
+      expect(response.statusCode).toBe(204);
+      expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+    });
+  } finally {
+    process.env.NODE_ENV = previousNodeEnv;
+  }
+});
+
 it.each([null, {}, [null]])("rejects malformed plans cards %#", async (cards) => {
   await withApp(async (app) => {
     const response = await app.inject({ method: "POST", url: "/api/plans", payload: { rank: "10", cards } });

@@ -2,7 +2,7 @@
 
 import { buildApi } from "./api";
 
-const host = "127.0.0.1";
+const host = process.env.HOST ?? "0.0.0.0";
 const port = Number(process.env.PORT ?? 5174);
 const app = buildApi();
 

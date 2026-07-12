@@ -53,7 +53,7 @@ export function buildApi() {
     const origin = request.headers.origin;
     const requestOrigin = Array.isArray(origin) ? origin[0] : origin;
 
-    if (requestOrigin !== undefined && ALLOWED_ORIGINS.has(requestOrigin)) {
+    if (requestOrigin !== undefined && isAllowedOrigin(requestOrigin)) {
       reply.header("Access-Control-Allow-Origin", requestOrigin);
     }
 
@@ -260,6 +260,33 @@ export function buildApi() {
   });
 
   return app;
+}
+
+function isAllowedOrigin(origin: string): boolean {
+  return ALLOWED_ORIGINS.has(origin) || (process.env.NODE_ENV !== "production" && isLanDevOrigin(origin));
+}
+
+function isLanDevOrigin(origin: string): boolean {
+  let url: URL;
+
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+
+  return url.protocol === "http:" && url.port === "5173" && isPrivateIpv4Address(url.hostname);
+}
+
+function isPrivateIpv4Address(hostname: string): boolean {
+  const octets = hostname.split(".").map(Number);
+
+  if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
+    return false;
+  }
+
+  const [first, second] = octets;
+  return first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
 }
 
 function isValidOptionalInteger(value: unknown): value is number | undefined {
