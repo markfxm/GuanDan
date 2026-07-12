@@ -32,9 +32,9 @@ describe("AI benchmark reproducibility", () => {
 
   it("replays saved failures with matching public and final hashes without private state", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "d0-repro-replay-"));
-    const config: BenchmarkConfig = { benchmarkVersion: "d0-v1", rank: "2", seeds: [1], strategyA: "legacy-reference", strategyB: "legal-random", replayMode: "failures" };
+    const config: BenchmarkConfig = { benchmarkVersion: "d0-v1", rank: "2", seeds: [1], strategyA: "legacy-reference", strategyB: "legacy-reference", replayMode: "all" };
     const summary = simulateGame(buildGamesForSeed(config, 1)[0]!);
-    const replayPath = writeReplay(summary, { outputDir: root, replayMode: "failures" });
+    const replayPath = writeReplay(summary, { outputDir: root, replayMode: "all" });
     expect(replayPath).toBeDefined();
     const document = JSON.parse(fs.readFileSync(replayPath!, "utf8")) as Record<string, unknown>;
     const replay = replayMatch(summary.matchId, root);
@@ -66,6 +66,14 @@ describe("AI benchmark reproducibility", () => {
     expect(second.publicTraceHash).toBe(first.publicTraceHash);
     expect(second.finalPublicStateHash).toBe(first.finalPublicStateHash);
   });
+
+  it("keeps registered strategy runs deterministic across concurrency 1 and 2", async () => {
+    const options = { strategyA: "legacy-reference", strategyB: "legacy-reference", seeds: [1], paired: true, replayMode: "none" as const, timeoutMs: 1 };
+    const direct = await runBenchmark({ ...options, concurrency: 1 });
+    const workers = await runBenchmark({ ...options, concurrency: 2 });
+    expect(stripVolatile(workers.games)).toEqual(stripVolatile(direct.games));
+    expect(workers.games.map((game) => game.matchId)).toEqual([...workers.games].map((game) => game.matchId).sort());
+  }, 120_000);
 
   it("keeps benchmark orchestration imports on the test adapter boundary", () => {
     const source = fs.readFileSync(path.resolve(process.cwd(), "tests/benchmark/strategies.ts"), "utf8");

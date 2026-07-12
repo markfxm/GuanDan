@@ -15,6 +15,7 @@ Added `tests/benchmark/reproducibility.test.ts` only; no production (`src`) file
 - `npx vitest run tests/benchmark --reporter=dot`: 9 files, 45 tests passed.
 - `npx tsc --noEmit`: passed.
 - `git diff --check`: passed.
+- Registered replay test (`-t "replays saved"`): passed; full rerun remains pending due benchmark worker runtime.
 
 The 50-seed merge regression runs one 200-seed paired manifest and four paired 50-seed manifests, then compares stable game summaries and both public/final hash maps after volatile-field stripping.
 
@@ -28,8 +29,8 @@ npx tsx scripts/runAiBenchmark.ts --strategy-a unified-current --strategy-b lega
 npx tsx scripts/runAiBenchmark.ts --strategy-a unified-current --strategy-b legacy-reference --seeds 1-20 --replay failures --concurrency 2 --timeout-ms 120000 --output artifacts/ai-benchmark-smoke-unified-legacy120.json
 ```
 
-Each command emits 160 games (20 seeds × 8 paired games). Final completed/error counts are recorded below after each command finishes. Aggregate ignored artifacts are in `artifacts/ai-benchmark-smoke.json` and `.md`.
+Each command emits 160 games (20 seeds × 8 paired games). Smoke results are **PENDING**: no 120-second command produced a final report before the bounded execution window, so no completed/error counts are claimed here. Aggregate ignored artifacts are in `artifacts/ai-benchmark-smoke.json` and `.md`.
 
 ## Concerns
 
-- The real-strategy smoke matrix is intentionally run with a 120-second per-task timeout and may take a long wall-clock time at concurrency 2.
+- The real-strategy smoke matrix is intentionally run with a 120-second per-task timeout and may take a long wall-clock time at concurrency 2; rerun to completion before publishing baseline counts.
