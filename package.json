@@ -10,6 +10,8 @@
     "test:watch": "vitest",
     "build": "tsc --noEmit && vite build",
     "simulate:ai": "tsx scripts/runUnifiedAiSimulation.ts",
+    "benchmark:ai": "tsx scripts/runAiBenchmark.ts",
+    "benchmark:replay": "tsx scripts/replayAiBenchmark.ts",
     "test:ai-performance": "vitest run tests/performance/aiHotPath.test.ts"
   },
   "dependencies": {
