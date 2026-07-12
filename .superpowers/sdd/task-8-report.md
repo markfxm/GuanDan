@@ -20,16 +20,16 @@ The 50-seed merge regression runs one 200-seed paired manifest and four paired 5
 
 ## Smoke baselines
 
-Commands (all paired default, seeds `1-20`, replay mode `failures`, concurrency `2`, timeout `1000ms`):
+Commands (all paired default, seeds `1-20`, replay mode `failures`, concurrency `2`, timeout `120000ms`):
 
 ```text
-npx tsx scripts/runAiBenchmark.ts --strategy-a unified-current --strategy-b legal-random --seeds 1-20 --replay failures --concurrency 2 --timeout-ms 1000 --output artifacts/ai-benchmark-smoke-unified-random.json
-npx tsx scripts/runAiBenchmark.ts --strategy-a unified-current --strategy-b legal-greedy --seeds 1-20 --replay failures --concurrency 2 --timeout-ms 1000 --output artifacts/ai-benchmark-smoke-unified-greedy.json
-npx tsx scripts/runAiBenchmark.ts --strategy-a unified-current --strategy-b legacy-reference --seeds 1-20 --replay failures --concurrency 2 --timeout-ms 1000 --output artifacts/ai-benchmark-smoke-unified-legacy.json
+npx tsx scripts/runAiBenchmark.ts --strategy-a unified-current --strategy-b legal-random --seeds 1-20 --replay failures --concurrency 2 --timeout-ms 120000 --output artifacts/ai-benchmark-smoke-unified-random120.json
+npx tsx scripts/runAiBenchmark.ts --strategy-a unified-current --strategy-b legal-greedy --seeds 1-20 --replay failures --concurrency 2 --timeout-ms 120000 --output artifacts/ai-benchmark-smoke-unified-greedy120.json
+npx tsx scripts/runAiBenchmark.ts --strategy-a unified-current --strategy-b legacy-reference --seeds 1-20 --replay failures --concurrency 2 --timeout-ms 120000 --output artifacts/ai-benchmark-smoke-unified-legacy120.json
 ```
 
-Each command emitted `AI benchmark: 160 games` (20 seeds × 8 paired games). The bounded smoke runs recorded 160 failures and 0 completed games per pair, all `BENCHMARK_TIMEOUT:1000`; this is expected for the explicit 1-second smoke bound. Aggregate ignored artifacts are in `artifacts/ai-benchmark-smoke.json` and `.md`.
+Each command emits 160 games (20 seeds × 8 paired games). Final completed/error counts are recorded below after each command finishes. Aggregate ignored artifacts are in `artifacts/ai-benchmark-smoke.json` and `.md`.
 
 ## Concerns
 
-- The full real-strategy smoke matrix needs a larger timeout or longer runtime budget to produce completed games; the recorded baseline intentionally uses a bounded timeout so all three 160-game commands terminate deterministically.
+- The real-strategy smoke matrix is intentionally run with a 120-second per-task timeout and may take a long wall-clock time at concurrency 2.

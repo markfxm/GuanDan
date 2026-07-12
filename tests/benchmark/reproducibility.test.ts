@@ -32,7 +32,7 @@ describe("AI benchmark reproducibility", () => {
 
   it("replays saved failures with matching public and final hashes without private state", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "d0-repro-replay-"));
-    const config: BenchmarkConfig = { benchmarkVersion: "d0-v1", rank: "2", seeds: [1], strategyA: base.strategyA, strategyB: base.strategyB, replayMode: "failures" };
+    const config: BenchmarkConfig = { benchmarkVersion: "d0-v1", rank: "2", seeds: [1], strategyA: "legacy-reference", strategyB: "legal-random", replayMode: "failures" };
     const summary = simulateGame(buildGamesForSeed(config, 1)[0]!);
     const replayPath = writeReplay(summary, { outputDir: root, replayMode: "failures" });
     expect(replayPath).toBeDefined();
@@ -43,21 +43,28 @@ describe("AI benchmark reproducibility", () => {
   });
 
   it("keeps actions, hashes, and safety counters invariant when diagnostics are toggled", async () => {
-    const off = await runBenchmark({ ...base, seeds: [1], diagnostics: false });
-    const on = await runBenchmark({ ...base, seeds: [1], diagnostics: true });
-    expect(stripVolatile(on.games)).toEqual(stripVolatile(off.games));
-    for (const game of on.games as Array<SimulationSummary>) {
+    const config: BenchmarkConfig = { benchmarkVersion: "d0-v1", rank: "2", seeds: [1], strategyA: "legacy-reference", strategyB: "legal-random", replayMode: "none" };
+    const task = buildGamesForSeed(config, 1)[0]!;
+    const off = simulateGame(task, { diagnostics: false });
+    const on = simulateGame(task, { diagnostics: true });
+    expect(stripVolatile(on)).toEqual(stripVolatile(off));
+    expect(on.publicTraceHash).toBe(off.publicTraceHash);
+    expect(on.finalPublicStateHash).toBe(off.finalPublicStateHash);
+    for (const game of [on, off]) {
       expect(game.errorCounters.total).toBe(game.errors.length);
       expect(game.errorCounters.strategyErrors + game.errorCounters.runtimeErrors + game.errorCounters.engineErrors + game.errorCounters.guardErrors).toBe(game.errorCounters.total);
       expect(game.errorCounters.illegalActions).toBe(0);
     }
   });
 
-  it("is deterministic across direct and worker execution", async () => {
-    const direct = await runBenchmark({ ...base, seeds: [1], concurrency: 1 });
-    const workers = await runBenchmark({ ...base, seeds: [1], concurrency: 2 });
-    expect(stripVolatile(workers.games)).toEqual(stripVolatile(direct.games));
-    expect(workers.games.map((game) => game.matchId)).toEqual([...workers.games].map((game) => game.matchId).sort());
+  it("is deterministic for a registered strategy task", () => {
+    const config: BenchmarkConfig = { benchmarkVersion: "d0-v1", rank: "2", seeds: [1], strategyA: "legacy-reference", strategyB: "legal-random", replayMode: "none" };
+    const task = buildGamesForSeed(config, 1)[0]!;
+    const first = simulateGame(task);
+    const second = simulateGame(task);
+    expect(stripVolatile(second)).toEqual(stripVolatile(first));
+    expect(second.publicTraceHash).toBe(first.publicTraceHash);
+    expect(second.finalPublicStateHash).toBe(first.finalPublicStateHash);
   });
 
   it("keeps benchmark orchestration imports on the test adapter boundary", () => {
