@@ -1,3 +1,6 @@
+import type { Card, GameRank } from "../../src/engine/cards";
+import type { Seat } from "../../src/game/room";
+
 export type CandidatePolicy = "legal-only" | "production-policy";
 
 export type StrategyAction =
@@ -6,14 +9,14 @@ export type StrategyAction =
 
 export interface GameAction {
   actionIndex: number;
-  seat: number;
+  seat: Seat;
   action: StrategyAction;
 }
 
 export interface PublicTributeEvent {
   type: "tribute" | "return";
-  fromSeat: number;
-  toSeat: number;
+  fromSeat: Seat;
+  toSeat: Seat;
 }
 
 /**
@@ -21,15 +24,15 @@ export interface PublicTributeEvent {
  * explicit whitelist: hidden hands, seeds, and deck state do not belong here.
  */
 export interface BenchmarkObservation {
-  ownHand: string[];
-  rank: string;
-  seat: number;
-  currentSeat: number;
-  leaderSeat: number;
-  publicHandCounts: number[];
+  ownHand: Card[];
+  rank: GameRank;
+  seat: Seat;
+  currentSeat: Seat;
+  leaderSeat: Seat;
+  publicHandCounts: Record<Seat, number>;
   publicTrick: GameAction[];
   publicHistory: GameAction[];
-  finishOrder: number[];
+  finishOrder: Seat[];
   partnerPassed: boolean;
   publicTributeEvents: PublicTributeEvent[];
   actionIndex: number;
@@ -37,7 +40,7 @@ export interface BenchmarkObservation {
 
 export interface StrategyRuntimeContext {
   matchId: string;
-  seat: number;
+  seat: Seat;
   strategyRandomSeed: string;
 }
 
@@ -61,7 +64,7 @@ export interface AiStrategy<TRuntime> extends StrategyDescriptor {
 
 export interface BenchmarkConfig {
   benchmarkVersion: string;
-  rank: string;
+  rank: GameRank;
   seeds: number[];
   strategyA: string;
   strategyB: string;
@@ -72,12 +75,12 @@ export interface GameSummary {
   matchId: string;
   configHash: string;
   seed: number;
-  rank: string;
-  rotation: number;
-  strategiesBySeat: string[];
-  finishOrder: number[];
-  winnerTeam: number | null;
-  teamScore: number[];
+  rank: GameRank;
+  rotation: Seat;
+  strategiesBySeat: Record<Seat, string>;
+  finishOrder: Seat[];
+  winnerTeam: 0 | 1 | null;
+  teamScore: Record<0 | 1, number>;
   actionCount: number;
   publicTraceHash: string;
   finalPublicStateHash: string;
@@ -92,22 +95,28 @@ export interface ReplayDocument {
   configHash: string;
   matchId: string;
   seed: number;
-  rank: string;
-  rotation: number;
-  strategiesBySeat: string[];
+  rank: GameRank;
+  rotation: Seat;
+  strategiesBySeat: Record<Seat, string>;
   strategyDescriptors: StrategyDescriptor[];
   deterministicRandom: { strategySeedDerivationVersion: string };
   publicEvents: GameAction[];
-  finishOrder: number[];
-  winnerTeam: number | null;
-  teamScore: number[];
+  finishOrder: Seat[];
+  winnerTeam: 0 | 1 | null;
+  teamScore: Record<0 | 1, number>;
   actionCount: number;
   publicTraceHash: string;
   finalPublicStateHash: string;
 }
 
 export function canonicalJson(value: unknown): string {
-  return JSON.stringify(canonicalize(value));
+  const serialized = JSON.stringify(canonicalize(value));
+
+  if (serialized === undefined) {
+    throw new TypeError("CANONICAL_JSON_UNSUPPORTED_VALUE");
+  }
+
+  return serialized;
 }
 
 function canonicalize(value: unknown): unknown {
