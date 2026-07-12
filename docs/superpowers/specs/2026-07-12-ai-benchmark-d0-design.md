@@ -1,172 +1,171 @@
 # D0 AI Benchmark Design
 
-## Goal
+## Goal and non-goals
 
-Build a reproducible, paired, and quantitative AI evaluation system without changing production AI policy, planning budgets, game rules, or the production room API. The system establishes baseline comparisons for `unified-current`, `legacy-reference`, `deterministic-random`, and `simple-greedy`, and produces artifacts suitable for future AI version comparisons.
+D0 establishes a reproducible, paired, quantitative evaluation system for future AI comparisons. It compares the current unified AI, a restricted legacy reference, and two deliberately weak legal-only baselines. It does not change production scoring, planning budgets, rules, public-information inference, partner coordination, endgame search, or the production architecture.
 
-## Scope and boundaries
+## Scope and directory boundary
 
-- Benchmark implementation is limited to `tests/benchmark/` and `scripts/`.
-- Production `src/` must not import benchmark code, legacy code, benchmark strategies, or feature switches.
-- The simulator uses the real `createRoom`, `playCards`, and `passTurn` functions. It never reimplements game legality, turn progression, settlement, or scoring rules.
-- Every strategy receives only its own hand, public game information, and its own runtime state. It must never receive `partnerHand`, `opponentsHands`, all room hands, undealt cards, or deck order.
-- Classifications are derived after a game from reproducible initial state and are never passed to a strategy.
-- Complete public action traces are stored outside the main report. Full hidden state is opt-in debug output only and is ignored by Git.
-
-## Directory structure
+- All benchmark implementation lives only in `tests/benchmark/` and `scripts/`.
+- Production `src/` adds no benchmark interface, strategy injection, test switch, legacy import, or benchmark import.
+- The simulator calls the real `createRoom`, `playCards`, and `passTurn`; it does not copy legality, turn, settlement, or scoring rules.
+- The existing production `AiObservation` is not a benchmark contract.
 
 ```text
 tests/benchmark/
-  contracts.ts           # observation, strategy, game result, replay, report types
-  strategies.ts          # unified, legacy reference, deterministic random, simple greedy
-  simulator.ts           # mixed-seat game driver over createRoom/playCards/passTurn
-  rotations.ts           # paired A/B swaps and base-seat rotations
-  classification.ts      # post-game reproducible deal and game classifications
-  metrics.ts             # team score, finish, efficiency, decision-quality metrics
-  statistics.ts          # paired aggregates, bootstrap CI, long-term rating input
-  reporting.ts           # JSON/Markdown/replay serialization and trace hash
-  benchmark.test.ts      # interface, isolation, replay, deterministic behavior
-  rotations.test.ts      # paired and base-seat rotation coverage
-  statistics.test.ts     # label swap, CI, merge and batch equivalence
-  reproducibility.test.ts# diagnostics and concurrency invariants
+  contracts.ts             # BenchmarkObservation, generic strategy and artifact types
+  observation.ts           # public-field whitelist and production/legacy adapters
+  strategies.ts            # unified, legacy, legal-random and legal-greedy
+  simulator.ts             # mixed seats over createRoom/playCards/passTurn
+  rotations.ts             # seat permutation and paired game matrix
+  metrics.ts               # finish, settlement, efficiency and decision proxies
+  classification.ts        # post-game, report-only classifications
+  statistics.ts            # seed-block bootstrap, Elo-compatible snapshot
+  reporting.ts             # canonical hashing, manifest and report serialization
+  worker.ts                # worker_threads task entry point
+  *.test.ts                # focused interface, rotation, stats and replay tests
 scripts/
-  runAiBenchmark.ts      # benchmark:ai CLI entry point
-  replayAiBenchmark.ts   # single replay verification entry point
+  runAiBenchmark.ts        # benchmark:ai command and batch/resume coordinator
+  replayAiBenchmark.ts     # replay verifier
 artifacts/
   ai-benchmark-baseline.json
   ai-benchmark-baseline.md
+  ai-benchmark-manifest.json
   ai-benchmark-replays/<matchup>/<match-id>.json
-  ai-benchmark-debug/    # opt-in full-state files, Git ignored
+  ai-benchmark-batches/<config-hash>/<batch-id>.json
+  ai-benchmark-debug/<config-hash>/<match-id>.json
 ```
 
-## Data flow
+## Benchmark observation and generic runtime lifecycle
 
-```text
-CLI config + fixed seed list
-  -> paired rotations
-  -> createRoom({ rank, seed })
-  -> per-turn public observation + own hand + seat-local runtime
-  -> selected AiStrategy.decide(...)
-  -> playCards(...) or passTurn(...)
-  -> per-game public trace and result summary
-  -> match-unit pairing, classification, metrics and statistics
-  -> baseline JSON/Markdown + selected replay files
-```
-
-Each game is assigned a stable `matchId` derived from matchup IDs, base seed, base-seat rotation, and A/B placement. Results are sorted by this identifier before reporting. A match unit consists of the two A/B team assignments for the same seed and base-seat rotation. Base-seat rotations additionally move the underlying deal through all four seat offsets, so comparisons do not rely on a fixed opening or seat position.
-
-## Strategy isolation and execution boundary
-
-`AiStrategy` is test-only and has the shape:
+`BenchmarkObservation` is a test-only field whitelist. It contains copied `ownHand`, rank, own seat, current turn, leader seat, public hand counts, public trick/play history, finish order, partner-passed status, public tribute/return events, and stable public action index. It contains no seed, `partnerHand`, `opponentsHands`, all `hands`, initial hidden hands, or deck/remaining-deck state.
 
 ```ts
-type AiStrategy = {
+type AiStrategy<TRuntime> = {
   id: string;
-  version: string;
-  decide(observation: AiObservation, runtime?: AiRuntimeState): AiDecision;
+  implementationVersion: string;
+  configHash: string;
+  sourceCommit: string;
+  candidatePolicy: "legal-only" | "production-policy";
+  createRuntime(context: StrategyRuntimeContext): TRuntime;
+  decide(observation: BenchmarkObservation, runtime: TRuntime): StrategyDecision<TRuntime>;
+};
+
+type StrategyDecision<TRuntime> = {
+  action: { type: "play"; cardIds: string[] } | { type: "pass" };
+  runtime: TRuntime;
 };
 ```
 
-`AiObservation` contains only a copied own hand and public information: rank, active seat, own/other hand counts, public plays, current trick, finish order, partner-passed status, and public opening-tribute events. The simulator constructs it from the room but does not expose references to room internals. Runtime is one independent instance per seat and game.
+`StrategyRuntimeContext` has only seat-local identifiers and a domain-separated strategy random seed; it does not expose the base-deal seed. The simulator creates one runtime per `(game, seat)` using `createRuntime`, stores only that runtime for that seat, and replaces it only with `StrategyDecision.runtime`. No runtime, diagnostics object, PRNG state, or mutable cache is reused across seats or games.
 
-Strategies are implemented as follows:
+`unified-current` adapts `BenchmarkObservation` to the production `AiObservation` at the test boundary, then uses `AiRuntimeState`. `legal-random` and `legal-greedy` use their own runtime types and are never forced to use `AiRuntimeState`.
 
-- `unified-current`: adapts production `decideAiAction` with the public observation and seat runtime.
-- `legacy-reference`: imports `tests/helpers/legacyAiReference.ts` only from benchmark/test code and receives the same restricted observation.
-- `deterministic-random`: enumerates legal candidates from its own hand and public trick, then selects with a seed derived from game seed, seat, and action index.
-- `simple-greedy`: enumerates the same legal candidates and deterministically selects the largest card-count reduction, with stable low-power tie breaking.
+`legacy-reference` receives a separately constructed restricted legacy input from the same whitelist. A preflight test asserts that the adapter passes no `partnerHand`, opponent hand, all-hands, or deck field and that changing hidden hands does not change the input. If the old helper cannot decide without one of those hidden fields, it fails closed as `LEGACY_REQUIRES_HIDDEN_INFORMATION`; it is not given a leaky compatibility adapter.
 
-The simulator validates only by invoking `playCards` or `passTurn`. A thrown action error fails that game and records its seed, seat, strategy, and error category. It never substitutes a pass or falls back to another strategy.
+## Candidate-policy boundary
 
-## Fair pairing and metrics
+The two weak baselines use one shared `legal-only` candidate generator: classify groups from the acting hand, retain a legal lead or a legal response to the public last play, and include pass only when following. It performs no `PowerGroupPolicy`, protected-group, plan, or role filtering. `legal-random` selects from that set via its derived PRNG; `legal-greedy` picks maximum card reduction, then lowest play power, then a stable card-ID ordering.
 
-For every base seed, benchmark runs both A/B team assignments and all four base-seat rotations. The report distinguishes raw game count from paired match-unit count and records which strategy was on the opening team. The primary comparison is the paired match-unit outcome, not a fixed-seat raw-game win rate.
+The name `legal-*` makes this boundary explicit. The requested historical labels `deterministic-random` and `simple-greedy` are CLI compatibility aliases only and resolve to `legal-random` and `legal-greedy` in descriptors and reports. `unified-current` is explicitly labelled `production-policy`; its production candidate filtering is not represented as the same candidate universe. Reports always include each descriptor's `candidatePolicy`, preventing an undocumented coverage comparison.
 
-Per game records include team winner, complete finish order, project settlement-derived team placement score, a documented single-round advancement proxy when no multi-round level simulation exists, individual finish diagnostics, total actions, play/pass ratio, bomb use, plan continuation signals, final-ten-card actions, duration, and all safety counters.
+## Game execution and exact seat rotations
 
-Unified decisions additionally record available existing diagnostics without altering choice: selected action rank among scored candidates, active-plan membership, power-group split, bomb context, remaining plan groups, plan-quality change, replan path, own hand count, partner-pass state, lead/follow state, and endgame state.
+For base rotation `r ∈ {0,1,2,3}`, define the seat permutation `σ_r(s) = (s + r) mod 4`. First create a base room with `createRoom({ rank, seed })`. The rotated room moves all seat-indexed state from base seat `s` to game seat `σ_r(s)`:
 
-## Classification
+- `hands`, `initialHands`, `aiRuntime`, `aiPlans`, player seat and player name move by `σ_r`; player team is recomputed from the target game seat parity (`0/2` vs `1/3`).
+- `currentTurn`, `leaderSeat`, trick lead/last/pass/play seats, public history seats, opening-tribute payer/receiver/active seats, and the opening leader move by `σ_r`.
+- Any already-established `finishOrder` and settlement seat references would move by `σ_r`; baseline rotation happens before play, so these are initially empty.
 
-After games finish, deterministic initial-deal analysis tags high/low bomb density, straight/consecutive-pair potential, hand dispersion, joker concentration, wild-card impact, initial plan-quality gap, partner strength imbalance, and observed long/short game length. These tags are report-only and are computed separately from strategy observation construction.
+The rotation test verifies a rotated room preserves all 108 cards once, each seat's intended base hand, team pairing, opening leader, public tribute references, and inverse rotation back to `r=0`. It also runs a completion test that maps final finish order and settlement back through `σ_r⁻¹`.
 
-## Replay format
+For every base seed, run two allocations at every rotation:
 
-The main report stores only summary fields, the replay relative path, and a SHA-256 `publicTraceHash`. A replay file is created according to `--replay none|failures|all` (default `failures`), at:
+- allocation `AB`: A at seats `0/2`, B at seats `1/3`;
+- allocation `BA`: B at seats `0/2`, A at seats `1/3`.
 
-```text
-artifacts/ai-benchmark-replays/<matchup>/<match-id>.json
-```
+Therefore one base seed produces `2 × 4 = 8` raw games. One **paired rotation unit** is the AB/BA pair for one `(seed, r)` (four per base seed). One **base-seed block** contains all four paired rotation units (eight games) and is the bootstrap resampling unit. Reports always distinguish `baseSeeds`, `pairedRotationUnits`, and `rawGames`; the primary result aggregates paired units while uncertainty resamples base-seed blocks.
 
-Every replay contains:
+## Metrics and classifications
+
+Each game stores winner team, complete finish order, project settlement-derived team placement score, documented single-round advancement proxy if needed, individual diagnostic score, total actions, play/pass ratio, bomb use, plan continuation, final-ten-card actions, duration, error counters, replay path, and public trace hash. Unified decisions record existing decision diagnostics only; no decision is altered.
+
+Deterministic post-game analysis tags bomb density, straight/consecutive-pair potential, dispersion, joker concentration, wild-card impact, plan-quality gap, partner imbalance, and long/short game. These tags never enter a strategy observation. Classification tables are labelled **exploratory** and are never primary significance claims.
+
+## Replay schema and deterministic public hash
+
+The normal JSON report contains only game summaries, paired summaries, aggregate statistics, replay relative paths, and hashes. It never embeds action traces or hidden hands. Replay mode is `none`, `failures` (default), or `all`:
 
 ```ts
 {
+  schemaVersion: "1",
   replayVersion: "d0-v1",
-  engineVersion: "<package version + git commit>",
-  matchId, seed, rank, rotation, strategiesBySeat,
-  deterministicRandom: { baseSeed, derivedSeeds },
-  publicEvents: [
-    // actions, hand-count deltas, public trick state, opening tribute/return events
-  ],
+  benchmarkVersion: "d0-v1",
+  engineVersion: "<package-version>@<source-commit>",
+  roomRulesVersion: "<rules fingerprint>",
+  configHash, matchId, seed, rank, rotation, strategiesBySeat,
+  strategyDescriptors: [{ id, implementationVersion, configHash, sourceCommit, candidatePolicy }],
+  deterministicRandom: { strategySeedDerivationVersion: "1" },
+  publicEvents: [],
   finishOrder, winnerTeam, teamScore, actionCount,
-  publicTraceHash
+  publicTraceHash, finalPublicStateHash
 }
 ```
 
-No replay contains full opponent hands by default. `--debug-full-state` is disabled by default, writes only to `artifacts/ai-benchmark-debug/`, never appears in the main report, and must be listed in `.gitignore`. Replaying the same configuration must recreate the final result and public hash.
+`matchId` is the stable tuple `(matchup, configHash, seed, rotation, allocation)` rendered canonically; it never depends on batch, worker, duration, or output directory. Replays use `artifacts/ai-benchmark-replays/<matchup>/<match-id>.json`.
 
-## Statistics and long-term rating
+`publicTraceHash` is SHA-256 over canonical UTF-8 JSON for public events. Canonical JSON recursively sorts object keys; array order is event order except card IDs are sorted lexically and unordered seat/count maps are emitted in seat order `0,1,2,3`. The hash excludes duration, diagnostics timings, file paths, worker IDs, error stacks, and debug data. `finalPublicStateHash` uses the same canonicalization over final public state. Equal configuration and outcome must yield equal hashes.
 
-The report provides A/B raw wins, paired wins, draws/unresolved games, raw and paired win rates, average and median score difference, mean finish-position difference, p95 game duration, error rate, and per-classification metrics.
+`--debug-full-state` is off by default, writes only to `artifacts/ai-benchmark-debug/`, is absent from reports/replays, and is Git ignored.
 
-Uncertainty is a paired bootstrap 95% confidence interval over match-unit score difference and paired win rate. The report marks a result statistically significant only when the relevant paired interval excludes zero (or the neutral win-rate equivalent); a 51/49 split alone is not a strength claim. It explicitly names sample count, effect size, seat/deal bias controls, and residual limitations.
+## Statistics and Elo-compatible fields
 
-Each report also writes an `elo`-compatible rating snapshot: a fixed baseline rating (1500), observed matchup score, and rating delta using a documented fixed K-factor. It is descriptive within one report; future v1/v2/v3 reports can be merged into a persistent rating ledger without changing historical game results.
+The report gives raw and paired A/B wins, unresolved games, win rates, score/finish differences, p95 duration, error rate, and exploratory classifications. The primary paired bootstrap samples **base-seed blocks with replacement**; each draw includes that seed's four rotations and both allocations (all eight games), preserving pairing and deal/seat structure. It reports a deterministic 95% CI for paired win rate and score difference. A strength claim requires the relevant CI to exclude neutral; 51/49 alone is not significant.
 
-## Commands
+The report also includes an Elo-compatible descriptive snapshot: fixed initial rating 1500, fixed documented K-factor, observed paired score, delta, and a versioned rating-ledger input. It does not retroactively change historical results.
+
+## Batching, resume, and runtime estimate
+
+Three 200-seed matchups require `3 × 200 × 8 = 4,800` raw games, `2,400` paired rotation units, and `600` base-seed blocks. Each 20-seed smoke matchup is 160 games; all three smoke runs total 480 games.
+
+The existing fixed-seed all-unified artifact measures 100 games at mean 5.76 s/game (median 5.02 s, p95 11.88 s) on this workspace. A conservative sequential planning estimate is approximately 6–8 hours for the 4,800-game formal baseline plus replay I/O; the two weak-baseline comparisons may be faster, but D0 schedules against the conservative bound. Smoke runs are estimated at roughly 35–50 minutes sequentially. These are planning estimates, not benchmark claims.
+
+`--batch 1-50`, `--resume`, and `--skip-existing` use a manifest keyed by `configHash`. A batch file contains its complete seed interval, expected eight match IDs per seed, completed summaries, and hashes. Resume may reuse only a completed record with the same config hash and matching replay/hash requirements. Merge rejects different configuration hashes, duplicate match IDs, missing expected IDs, inconsistent strategy descriptors, or incomplete base-seed blocks. A deterministic merge test proves four 50-seed batches equal one 200-seed one-shot result.
+
+## CPU concurrency
+
+`--concurrency 1` runs in the coordinator. Values greater than one use Node `worker_threads`, never Promise-only concurrency. The coordinator sends immutable task payloads and receives immutable game summaries; workers load independent module instances and own all runtime, diagnostics, PRNG state, and mutable cache. The coordinator performs stable `matchId` sorting before reporting. Tests compare concurrency `1` and `2` output (excluding duration fields) and verify no worker-derived state is shared.
+
+## Artifact Git policy
+
+`artifacts/` is currently ignored. At formal D0 completion, the compact, reviewable baseline JSON and Markdown are force-added or explicitly unignored and committed with their manifest. Replay, debug, and batch directories remain ignored. The main JSON carries every required per-game summary but omits traces, timing samples, diagnostics payloads, and verbose per-action data. If its expanded-object form exceeds 5 MiB, it uses documented normalized dictionaries plus compact `gameRows` while retaining all required per-game fields; verbose batch data stays ignored. Markdown remains the human review artifact.
+
+## Commands and test matrix
 
 ```bash
 npm run benchmark:ai -- \
-  --strategy-a unified-current \
-  --strategy-b legacy-reference \
-  --seeds 1-200 \
-  --paired \
-  --output artifacts/ai-benchmark-baseline.json \
-  --replay all \
-  --concurrency 1 \
-  --timeout-ms 30000 \
-  --diagnostics
+  --strategy-a unified-current --strategy-b legacy-reference \
+  --seeds 1-200 --paired --batch 1-50 --resume --skip-existing \
+  --replay all --concurrency 2 --timeout-ms 30000 --diagnostics
 
 npm run benchmark:ai -- --replay-match <match-id>
 ```
 
-The command accepts strategy IDs, inclusive seed ranges or explicit seed lists, paired rotation, output path, replay mode, optional full-state debug output, concurrency, timeout, and diagnostics. Each task derives all randomness from its own seed; its runtime and diagnostics are not shared. Reporting remains stable regardless of scheduling and is verified for concurrency `1` and `N`.
+Tests cover: generic runtime lifecycle; four strategies; observation and legacy isolation; true room execution; exact rotations; 8-game matrix coverage; zero safety counters; label-swap reversal; seed-block bootstrap determinism; batch/merge/one-shot equality; config-hash rejection; hash/replay reproduction; diagnostics and worker-count invariance; privacy; and production import/build boundaries. Existing AI decision, room, shadow, 20-game simulation, TypeScript, build, and diff checks remain regression requirements.
 
-## Test matrix
+## Problem-to-revision map
 
-| Area | Required assertion |
+| Requested issue | Revision location |
 | --- | --- |
-| Strategy interface | Four strategies return only legal play/pass outcomes through the same simulator boundary. |
-| Observation isolation | No strategy observation contains partner, opponent, all-hand, or deck information. |
-| Mixed room | Four seats can use different strategies; action execution uses only `playCards` / `passTurn`. |
-| Rotations | Both A/B swaps and all base-seat rotations are present for every seed. |
-| Metrics | Team winner, full order, settlement score, efficiency, and zero-error counters aggregate correctly. |
-| Statistics | A/B label swap reverses results; paired bootstrap is deterministic; batches merge to one-shot output. |
-| Reproducibility | Same config gives identical summary and trace hashes; replay reproduces final public result. |
-| Isolation under options | Diagnostics and concurrency do not change actions; runs have no shared runtime/cache state. |
-| Artifact privacy | Main report and ordinary replay omit hidden hands; full-state output is opt-in and ignored. |
-| Build boundary | Benchmark code stays outside `src/`; production build contains no legacy/benchmark import. |
-| Regression | Existing AI decision, room, shadow, 20-game simulation, TypeScript, build, and diff checks remain green. |
-
-## Execution sequence
-
-1. Implement contract and simulator tests first, then the smallest test-only driver that passes them.
-2. Add rotations, metrics, classifications, paired statistics, reporting, and CLI with focused tests.
-3. Run three 20-seed smoke matchups: unified vs random, greedy, and legacy.
-4. Run all three 200-seed paired baselines with replay mode `all`; merge no selectively chosen subsets.
-5. Produce the main JSON/Markdown reports and complete the specified regression suite.
-
-## Non-goals
-
-This phase does not change AI scoring, beam/planning budgets, public-information inference, partner coordination, endgame search, game rules, or production architecture. Benchmark results inform later work but do not trigger policy changes during D0.
+| Benchmark-specific observation | “Benchmark observation and generic runtime lifecycle” |
+| Generic runtime lifecycle | “Benchmark observation and generic runtime lifecycle” |
+| Exact 8-game rotations | “Game execution and exact seat rotations” |
+| 4,800-game estimate, batching and manifest | “Batching, resume, and runtime estimate” |
+| Real CPU parallelism | “CPU concurrency” |
+| Base-seed bootstrap and exploratory tags | “Statistics and Elo-compatible fields”; “Metrics and classifications” |
+| Baseline candidate policy and naming | “Candidate-policy boundary” |
+| Legacy restricted preflight | “Benchmark observation and generic runtime lifecycle” |
+| Version/config/commit strategy descriptors | “Benchmark observation and generic runtime lifecycle”; “Replay schema and deterministic public hash” |
+| Canonical trace hash | “Replay schema and deterministic public hash” |
+| Artifact commit and size policy | “Artifact Git policy” |
+| Additional replay fields | “Replay schema and deterministic public hash” |
