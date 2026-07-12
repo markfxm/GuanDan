@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { createDeck, RANKS, SUITS, type Card, type GameRank, type JokerRank, type Rank } from "../engine/cards";
 import { generatePlans } from "../engine/planner";
@@ -26,6 +27,15 @@ type CreateRoomBody = {
   pendingTributeItems?: unknown;
 };
 
+type JoinRoomBody = {
+  name?: unknown;
+  preferredSeat?: unknown;
+};
+
+type RoomQuery = {
+  playerId?: string;
+};
+
 type PlayBody = {
   seat?: unknown;
   cardIds?: unknown;
@@ -45,9 +55,21 @@ const VALID_RANKS = new Set<Rank>(RANKS);
 const VALID_SUITS = new Set(SUITS);
 const CANONICAL_CARDS_BY_ID = new Map(createDeck().map((card) => [card.id, card]));
 
+export type PlayerSession = {
+  playerId: string;
+  name: string;
+  seat: Seat;
+  connected: boolean;
+};
+
+export type OnlineRoom = {
+  room: RoomState;
+  sessions: Map<string, PlayerSession>;
+};
+
 export function buildApi() {
   const app = Fastify({ logger: false });
-  const rooms = new Map<string, RoomState>();
+  const onlineRooms = new Map<string, OnlineRoom>();
 
   app.addHook("onRequest", async (request, reply) => {
     const origin = request.headers.origin;
@@ -58,7 +80,7 @@ export function buildApi() {
     }
 
     reply.header("Vary", "Origin");
-    reply.header("Access-Control-Allow-Methods", "POST, OPTIONS");
+    reply.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     reply.header("Access-Control-Allow-Headers", "Content-Type");
 
     if (request.method === "OPTIONS") {
@@ -156,24 +178,75 @@ export function buildApi() {
     }
 
     const room = createRoom({ rank: rank as GameRank, seed, pendingTributeItems });
-    rooms.set(room.id, room);
-    return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
+    const session = createPlayerSession(room.players[0].name, 0);
+    onlineRooms.set(room.id, { room, sessions: new Map([[session.playerId, session]]) });
+    return {
+      playerId: session.playerId,
+      seat: session.seat,
+      room: getPublicRoom(room, session.seat, { ensurePlans: false }),
+    };
   });
 
-  app.get<{ Params: { id: string } }>("/api/rooms/:id", async (request, reply) => {
-    const room = rooms.get(request.params.id);
-    if (room === undefined) {
+  app.post<{ Params: { id: string }; Body: JoinRoomBody }>("/api/rooms/:id/join", async (request, reply) => {
+    const onlineRoom = onlineRooms.get(request.params.id);
+    if (onlineRoom === undefined) {
       return reply.code(404).send({ error: "Room not found." });
     }
 
-    return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
+    const name = request.body?.name;
+    const preferredSeat = request.body?.preferredSeat;
+    if (typeof name !== "string" || name.trim().length === 0) {
+      return reply.code(400).send({ error: "Name is required." });
+    }
+
+    if (preferredSeat !== undefined && !isSeat(preferredSeat)) {
+      return reply.code(400).send({ error: "Preferred seat must be valid." });
+    }
+
+    const seat = selectAvailableSeat(onlineRoom, preferredSeat);
+    if (seat === undefined) {
+      return reply.code(409).send({ error: "No available seats." });
+    }
+
+    const player = onlineRoom.room.players.find((candidate) => candidate.seat === seat);
+    if (player === undefined) {
+      return reply.code(500).send({ error: "Room player is missing." });
+    }
+
+    const session = createPlayerSession(name.trim(), seat);
+    player.name = session.name;
+    player.isAI = false;
+    onlineRoom.sessions.set(session.playerId, session);
+
+    return {
+      playerId: session.playerId,
+      seat: session.seat,
+      room: getPublicRoom(onlineRoom.room, session.seat, { ensurePlans: false }),
+    };
+  });
+
+  app.get<{ Params: { id: string }; Querystring: RoomQuery }>("/api/rooms/:id", async (request, reply) => {
+    const onlineRoom = onlineRooms.get(request.params.id);
+    if (onlineRoom === undefined) {
+      return reply.code(404).send({ error: "Room not found." });
+    }
+
+    const session = request.query.playerId === undefined
+      ? findSessionForSeat(onlineRoom, 0)
+      : onlineRoom.sessions.get(request.query.playerId);
+    if (session === undefined) {
+      return reply.code(404).send({ error: "Player session not found." });
+    }
+
+    return { room: getPublicRoom(onlineRoom.room, session.seat, { ensurePlans: false }) };
   });
 
   app.post<{ Params: { id: string }; Body: PlayBody }>("/api/rooms/:id/play", async (request, reply) => {
-    const room = rooms.get(request.params.id);
-    if (room === undefined) {
+    const onlineRoom = onlineRooms.get(request.params.id);
+    if (onlineRoom === undefined) {
       return reply.code(404).send({ error: "Room not found." });
     }
+    const room = onlineRoom.room;
 
     if (!isSeat(request.body?.seat) || !Array.isArray(request.body?.cardIds) || !request.body.cardIds.every((id) => typeof id === "string")) {
       return reply.code(400).send({ error: "Seat and cardIds are required." });
@@ -188,10 +261,11 @@ export function buildApi() {
   });
 
   app.post<{ Params: { id: string }; Body: PlayBody }>("/api/rooms/:id/tribute", async (request, reply) => {
-    const room = rooms.get(request.params.id);
-    if (room === undefined) {
+    const onlineRoom = onlineRooms.get(request.params.id);
+    if (onlineRoom === undefined) {
       return reply.code(404).send({ error: "Room not found." });
     }
+    const room = onlineRoom.room;
 
     const seat = request.body?.seat;
     const cardIds = request.body?.cardIds ?? [];
@@ -212,10 +286,11 @@ export function buildApi() {
   });
 
   app.post<{ Params: { id: string }; Body: SeatBody }>("/api/rooms/:id/pass", async (request, reply) => {
-    const room = rooms.get(request.params.id);
-    if (room === undefined) {
+    const onlineRoom = onlineRooms.get(request.params.id);
+    if (onlineRoom === undefined) {
       return reply.code(404).send({ error: "Room not found." });
     }
+    const room = onlineRoom.room;
 
     if (!isSeat(request.body?.seat)) {
       return reply.code(400).send({ error: "Seat is required." });
@@ -230,10 +305,11 @@ export function buildApi() {
   });
 
   app.post<{ Params: { id: string } }>("/api/rooms/:id/ai", async (request, reply) => {
-    const room = rooms.get(request.params.id);
-    if (room === undefined) {
+    const onlineRoom = onlineRooms.get(request.params.id);
+    if (onlineRoom === undefined) {
       return reply.code(404).send({ error: "Room not found." });
     }
+    const room = onlineRoom.room;
 
     try {
       runAiUntilHumanTurn(room, 0);
@@ -245,10 +321,11 @@ export function buildApi() {
   });
 
   app.post<{ Params: { id: string } }>("/api/rooms/:id/ai-step", async (request, reply) => {
-    const room = rooms.get(request.params.id);
-    if (room === undefined) {
+    const onlineRoom = onlineRooms.get(request.params.id);
+    if (onlineRoom === undefined) {
       return reply.code(404).send({ error: "Room not found." });
     }
+    const room = onlineRoom.room;
 
     try {
       runAiStep(room);
@@ -260,6 +337,28 @@ export function buildApi() {
   });
 
   return app;
+}
+
+function createPlayerSession(name: string, seat: Seat): PlayerSession {
+  return {
+    playerId: randomUUID(),
+    name,
+    seat,
+    connected: true,
+  };
+}
+
+function selectAvailableSeat(onlineRoom: OnlineRoom, preferredSeat: Seat | undefined): Seat | undefined {
+  const claimedSeats = new Set([...onlineRoom.sessions.values()].map((session) => session.seat));
+  const candidates: Seat[] = preferredSeat === undefined
+    ? [0, 1, 2, 3]
+    : [preferredSeat, ...([0, 1, 2, 3] as Seat[]).filter((seat) => seat !== preferredSeat)];
+
+  return candidates.find((seat) => !claimedSeats.has(seat));
+}
+
+function findSessionForSeat(onlineRoom: OnlineRoom, seat: Seat): PlayerSession | undefined {
+  return [...onlineRoom.sessions.values()].find((session) => session.seat === seat);
 }
 
 function isAllowedOrigin(origin: string): boolean {

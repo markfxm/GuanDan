@@ -53,6 +53,8 @@ it("creates and returns a local playable room", async () => {
   await withApp(async (app) => {
     const created = await app.inject({ method: "POST", url: "/api/rooms", payload: { rank: "10", seed: 1 } });
     expect(created.statusCode).toBe(200);
+    expect(created.json().playerId).toEqual(expect.any(String));
+    expect(created.json().seat).toBe(0);
     expect(created.json().room.humanHand).toHaveLength(27);
     expect(created.json().room.players).toHaveLength(4);
     expect(created.json().room.hands).toBeUndefined();
@@ -206,6 +208,81 @@ it("allows OPTIONS requests from a private LAN origin outside production", async
 
     expect(response.statusCode).toBe(204);
     expect(response.headers["access-control-allow-origin"]).toBe(origin);
+  });
+});
+
+it("joins an AI seat as a named human player", async () => {
+  await withApp(async (app) => {
+    const created = await app.inject({ method: "POST", url: "/api/rooms", payload: { rank: "10", seed: 1 } });
+    const roomId = created.json().room.id;
+
+    const joined = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${roomId}/join`,
+      payload: { name: "Alice", preferredSeat: 2 },
+    });
+
+    expect(joined.statusCode).toBe(200);
+    expect(joined.json().playerId).toEqual(expect.any(String));
+    expect(joined.json().seat).toBe(2);
+    expect(joined.json().room.humanSeat).toBe(2);
+    expect(joined.json().room.players[2]).toMatchObject({ seat: 2, name: "Alice", isAI: false });
+    expect(joined.json().room.hands).toBeUndefined();
+    expect(joined.json().room.initialHands).toBeUndefined();
+  });
+});
+
+it("falls back to the first available seat and isolates player hands by playerId", async () => {
+  await withApp(async (app) => {
+    const created = await app.inject({ method: "POST", url: "/api/rooms", payload: { rank: "10", seed: 1 } });
+    const roomId = created.json().room.id;
+
+    const alice = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${roomId}/join`,
+      payload: { name: "Alice", preferredSeat: 2 },
+    });
+    const bob = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${roomId}/join`,
+      payload: { name: "Bob", preferredSeat: 2 },
+    });
+
+    expect(alice.json().seat).toBe(2);
+    expect(bob.json().seat).toBe(1);
+
+    const aliceView = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${roomId}?playerId=${alice.json().playerId}`,
+    });
+    const bobView = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${roomId}?playerId=${bob.json().playerId}`,
+    });
+
+    expect(aliceView.statusCode).toBe(200);
+    expect(bobView.statusCode).toBe(200);
+    expect(aliceView.json().room.humanSeat).toBe(2);
+    expect(bobView.json().room.humanSeat).toBe(1);
+    expect(aliceView.json().room.humanHand.map((card: { id: string }) => card.id)).not.toEqual(
+      bobView.json().room.humanHand.map((card: { id: string }) => card.id),
+    );
+  });
+});
+
+it("rejects joining when all seats already have human sessions", async () => {
+  await withApp(async (app) => {
+    const created = await app.inject({ method: "POST", url: "/api/rooms", payload: { rank: "10", seed: 1 } });
+    const roomId = created.json().room.id;
+
+    for (const name of ["Alice", "Bob", "Carol"]) {
+      const joined = await app.inject({ method: "POST", url: `/api/rooms/${roomId}/join`, payload: { name } });
+      expect(joined.statusCode).toBe(200);
+    }
+
+    const rejected = await app.inject({ method: "POST", url: `/api/rooms/${roomId}/join`, payload: { name: "Dave" } });
+    expect(rejected.statusCode).toBe(409);
+    expect(rejected.json()).toEqual({ error: "No available seats." });
   });
 });
 
