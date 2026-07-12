@@ -9,7 +9,7 @@ Implemented benchmark replay/reporting utilities in `tests/benchmark/reporting.t
 - Replays emit the required schema/version/config/descriptor/randomness/hash fields and support `none`, `failures`, and `all` modes (`failures` is the default).
 - Normal reports contain compact summaries and relative replay paths, excluding event traces and private/full room state.
 - Batch manifests carry expected IDs and per-game hashes; merges reject config/version/descriptor mismatches, duplicate or missing IDs, unexpected IDs, invalid allocations, and incomplete 8-game base-seed blocks.
-- Every manifest game is checked against the manifest `configHash`; simulation and reporting use the same public-event/final-state canonical hash functions, with public final-state fields retained only in simulation inputs (never normal reports/replays).
+- Every manifest game and report input is checked against the canonical `configHash(config)` (not merely a mutually consistent supplied hash); simulation and reporting use the same public-event/final-state canonical hash functions, with public final-state fields retained only in simulation inputs (never normal reports/replays).
 - Replay, debug, and batch artifact directories remain ignored by the repository policy.
 
 ## TDD evidence
@@ -32,7 +32,7 @@ npx vitest run tests/benchmark/reporting.test.ts
 
 ```text
 npx vitest run tests/benchmark/reporting.test.ts
-✓ 3 tests
+✓ 6 tests
 
 npx vitest run tests/benchmark
 ✓ 7 files, 31 tests

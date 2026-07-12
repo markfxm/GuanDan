@@ -100,6 +100,8 @@ export function writeReplay(summary: SimulationSummary | (GameSummary & Partial<
 }
 
 export function buildReport(input: ReportInput, options: ReportOptions = {}): Record<string, unknown> {
+  const expectedConfigHash = configHash(input.config);
+  if (input.games.some((game) => game.configHash !== expectedConfigHash)) throw new Error("CONFIG_HASH_MISMATCH");
   const outputDir = options.outputPath === undefined ? undefined : path.dirname(path.resolve(options.outputPath));
   const games = input.games.map((game, index) => {
     const compact = compactSummary(game);
@@ -114,7 +116,7 @@ export function buildReport(input: ReportInput, options: ReportOptions = {}): Re
     reportVersion: "d0-v1",
     benchmarkVersion: input.config.benchmarkVersion,
     config: input.config,
-    configHash: input.games[0]?.configHash ?? configHash(input.config),
+    configHash: expectedConfigHash,
     games,
   };
   if (input.aggregate !== undefined) report.aggregate = input.aggregate;
@@ -136,7 +138,7 @@ export function createManifest(
   games: Array<GameSummary | SimulationSummary>,
   options: { expectedMatchIds?: string[]; strategyDescriptors?: StrategyDescriptor[] } = {},
 ): BatchManifest {
-  const configHashValue = games[0]?.configHash ?? configHash(config);
+  const configHashValue = configHash(config);
   if (games.some((game) => game.configHash !== configHashValue)) throw new Error("CONFIG_HASH_MISMATCH");
   const ids = [...new Set(options.expectedMatchIds ?? games.map((game) => game.matchId))].sort();
   const seeds = games.map((game) => game.seed);

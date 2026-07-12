@@ -28,7 +28,7 @@ const descriptors: StrategyDescriptor[] = [
 
 const summary = (seed: number, rotation: 0 | 1 | 2 | 3, allocation: "AB" | "BA"): GameSummary => ({
   matchId: `m-${seed}-${rotation}-${allocation}`,
-  configHash: "config-1",
+  configHash: "8955814f70f940c7fa2bbe4e09e2b3d27e95449013d39c1f9c11e6ac33ad3d19",
   seed,
   rank: "10",
   rotation,
@@ -65,7 +65,7 @@ it("writes schema-complete replay and privacy-safe report", () => {
   } as SimulationSummary;
   const replayPath = writeReplay(game, { outputDir: dir, replayMode: "all", strategyDescriptors: descriptors, engineVersion: "pkg@sha", roomRulesVersion: "rules" });
   const replay = JSON.parse(fs.readFileSync(replayPath!, "utf8"));
-  expect(replay).toMatchObject({ schemaVersion: "1", replayVersion: "d0-v1", benchmarkVersion: "d0-v1", engineVersion: "pkg@sha", roomRulesVersion: "rules", configHash: "config-1", finalPublicStateHash: "state" });
+  expect(replay).toMatchObject({ schemaVersion: "1", replayVersion: "d0-v1", benchmarkVersion: "d0-v1", engineVersion: "pkg@sha", roomRulesVersion: "rules", configHash: "8955814f70f940c7fa2bbe4e09e2b3d27e95449013d39c1f9c11e6ac33ad3d19", finalPublicStateHash: "state" });
   const reportPath = writeReport({ config, games: [game], replayPaths: ["../replays/m.json"] }, { outputPath: path.join(dir, "report.json") });
   const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
   expect(report.games[0]).not.toHaveProperty("publicEvents");
@@ -82,7 +82,9 @@ it("defaults replay mode to failures", () => {
 
 it("rejects games whose config hash differs from their manifest", () => {
   const games = [0, 1, 2, 3].flatMap((seed) => [0, 1, 2, 3].flatMap((rotation) => [summary(seed, rotation as 0 | 1 | 2 | 3, "AB"), summary(seed, rotation as 0 | 1 | 2 | 3, "BA")]));
+  expect(() => createManifest(config, games.map((game) => ({ ...game, configHash: "arbitrary" })))).toThrow(/CONFIG_HASH/);
   expect(() => createManifest(config, [{ ...games[0]!, configHash: "other" }, ...games.slice(1)])).toThrow(/CONFIG_HASH/);
+  expect(() => writeReport({ config, games: [{ ...games[0]!, configHash: "arbitrary" }] })).toThrow(/CONFIG_HASH/);
   const batch = createManifest(config, games.slice(0, 8));
   expect(() => mergeBatches([{ ...batch, games: [{ ...batch.games[0]!, configHash: "other" }, ...batch.games.slice(1)] }])).toThrow(/CONFIG_HASH/);
 });
