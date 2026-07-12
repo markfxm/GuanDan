@@ -70,7 +70,8 @@ export function buildGamesForSeed(config: BenchmarkConfig, seed: number): Benchm
     for (const allocation of ["AB", "BA"] as const) {
       const baseRoom = createRoom({ rank: config.rank, seed });
       const room = rotateRoom(baseRoom, rotation);
-      const matchId = canonicalJson({ allocation, configHash, rotation, seed });
+      const matchup = `${config.strategyA}-vs-${config.strategyB}`;
+      const matchId = canonicalJson({ matchup, allocation, configHash, rotation, seed });
       games.push({ config, configHash, seed, rotation, allocation, matchId, room });
     }
   }

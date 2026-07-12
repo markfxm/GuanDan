@@ -17,6 +17,9 @@ it("creates eight stable games for one base seed", () => {
   expect(first).toHaveLength(8);
   expect(first.map((game) => game.matchId)).toEqual(second.map((game) => game.matchId));
   expect(new Set(first.map((game) => game.matchId)).size).toBe(8);
+  expect(first[0]!.matchId).toContain(config.strategyA);
+  expect(first[0]!.matchId).toContain(config.strategyB);
+  expect(first[0]!.matchId).toContain(first[0]!.configHash);
 });
 
 it("maps every seat by sigma rotation and preserves cards and references", () => {

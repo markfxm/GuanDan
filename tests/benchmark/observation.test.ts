@@ -17,6 +17,13 @@ it("does not change an observation when hidden opponent cards are swapped", () =
   expect(second.ownHand[0]).not.toBe(firstRoom.hands[0][0]);
 });
 
+it("derives public hand counts from the actual hands, not cached player fields", () => {
+  const room = createRoom({ rank: "10", seed: 42 });
+  room.players.forEach((player) => { player.handCount = 999; });
+  const observation = createBenchmarkObservation(room, 0);
+  expect(observation.publicHandCounts).toEqual({ 0: 27, 1: 27, 2: 27, 3: 27 });
+});
+
 it("adapters expose only the public benchmark whitelist", () => {
   const observation = createBenchmarkObservation(createRoom({ rank: "10", seed: 42 }), 0);
   const production = toProductionObservation(observation);

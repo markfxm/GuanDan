@@ -20,7 +20,7 @@ export function createBenchmarkObservation(room: RoomState, seat: Seat): Benchma
     seat,
     currentSeat: room.currentTurn,
     leaderSeat: room.leaderSeat,
-    publicHandCounts: Object.fromEntries(room.players.map((player) => [player.seat, player.handCount])) as Record<Seat, number>,
+    publicHandCounts: Object.fromEntries(([0, 1, 2, 3] as Seat[]).map((candidate) => [candidate, room.hands[candidate].length])) as Record<Seat, number>,
     publicTrick: room.trick.plays.map((play, actionIndex) => toGameAction(play, trickStartIndex + actionIndex)),
     publicHistory,
     finishOrder: [...room.finishOrder],

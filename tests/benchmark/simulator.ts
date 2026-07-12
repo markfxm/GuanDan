@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createBenchmarkObservation } from "./observation";
 import { getStrategy } from "./strategies";
-import type { GameAction, GameSummary, StrategyAction } from "./contracts";
+import type { GameAction, GameSummary, PublicTributeEvent, StrategyAction } from "./contracts";
 import { canonicalJson } from "./contracts";
 import { createRoom, playCards, passTurn, type RoomState, type Seat } from "../../src/game/room";
 import type { BenchmarkGameTask } from "./rotations";
@@ -13,11 +13,34 @@ export interface SimulationError {
   error: string;
 }
 
+export interface SafetyErrorCounters {
+  total: number;
+  strategyErrors: number;
+  runtimeErrors: number;
+  illegalActions: number;
+  engineErrors: number;
+  guardErrors: number;
+}
+
+export interface PublicSimulationEvent extends GameAction {
+  handCounts: Record<Seat, number>;
+  handCountChanges: Record<Seat, number>;
+  trick: {
+    leadSeat: Seat;
+    lastPlaySeat?: Seat;
+    passSeats: Seat[];
+    plays: GameAction[];
+  };
+  tributeEvents: PublicTributeEvent[];
+  finishOrder: Seat[];
+}
+
 export type SimulationSummary = GameSummary & {
   completed: boolean;
   failed: boolean;
   errors: SimulationError[];
-  publicEvents: GameAction[];
+  errorCounters: SafetyErrorCounters;
+  publicEvents: PublicSimulationEvent[];
 };
 
 export function simulateGame(task: BenchmarkGameTask): SimulationSummary {
@@ -25,42 +48,81 @@ export function simulateGame(task: BenchmarkGameTask): SimulationSummary {
   const strategiesBySeat = strategyMap(task);
   const runtimes: Partial<Record<Seat, unknown>> = {};
   const errors: SimulationError[] = [];
+  const errorCounters = emptyErrorCounters();
+  const strategies: Partial<Record<Seat, ReturnType<typeof getStrategy>>> = {};
+
   for (const seat of seats()) {
-    const strategy = getStrategy(strategiesBySeat[seat]);
-    runtimes[seat] = strategy.createRuntime({
-      matchId: task.matchId,
-      seat,
-      strategyRandomSeed: deriveSeed(task.matchId, seat),
-    });
+    try {
+      const strategy = getStrategy(strategiesBySeat[seat]);
+      strategies[seat] = strategy;
+      try {
+        runtimes[seat] = strategy.createRuntime({
+          matchId: task.matchId,
+          seat,
+          strategyRandomSeed: deriveSeed(task.matchId, seat),
+        });
+      } catch (cause) {
+        recordFailure(errors, errorCounters, task.seed, seat, strategiesBySeat[seat], cause, "runtimeErrors");
+      }
+    } catch (cause) {
+      recordFailure(errors, errorCounters, task.seed, seat, strategiesBySeat[seat], cause, "strategyErrors");
+    }
   }
 
+  const publicEvents: PublicSimulationEvent[] = [];
+  let previousCounts = handCounts(room);
   let guard = 0;
   while (room.status === "playing" && guard < 5000) {
     const seat = room.currentTurn;
     const strategyId = strategiesBySeat[seat];
-    const strategy = getStrategy(strategyId);
+    const strategy = strategies[seat];
     try {
+      if (strategy === undefined) throw new Error(`UNKNOWN_STRATEGY:${strategyId}`);
+      if (runtimes[seat] === undefined) throw new Error("BENCHMARK_RUNTIME_UNAVAILABLE");
       if (room.openingTribute?.status === "pending") {
         throw new Error("BENCHMARK_OPENING_TRIBUTE_UNSUPPORTED");
       }
       const observation = createBenchmarkObservation(room, seat);
-      const decision = strategy.decide(observation, runtimes[seat]);
+      let decision;
+      try {
+        decision = strategy.decide(observation, runtimes[seat]);
+      } catch (cause) {
+        recordFailure(errors, errorCounters, task.seed, seat, strategyId, cause, "strategyErrors");
+        break;
+      }
       runtimes[seat] = decision.runtime;
-      executeAction(room, seat, decision.action);
+      try {
+        executeAction(room, seat, decision.action);
+      } catch (cause) {
+        recordFailure(errors, errorCounters, task.seed, seat, strategyId, cause, "engineErrors");
+        errorCounters.illegalActions += 1;
+        break;
+      }
+      const nextCounts = handCounts(room);
+      appendPublicEvent(publicEvents, room, nextCounts, countDelta(nextCounts, previousCounts));
+      previousCounts = nextCounts;
     } catch (cause) {
-      errors.push({ seed: task.seed, seat, strategy: strategyId, error: errorMessage(cause) });
+      const message = errorMessage(cause);
+      const category = strategy === undefined
+        ? "strategyErrors"
+        : message === "BENCHMARK_RUNTIME_UNAVAILABLE"
+          ? "runtimeErrors"
+          : "engineErrors";
+      recordFailure(errors, errorCounters, task.seed, seat, strategyId, cause, category);
+      if (category === "engineErrors" && message !== "BENCHMARK_OPENING_TRIBUTE_UNSUPPORTED") {
+        errorCounters.illegalActions += 1;
+      }
       break;
     }
     guard += 1;
   }
-  if (guard >= 5000) {
-    errors.push({ seed: task.seed, seat: room.currentTurn, strategy: strategiesBySeat[room.currentTurn], error: "BENCHMARK_TURN_GUARD_EXCEEDED" });
+  if (room.status === "playing" && guard >= 5000) {
+    recordFailure(errors, errorCounters, task.seed, room.currentTurn, strategiesBySeat[room.currentTurn], new Error("BENCHMARK_TURN_GUARD_EXCEEDED"), "guardErrors");
   }
 
-  const publicEvents = createBenchmarkObservation(room, 0).publicHistory;
   const winnerTeam = room.settlement?.winningTeam ?? null;
   const teamScore: Record<0 | 1, number> = { 0: winnerTeam === 0 ? 1 : 0, 1: winnerTeam === 1 ? 1 : 0 };
-  const summary: SimulationSummary = {
+  return {
     matchId: task.matchId,
     configHash: task.configHash,
     seed: task.seed,
@@ -76,13 +138,32 @@ export function simulateGame(task: BenchmarkGameTask): SimulationSummary {
     completed: room.status === "finished" && room.finishOrder.length === 4,
     failed: errors.length > 0,
     errors,
+    errorCounters,
     publicEvents,
   };
-  return summary;
 }
 
 function executeAction(room: RoomState, seat: Seat, action: StrategyAction): void {
   if (action.type === "pass") passTurn(room, seat); else playCards(room, seat, action.cardIds);
+}
+
+function appendPublicEvent(events: PublicSimulationEvent[], room: RoomState, counts: Record<Seat, number>, changes: Record<Seat, number>): void {
+  const observation = createBenchmarkObservation(room, room.currentTurn);
+  const action = observation.publicHistory[observation.publicHistory.length - 1];
+  if (action === undefined) return;
+  events.push({
+    ...action,
+    handCounts: counts,
+    handCountChanges: changes,
+    trick: {
+      leadSeat: room.trick.leadSeat,
+      lastPlaySeat: room.trick.lastPlaySeat,
+      passSeats: [...room.trick.passSeats],
+      plays: [...observation.publicTrick],
+    },
+    tributeEvents: [...observation.publicTributeEvents],
+    finishOrder: [...room.finishOrder],
+  });
 }
 
 function strategyMap(task: BenchmarkGameTask): Record<Seat, string> {
@@ -101,10 +182,36 @@ function finalPublicState(room: RoomState) {
     status: room.status,
     currentTurn: room.currentTurn,
     leaderSeat: room.leaderSeat,
-    handCounts: Object.fromEntries(seats().map((seat) => [seat, room.hands[seat].length])),
+    handCounts: handCounts(room),
     finishOrder: room.finishOrder,
     settlement: room.settlement,
   };
+}
+
+function handCounts(room: RoomState): Record<Seat, number> {
+  return Object.fromEntries(seats().map((seat) => [seat, room.hands[seat].length])) as Record<Seat, number>;
+}
+
+function countDelta(next: Record<Seat, number>, previous: Record<Seat, number>): Record<Seat, number> {
+  return Object.fromEntries(seats().map((seat) => [seat, next[seat] - previous[seat]])) as Record<Seat, number>;
+}
+
+function emptyErrorCounters(): SafetyErrorCounters {
+  return { total: 0, strategyErrors: 0, runtimeErrors: 0, illegalActions: 0, engineErrors: 0, guardErrors: 0 };
+}
+
+function recordFailure(
+  errors: SimulationError[],
+  counters: SafetyErrorCounters,
+  seed: number,
+  seat: Seat,
+  strategy: string,
+  cause: unknown,
+  category: keyof Omit<SafetyErrorCounters, "total" | "illegalActions">,
+): void {
+  errors.push({ seed, seat, strategy, error: errorMessage(cause) });
+  counters.total += 1;
+  counters[category] += 1;
 }
 
 function deriveSeed(matchId: string, seat: Seat): string {
