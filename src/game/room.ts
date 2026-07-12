@@ -2,10 +2,10 @@ import { createDeck, isHeartRankWild, rankStrength, type Card, type GameRank, ty
 import type { CardGroup } from "../engine/groups";
 import { DEFAULT_AI_PERFORMANCE_CONFIG } from "../ai/config";
 import type { AiRuntimeState, HandPlan } from "../ai/contracts";
-import { ensurePlans } from "../ai/planning/planManager";
-import { chooseAiAction } from "./ai";
+import { applyExecutedAction, ensurePlans } from "../ai/planning/planManager";
+import { decideAiAction } from "../ai/aiDecisionEngine";
+import type { AiPlanningDiagnostics } from "../ai/diagnostics/aiPlanningDiagnostics";
 import { canBeatPlay, classifyPlay } from "./playRules";
-import { createHandAnalysis, type HandAnalysis } from "./protectedGroups";
 import { settleRound, type RoundSettlement, type TributeItem, type TributeState } from "./settlement";
 
 export type Seat = 0 | 1 | 2 | 3;
@@ -227,7 +227,7 @@ export function passTurn(room: RoomState, seat: Seat): void {
   }
 }
 
-export function runAiStep(room: RoomState): void {
+export function runAiStep(room: RoomState, diagnostics?: AiPlanningDiagnostics): void {
   if (room.status !== "playing") {
     return;
   }
@@ -252,48 +252,36 @@ export function runAiStep(room: RoomState): void {
 
   const seat = room.currentTurn;
   const partner = partnerSeat(seat);
-  const analysis = createHandAnalysis(room.hands[seat], room.rank);
-  ensureAiPlanForSeat(room, seat, analysis);
-  const action = chooseAiAction({
-    hand: room.hands[seat],
-    partnerHand: room.hands[partner],
-    plannedGroups: currentPlannedGroups(room, seat),
+  const handBefore = [...room.hands[seat]];
+  const decision = decideAiAction({
+    hand: [...room.hands[seat]],
     gameRank: room.rank,
     seat,
     partnerSeat: partner,
     lastPlay: room.trick.lastPlay,
     lastPlaySeat: room.trick.lastPlaySeat,
-    analysis,
-    preferPlannedLead: true,
-    context: {
-      ownHandCount: room.hands[seat].length,
-      partnerHandCount: room.hands[partner].length,
-      opponentHandCounts: room.players
-        .filter((candidate) => candidate.seat !== seat && candidate.seat !== partner)
-        .map((candidate) => room.hands[candidate.seat].length),
-      playedCards: room.playHistory.flatMap((play) => play.group?.cards ?? []),
-      finishOrder: room.finishOrder,
-      partnerPassedCurrentTrick: room.trick.passSeats.includes(partner),
-    },
-  });
+    playedCards: room.playHistory.flatMap((play) => play.group?.cards ?? []),
+    handCounts: Object.fromEntries(room.players.map((candidate) => [candidate.seat, room.hands[candidate.seat].length])),
+    finishOrder: room.finishOrder,
+    partnerPassedCurrentTrick: room.trick.passSeats.includes(partner),
+  }, room.aiRuntime[seat] ?? emptyAiRuntime(), { ...DEFAULT_AI_PERFORMANCE_CONFIG, turn: room.currentTrickIndex, diagnostics });
+  const selectedPlan = decision.selectedPlan ?? decision.runtime.candidatePlans.find((plan) => plan.id === decision.selectedPlanId);
+  if (selectedPlan === undefined) throw new Error("AI_ENGINE_MISSING_SELECTED_PLAN");
+  const action = decision.action;
 
   if (action.type === "pass") {
     if (room.trick.lastPlay === undefined) {
-      const fallbackGroup = selectSafeAiLeadFallback(room.hands[seat], room.rank, analysis);
-      if (fallbackGroup === undefined) {
-        if (room.hands[seat].length === 0) {
-          throw new Error("AI_ACTIVE_SEAT_EMPTY");
-        }
-        throw new Error("AI_NON_EMPTY_HAND_HAS_NO_LEGAL_LEAD");
-      }
-
-      room.actionLog.unshift(`${playerName(room, seat)} 首发策略为空，按保护规则兜底出牌。`);
-      playCards(room, seat, fallbackGroup.cards.map((card) => card.id));
-      return;
+      throw new Error("AI_ENGINE_RETURNED_LEAD_PASS");
     }
     passTurn(room, seat);
+    room.aiRuntime[seat] = applyExecutedAction(decision.runtime, handBefore, undefined, room.hands[seat], room.rank, room.currentTrickIndex, DEFAULT_AI_PERFORMANCE_CONFIG.planning, DEFAULT_AI_PERFORMANCE_CONFIG.version, diagnostics);
+    room.aiPlans[seat] = toLegacyAiPlanState(seat, selectedPlan);
   } else {
     playCards(room, seat, action.group.cards.map((card) => card.id));
+    const runtime = applyExecutedAction(decision.runtime, handBefore, action.group, room.hands[seat], room.rank, room.currentTrickIndex, DEFAULT_AI_PERFORMANCE_CONFIG.planning, DEFAULT_AI_PERFORMANCE_CONFIG.version, diagnostics);
+    room.aiRuntime[seat] = runtime;
+    const plan = runtime.candidatePlans.find((candidate) => candidate.id === runtime.activePlanId);
+    if (runtime.needsReplan || plan === undefined) delete room.aiPlans[seat]; else room.aiPlans[seat] = toLegacyAiPlanState(seat, plan);
   }
 }
 
@@ -318,21 +306,7 @@ function normalizeActiveSeat(room: RoomState): void {
   }
 }
 
-export function selectSafeAiLeadFallback(
-  hand: Card[],
-  gameRank: GameRank,
-  analysis = createHandAnalysis(hand, gameRank),
-): CardGroup | undefined {
-  return analysis.accepted
-    .map((candidate) => candidate.group)
-    .sort((left, right) =>
-      left.cards.length - right.cards.length ||
-      left.strength - right.strength ||
-      left.id.localeCompare(right.id),
-    )[0];
-}
-
-function ensureAiPlanForSeat(room: RoomState, seat: Seat, analysis?: HandAnalysis): void {
+function ensureAiPlanForSeat(room: RoomState, seat: Seat): void {
   const previousRuntime = room.aiRuntime[seat];
   const runtime = ensurePlans(
     previousRuntime ?? emptyAiRuntime(),
@@ -360,11 +334,6 @@ function emptyAiRuntime(): AiRuntimeState {
     configVersion: "",
     needsReplan: true,
   };
-}
-
-function currentPlannedGroups(room: RoomState, seat: Seat): CardGroup[] {
-  const handIds = new Set(room.hands[seat].map((card) => card.id));
-  return room.aiPlans[seat]?.groups.filter((group) => group.cards.every((card) => handIds.has(card.id))) ?? [];
 }
 
 export function advanceOpeningTribute(room: RoomState, seat?: Seat, cardIds: string[] = []): void {
@@ -476,6 +445,12 @@ function randomOpeningLeader(seed: number): Seat {
 }
 
 function selectCards(hand: Card[], cardIds: string[]): Card[] {
+  if (cardIds.length === 0) {
+    throw new Error("AI_ACTION_EMPTY_CARDS");
+  }
+  if (new Set(cardIds).size !== cardIds.length) {
+    throw new Error("AI_ACTION_CONTAINS_DUPLICATE_CARDS");
+  }
   const cards = cardIds.map((id) => hand.find((card) => card.id === id));
   if (cards.some((card) => card === undefined)) {
     throw new Error("所选牌不在当前手牌中。");

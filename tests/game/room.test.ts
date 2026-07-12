@@ -1,4 +1,4 @@
-import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, selectSafeAiLeadFallback, type Seat } from "../../src/game/room";
+import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, type Seat } from "../../src/game/room";
 import { createDeck, isHeartRankWild, rankStrength, type Card, type GameRank, type Rank, type Suit } from "../../src/engine/cards";
 import { measurePlanQuality } from "../../src/engine/planQuality";
 import { classifyPlay } from "../../src/game/playRules";
@@ -657,22 +657,6 @@ it("normalizes a finished AI seat before attempting to plan or lead", () => {
   expect(() => runAiStep(room)).not.toThrow();
   expect(room.currentTurn).toBe(0);
   expect(room.playHistory).toHaveLength(0);
-});
-
-it("selects a protected legal lead fallback without splitting a four-card bomb", () => {
-  const bomb = [suited("9", "spades"), suited("9", "clubs"), suited("9", "hearts"), suited("9", "diamonds")];
-  const fallback = selectSafeAiLeadFallback([...bomb, suited("K", "spades")], "10");
-
-  expect(fallback?.type).toBe("single");
-  expect(fallback?.cards.map((card) => card.rank)).toEqual(["K"]);
-});
-
-it("keeps a four-card bomb whole when it is the only protected legal lead fallback", () => {
-  const bomb = [suited("9", "spades"), suited("9", "clubs"), suited("9", "hearts"), suited("9", "diamonds")];
-  const fallback = selectSafeAiLeadFallback(bomb, "10");
-
-  expect(fallback?.type).toBe("bomb");
-  expect(fallback?.cards).toHaveLength(4);
 });
 
 it("advances past an AI that cannot beat a south A full-house while playing rank 5", () => {

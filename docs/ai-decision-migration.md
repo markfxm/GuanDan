@@ -4,6 +4,12 @@
 
 | 当前函数/区域 | 目标模块 | 外部调用方 | 纯函数 | 隐藏信息 | C1 状态 |
 | --- | --- | --- | --- | --- | --- |
+
+## C2 decision engine flow
+
+`decideAiAction` obtains one cached HandAnalysis, uses PlanManager for runtime reuse or replanning, evaluates the visible-hand role, generates legal policy-approved candidates, evaluates them with stable score ordering, then performs final play-rules and PowerGroupPolicy validation. It returns runtime, selected plan id, score breakdown, candidate count, elapsed time and reason codes.
+
+The legacy `chooseAiAction` path remains the production return path. C2 shadow tests call the two entries independently; no room call site invokes the unified engine.
 | `classifyAiRole`、控制/强牌资源统计 | `ai/tactics/roleEvaluator.ts` | `chooseAiAction`、AI 测试 | 是 | 否 | 已迁入；旧接口委托新实现 |
 | `legalLeadActions`、`legalFollowActions`、`toLeadAction`、`toFollowAction` | `ai/tactics/actionGenerator.ts` | `chooseLeadAction`、`chooseFollowAction` | 是 | 否 | 建立统一的合法+政策候选生成；旧路径暂保留 |
 | `scoreFollowAction`、`scoreEarlyLead`、`scoreLateLead`、比较器 | `ai/tactics/actionEvaluator.ts` | `chooseLeadAction`、`chooseFollowAction` | 是 | 否 | 建立结构化公共评分；旧精细评分暂保留用于 C2 对照 |

@@ -12,3 +12,9 @@ it("keeps tactics modules independent from room and legacy decision internals", 
     if (file === "roleEvaluator.ts") expect(source).not.toContain("generateActionCandidates");
   }
 });
+
+it("keeps the unified engine independent from room and the legacy decision entry", () => {
+  const source = readFileSync(resolve(process.cwd(), "src/ai/aiDecisionEngine.ts"), "utf8");
+  expect(source).not.toMatch(/\.\.\/game\/(room|ai)/);
+  expect(source).not.toMatch(/detectGroups|isLegalBombReduction|generateHandPlans|chooseAiAction/);
+});

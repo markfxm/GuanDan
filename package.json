@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "api": "tsx src/server/dev.ts",
-    "test": "vitest run",
+    "test": "vitest run --exclude tests/performance/aiHotPath.test.ts && vitest run tests/performance/aiHotPath.test.ts",
     "test:watch": "vitest",
-    "build": "tsc --noEmit && vite build"
+    "build": "tsc --noEmit && vite build",
+    "simulate:ai": "tsx scripts/runUnifiedAiSimulation.ts",
+    "test:ai-performance": "vitest run tests/performance/aiHotPath.test.ts"
   },
   "dependencies": {
     "fastify": "^5.2.1",

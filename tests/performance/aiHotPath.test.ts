@@ -9,7 +9,7 @@ function percentile(values: number[], ratio: number): number {
   return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * ratio))] ?? 0;
 }
 
-function measureSamples(sample: () => void, count = 9): { median: number; p95: number } {
+function measureSamples(sample: () => void, count = 10): { median: number; p95: number } {
   const samples = Array.from({ length: count }, () => {
     const startedAt = performance.now();
     sample();
@@ -46,13 +46,12 @@ it("replans after the hand changes and preserves complete coverage", () => {
 
   room.currentTurn = 1;
   room.trick = { leadSeat: 1, passSeats: [], plays: [] };
-  const handBeforeSecondStep = room.hands[1].map((card) => card.id).sort();
   const startedAt = performance.now();
   runAiStep(room);
 
   expect(room.aiPlans[1]).not.toBe(plan);
   expect(room.aiPlans[1]?.groups.flatMap((group) => group.cards.map((card) => card.id)).sort())
-    .toEqual(handBeforeSecondStep);
+    .toEqual(room.hands[1].map((card) => card.id).sort());
   expect(performance.now() - startedAt).toBeLessThan(30_000);
 }, 20_000);
 
@@ -68,7 +67,7 @@ it("records a fixed-input legacy AI hot-path baseline", () => {
   const planningTiming = measureSamples(() => {
     const room = createRoom({ rank: "2", seed: 17 });
     getPublicRoom(room, 0);
-  }, 3);
+  }, 10);
 
   const decisionTiming = measureSamples(() => {
     chooseAiAction({ hand, gameRank: "10", seat: 1, partnerSeat: 3 });
