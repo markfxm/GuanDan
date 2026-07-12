@@ -11,11 +11,10 @@ Added `tests/benchmark/reproducibility.test.ts` only; no production (`src`) file
 
 ## Verification
 
-- `npx vitest run tests/benchmark/reproducibility.test.ts --reporter=dot`: 5 tests passed.
-- `npx vitest run tests/benchmark --reporter=dot`: 9 files, 45 tests passed.
+- `npx vitest run tests/benchmark/reproducibility.test.ts --reporter=dot`: 6 tests passed (249.7s).
+- `npx vitest run tests/benchmark --reporter=dot`: 9 files, 46 tests passed (270.6s).
 - `npx tsc --noEmit`: passed.
 - `git diff --check`: passed.
-- Registered replay test (`-t "replays saved"`): passed; full rerun remains pending due benchmark worker runtime.
 
 The 50-seed merge regression runs one 200-seed paired manifest and four paired 50-seed manifests, then compares stable game summaries and both public/final hash maps after volatile-field stripping.
 
