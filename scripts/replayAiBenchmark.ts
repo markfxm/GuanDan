@@ -10,6 +10,7 @@ export function replayMatch(matchId: string, replayRoot = "artifacts/ai-benchmar
   if (file === undefined) throw new Error(`REPLAY_NOT_FOUND:${matchId}`);
   const document = JSON.parse(fs.readFileSync(file, "utf8")) as ReplayDocument;
   if (document.matchId !== matchId) throw new Error("REPLAY_MATCH_ID_MISMATCH");
+  if (!isProvenanceComplete(document)) throw new Error("REPLAY_PROVENANCE_INVALID");
   const identity = JSON.parse(document.matchId) as { matchup: string; allocation: "AB" | "BA"; rotation: 0 | 1 | 2 | 3; seed: number };
   const [strategyA, strategyB] = identity.matchup.split("-vs-");
   if (!strategyA || !strategyB) throw new Error("REPLAY_MATCHUP_INVALID");
@@ -23,6 +24,13 @@ export function replayMatch(matchId: string, replayRoot = "artifacts/ai-benchmar
   const publicTraceHash = hashPublicTrace(result.publicEvents);
   const finalPublicStateHash = hashFinalPublicState(result.finalPublicState);
   return { matchId, publicTraceHash, finalPublicStateHash, verified: publicTraceHash === document.publicTraceHash && finalPublicStateHash === document.finalPublicStateHash };
+}
+
+function isProvenanceComplete(document: ReplayDocument): boolean {
+  return typeof document.engineVersion === "string" && document.engineVersion.length > 0 && document.engineVersion.toLowerCase() !== "unknown"
+    && typeof document.roomRulesVersion === "string" && /^[a-f0-9]{64}$/.test(document.roomRulesVersion)
+    && Array.isArray(document.strategyDescriptors) && document.strategyDescriptors.length > 0
+    && document.strategyDescriptors.every((descriptor) => descriptor.id && descriptor.implementationVersion && descriptor.configHash && descriptor.sourceCommit && descriptor.sourceCommit.toLowerCase() !== "unknown" && ["legal-only", "production-policy"].includes(descriptor.candidatePolicy));
 }
 
 function findReplay(matchId: string, root: string): string | undefined {

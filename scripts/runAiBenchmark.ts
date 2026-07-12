@@ -10,7 +10,7 @@ import { canonicalJson } from "../tests/benchmark/contracts";
 import { aggregateTournament } from "../tests/benchmark/statistics";
 import { summarizeGame, type GameMetrics } from "../tests/benchmark/metrics";
 import { buildGamesForSeed, type BenchmarkGameTask } from "../tests/benchmark/rotations";
-import { createManifest, buildReport, writeReport, writeReplay, type BatchManifest } from "../tests/benchmark/reporting";
+import { createManifest, buildReport, writeReport, writeMarkdownReport, writeReplay, ENGINE_VERSION, ROOM_RULES_VERSION, type BatchManifest } from "../tests/benchmark/reporting";
 import { simulateGame, type SimulationError, type SimulationSummary, type SafetyErrorCounters } from "../tests/benchmark/simulator";
 import { strategyDescriptors } from "../tests/benchmark/strategies";
 import type { BenchmarkWorkerResult } from "../tests/benchmark/worker";
@@ -99,7 +99,7 @@ export async function runBenchmark(input: Partial<BenchmarkCliOptions> & Pick<Be
   const games = [...existingById.values(), ...fresh].sort((left, right) => left.matchId.localeCompare(right.matchId));
   const expected = tasks.map((task) => task.matchId).sort();
   for (const id of expected) if (!games.some((game) => game.matchId === id)) throw new Error(`MISSING_EXPECTED_MATCH_ID:${id}`);
-  const manifest = createManifest(config, games, { expectedMatchIds: expected });
+  const manifest = createManifest(config, games, { expectedMatchIds: expected, strategyDescriptors });
   const metrics = games.map((game) => summarizeGame(game));
   const aggregate = aggregateTournament(metrics, config);
   const paired = { enabled: options.paired, unit: "seed", rotations: 4, allocations: options.paired ? 2 : 1, gamesPerSeed: options.paired ? 8 : 4 };
@@ -107,10 +107,18 @@ export async function runBenchmark(input: Partial<BenchmarkCliOptions> & Pick<Be
     replayMode: options.replayMode,
     benchmarkVersion: config.benchmarkVersion,
     strategyDescriptors,
+    engineVersion: ENGINE_VERSION,
+    roomRulesVersion: ROOM_RULES_VERSION,
   }));
-  const report = buildReport({ config, games: metrics, aggregate, paired, replayPaths }, { outputPath: options.output });
+  const provenance = { engineVersion: ENGINE_VERSION, roomRulesVersion: ROOM_RULES_VERSION, strategyDescriptors };
+  const reportInput = { config, games: metrics, aggregate, paired, replayPaths, provenance };
+  const report = buildReport(reportInput, { outputPath: options.output, provenance });
   let outputPath: string | undefined;
-  if (options.output !== undefined) outputPath = writeReport({ config, games: metrics, aggregate, paired, replayPaths }, options.output);
+  if (options.output !== undefined) {
+    outputPath = writeReport(reportInput, options.output);
+    const markdownPath = options.output.replace(/\.json$/i, ".md");
+    writeMarkdownReport(reportInput, markdownPath);
+  }
   if (options.output !== undefined) {
     const manifestPath = options.output.endsWith(".manifest.json") ? options.output : `${options.output}.manifest.json`;
     fs.mkdirSync(path.dirname(path.resolve(manifestPath)), { recursive: true });
@@ -209,7 +217,7 @@ function timeoutSummary(task: BenchmarkGameTask, timeoutMs: number, error = `BEN
   const strategiesBySeat = { 0: task.allocation === "AB" ? task.config.strategyA : task.config.strategyB, 1: task.allocation === "AB" ? task.config.strategyB : task.config.strategyA, 2: task.allocation === "AB" ? task.config.strategyA : task.config.strategyB, 3: task.allocation === "AB" ? task.config.strategyB : task.config.strategyA } as Record<Seat, string>;
   const failure: SimulationError = { seed: task.seed, seat: 0, strategy: strategiesBySeat[0], error };
   const counters: SafetyErrorCounters = { total: 1, strategyErrors: error.includes("UNKNOWN_STRATEGY") ? 1 : 0, runtimeErrors: 0, illegalActions: 0, engineErrors: error.includes("UNKNOWN_STRATEGY") ? 0 : 1, guardErrors: 0 };
-  return { matchId: task.matchId, configHash: task.configHash, seed: task.seed, rank: task.config.rank, rotation: task.rotation, strategiesBySeat, finishOrder: [], winnerTeam: null, teamScore: { 0: 0, 1: 0 }, actionCount: 0, publicTraceHash: "", finalPublicStateHash: "", completed: false, failed: true, errors: [failure], errorCounters: counters, publicEvents: [], diagnostics: diagnostics ? { enabled: true, decisionCount: 0, workerLocalToken: task.matchId } : undefined };
+  return { matchId: task.matchId, configHash: task.configHash, seed: task.seed, rank: task.config.rank, rotation: task.rotation, strategiesBySeat, finishOrder: [], winnerTeam: null, teamScore: { 0: 0, 1: 0 }, actionCount: 0, publicTraceHash: "", finalPublicStateHash: "", durationMs: Math.max(0.001, timeoutMs), completed: false, failed: true, errors: [failure], errorCounters: counters, publicEvents: [], diagnostics: diagnostics ? { enabled: true, decisionCount: 0, workerLocalToken: task.matchId } : undefined };
 }
 
 function loadExisting(output: string | undefined, configHash: string, options: BenchmarkCliOptions, expectedIds: string[]): Array<SimulationSummary> {

@@ -84,6 +84,14 @@ export interface GameSummary {
   actionCount: number;
   publicTraceHash: string;
   finalPublicStateHash: string;
+  /** Wall-clock duration measured around the complete simulation (milliseconds). */
+  durationMs: number;
+}
+
+export interface BenchmarkProvenance {
+  engineVersion: string;
+  roomRulesVersion: string;
+  strategyDescriptors: StrategyDescriptor[];
 }
 
 export interface ReplayDocument {
@@ -108,6 +116,7 @@ export interface ReplayDocument {
   actionCount: number;
   publicTraceHash: string;
   finalPublicStateHash: string;
+  durationMs?: number;
 }
 
 export function canonicalJson(value: unknown): string {

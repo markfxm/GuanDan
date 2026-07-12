@@ -50,6 +50,7 @@ export type SimulationSummary = GameSummary & {
 };
 
 export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: boolean } = {}): SimulationSummary {
+  const startedAt = performance.now();
   const room = structuredClone(task.room ?? createRoom({ rank: task.config.rank, seed: task.seed }));
   const strategiesBySeat = strategyMap(task);
   const runtimes: Partial<Record<Seat, unknown>> = {};
@@ -133,6 +134,7 @@ export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: b
   const winnerTeam = room.settlement?.winningTeam ?? null;
   const teamScore: Record<0 | 1, number> = { 0: winnerTeam === 0 ? 1 : 0, 1: winnerTeam === 1 ? 1 : 0 };
   const publicState = finalPublicState(room);
+  const durationMs = measuredDuration(startedAt);
   return {
     matchId: task.matchId,
     configHash: task.configHash,
@@ -146,6 +148,7 @@ export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: b
     actionCount: room.playHistory.length,
     publicTraceHash: publicTraceHash(publicEvents),
     finalPublicStateHash: finalPublicStateHash(publicState),
+    durationMs,
     finalPublicState: publicState,
     completed: room.status === "finished" && room.finishOrder.length === 4,
     failed: errors.length > 0,
@@ -154,6 +157,10 @@ export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: b
     publicEvents,
     diagnostics,
   };
+}
+
+function measuredDuration(startedAt: number): number {
+  return Math.max(0.001, performance.now() - startedAt);
 }
 
 function executeAction(room: RoomState, seat: Seat, action: StrategyAction): void {

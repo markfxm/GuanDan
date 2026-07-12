@@ -57,6 +57,7 @@ export function aggregateTournament(
   config: BenchmarkConfig,
   options: { bootstrapIterations?: number; bootstrapSeed?: number } = {},
 ): TournamentAggregate {
+  if (input.some((game) => typeof game.durationMs !== "number" || !Number.isFinite(game.durationMs) || game.durationMs <= 0)) throw new Error("DURATION_INVALID");
   const games = input.map((game) => summarizeGame(game as SimulationSummary));
   let blocks: BaseSeedBlock[] = [];
   try { blocks = toBlocks(games); } catch { /* Aggregation remains descriptive for incomplete arbitrary inputs. */ }

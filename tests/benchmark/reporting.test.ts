@@ -10,6 +10,7 @@ import {
   publicTraceHash,
   writeReplay,
   writeReport,
+  buildMarkdownReport,
 } from "./reporting";
 
 const config: BenchmarkConfig = {
@@ -41,6 +42,7 @@ const summary = (seed: number, rotation: 0 | 1 | 2 | 3, allocation: "AB" | "BA")
   actionCount: 1,
   publicTraceHash: "trace",
   finalPublicStateHash: "state",
+  durationMs: 1,
 });
 
 it("canonical public hashes ignore timings, paths, stacks, and worker IDs", () => {
@@ -66,6 +68,7 @@ it("writes schema-complete replay and privacy-safe report", () => {
   const replayPath = writeReplay(game, { outputDir: dir, replayMode: "all", strategyDescriptors: descriptors, engineVersion: "pkg@sha", roomRulesVersion: "rules" });
   const replay = JSON.parse(fs.readFileSync(replayPath!, "utf8"));
   expect(replay).toMatchObject({ schemaVersion: "1", replayVersion: "d0-v1", benchmarkVersion: "d0-v1", engineVersion: "pkg@sha", roomRulesVersion: "rules", configHash: "8955814f70f940c7fa2bbe4e09e2b3d27e95449013d39c1f9c11e6ac33ad3d19", finalPublicStateHash: "state" });
+  expect(replay.strategyDescriptors).toEqual(descriptors);
   const reportPath = writeReport({ config, games: [game], replayPaths: ["../replays/m.json"] }, { outputPath: path.join(dir, "report.json") });
   const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
   expect(report.games[0]).not.toHaveProperty("publicEvents");
@@ -73,11 +76,36 @@ it("writes schema-complete replay and privacy-safe report", () => {
   expect(report.games[0].replayPath).toBe("../replays/m.json");
 });
 
+it("rejects zero-duration formal rows and renders the required baseline sections", () => {
+  expect(() => writeReport({ config, games: [{ ...summary(1, 0, "AB"), durationMs: 0 }] })).toThrow("DURATION_INVALID");
+  const markdown = buildMarkdownReport({ config, games: [{ ...summary(1, 0, "AB"), durationMs: 1 }], aggregate: {
+    winsA: 1, winsB: 0, unresolved: 0, winRateA: 1, winRateB: 0, scoreA: 1, scoreB: 0,
+    scoreDifferenceCI: [0, 1], winRateCI: [0.5, 1], statisticallySignificant: true,
+    significance: { score: { ci: [0, 1], excludesNeutral: true }, winRate: { ci: [0.5, 1], excludesNeutral: true } },
+    elo: { initialRating: 1500, kFactor: 32, delta: 16, observedScore: 1, version: "d0-elo-v1" },
+    classifications: { exploratory: true, tags: {} }, duration: { mean: 1, median: 1, p95: 1 }, errorRate: 0,
+  } });
+  for (const heading of ["Purpose", "Strategy descriptors and policies", "Sample and fairness", "Wins, rates, scores, confidence intervals, significance, and Elo", "Exploratory classifications", "Performance", "Anomalies", "Conclusions and limitations"]) {
+    expect(markdown).toContain(`## ${heading}`);
+  }
+});
+
 it("defaults replay mode to failures", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d0-default-replay-"));
   const game = summary(1, 0, "AB") as SimulationSummary;
   expect(writeReplay({ ...game, failed: false }, { outputDir: dir })).toBeUndefined();
   expect(writeReplay({ ...game, failed: true }, { outputDir: dir })).toBeDefined();
+});
+
+it("fills default replay provenance with real non-unknown values", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d0-provenance-"));
+  const game = { ...summary(1, 0, "AB"), failed: true } as SimulationSummary;
+  const replayPath = writeReplay(game, { outputDir: dir });
+  const replay = JSON.parse(fs.readFileSync(replayPath!, "utf8")) as Record<string, any>;
+  expect(replay.engineVersion).toMatch(/^\d+\.\d+\.\d+@[^@]+$/);
+  expect(replay.roomRulesVersion).toMatch(/^[a-f0-9]{64}$/);
+  expect(replay.strategyDescriptors.length).toBeGreaterThan(0);
+  expect(JSON.stringify(replay)).not.toMatch(/unknown/i);
 });
 
 it("rejects games whose config hash differs from their manifest", () => {

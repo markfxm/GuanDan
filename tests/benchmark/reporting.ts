@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { BenchmarkConfig, GameSummary, ReplayDocument, StrategyDescriptor } from "./contracts";
+import type { BenchmarkConfig, BenchmarkProvenance, GameSummary, ReplayDocument, StrategyDescriptor } from "./contracts";
 import { canonicalJson } from "./contracts";
 import type { SimulationSummary } from "./simulator";
 
@@ -24,10 +25,12 @@ export interface ReportInput {
   aggregate?: unknown;
   paired?: unknown;
   replayPaths?: Array<string | undefined>;
+  provenance?: Partial<BenchmarkProvenance>;
 }
 
 export interface ReportOptions {
   outputPath?: string;
+  provenance?: Partial<BenchmarkProvenance>;
 }
 
 export interface BatchManifest {
@@ -35,7 +38,9 @@ export interface BatchManifest {
   manifestVersion: "d0-v1";
   configHash: string;
   benchmarkVersion: string;
-  strategyDescriptors?: StrategyDescriptor[];
+  engineVersion: string;
+  roomRulesVersion: string;
+  strategyDescriptors: StrategyDescriptor[];
   seedStart?: number;
   seedEnd?: number;
   expectedMatchIds: string[];
@@ -43,6 +48,16 @@ export interface BatchManifest {
   publicTraceHashes: Record<string, string>;
   finalPublicStateHashes: Record<string, string>;
 }
+
+const PACKAGE_VERSION = readPackageVersion();
+const SOURCE_COMMIT = readSourceCommit();
+export const ENGINE_VERSION = `${PACKAGE_VERSION}@${SOURCE_COMMIT}`;
+export const ROOM_RULES_VERSION = sha256(canonicalJson({
+  schema: "guandan-room-rules-v1",
+  rankProgression: ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"],
+  seats: [0, 1, 2, 3],
+  settlement: "settleRound-v1",
+}));
 
 export function publicTraceHash(input: unknown): string {
   const events = extractEvents(input);
@@ -68,6 +83,8 @@ export function writeReplay(summary: SimulationSummary | (GameSummary & Partial<
   const mode = options.replayMode ?? "failures";
   if (mode === "none" || (mode === "failures" && !summary.failed)) return undefined;
   const outputDir = options.outputDir ?? path.join("artifacts", "ai-benchmark-replays");
+  assertMeasuredDuration(summary);
+  const provenance = resolveProvenance(summary, options);
   const matchup = `${summary.strategiesBySeat[0] ?? "A"}-vs-${summary.strategiesBySeat[1] ?? "B"}`;
   const destination = path.join(outputDir, matchup, `${safeFileName(summary.matchId)}.json`);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
@@ -75,15 +92,15 @@ export function writeReplay(summary: SimulationSummary | (GameSummary & Partial<
     schemaVersion: "1",
     replayVersion: options.replayVersion ?? "d0-v1",
     benchmarkVersion: options.benchmarkVersion ?? "d0-v1",
-    engineVersion: options.engineVersion ?? "unknown",
-    roomRulesVersion: options.roomRulesVersion ?? "unknown",
+    engineVersion: provenance.engineVersion,
+    roomRulesVersion: provenance.roomRulesVersion,
     configHash: summary.configHash,
     matchId: summary.matchId,
     seed: summary.seed,
     rank: summary.rank,
     rotation: summary.rotation,
     strategiesBySeat: orderedSeatMap(summary.strategiesBySeat),
-    strategyDescriptors: options.strategyDescriptors ?? [],
+    strategyDescriptors: provenance.strategyDescriptors,
     deterministicRandom: { strategySeedDerivationVersion: "1" },
     publicEvents: Array.isArray((summary as Partial<SimulationSummary>).publicEvents)
       ? normalizePublic((summary as Partial<SimulationSummary>).publicEvents) as ReplayDocument["publicEvents"]
@@ -95,6 +112,7 @@ export function writeReplay(summary: SimulationSummary | (GameSummary & Partial<
     actionCount: summary.actionCount,
     publicTraceHash: summary.publicTraceHash,
     finalPublicStateHash: summary.finalPublicStateHash,
+    durationMs: summary.durationMs,
   };
   fs.writeFileSync(destination, `${JSON.stringify(document, null, 2)}\n`, "utf8");
   return destination;
@@ -103,6 +121,8 @@ export function writeReplay(summary: SimulationSummary | (GameSummary & Partial<
 export function buildReport(input: ReportInput, options: ReportOptions = {}): Record<string, unknown> {
   const expectedConfigHash = configHash(input.config);
   if (input.games.some((game) => game.configHash !== expectedConfigHash)) throw new Error("CONFIG_HASH_MISMATCH");
+  input.games.forEach(assertMeasuredDuration);
+  const provenance = resolveProvenance(input.games[0]!, { ...options.provenance, ...(input.provenance ?? {}) });
   const outputDir = options.outputPath === undefined ? undefined : path.dirname(path.resolve(options.outputPath));
   const games = input.games.map((game, index) => {
     const compact = compactSummary(game);
@@ -118,6 +138,7 @@ export function buildReport(input: ReportInput, options: ReportOptions = {}): Re
     benchmarkVersion: input.config.benchmarkVersion,
     config: input.config,
     configHash: expectedConfigHash,
+    provenance,
     games,
   };
   if (input.aggregate !== undefined) report.aggregate = input.aggregate;
@@ -141,6 +162,8 @@ export function createManifest(
 ): BatchManifest {
   const configHashValue = configHash(config);
   if (games.some((game) => game.configHash !== configHashValue)) throw new Error("CONFIG_HASH_MISMATCH");
+  games.forEach(assertMeasuredDuration);
+  const provenance = resolveProvenance(games[0]!, { strategyDescriptors: options.strategyDescriptors });
   const ids = [...new Set(options.expectedMatchIds ?? games.map((game) => game.matchId))].sort();
   const seeds = games.map((game) => game.seed);
   return {
@@ -148,7 +171,9 @@ export function createManifest(
     manifestVersion: "d0-v1",
     configHash: configHashValue,
     benchmarkVersion: config.benchmarkVersion,
-    strategyDescriptors: options.strategyDescriptors,
+    engineVersion: provenance.engineVersion,
+    roomRulesVersion: provenance.roomRulesVersion,
+    strategyDescriptors: provenance.strategyDescriptors,
     seedStart: seeds.length === 0 ? undefined : Math.min(...seeds),
     seedEnd: seeds.length === 0 ? undefined : Math.max(...seeds),
     expectedMatchIds: ids,
@@ -170,6 +195,7 @@ export function mergeBatches(batches: BatchManifest[]): BatchManifest {
   for (const batch of batches) {
     if (batch.configHash !== configHashValue) throw new Error("CONFIG_HASH_MISMATCH");
     if (batch.benchmarkVersion !== batches[0]!.benchmarkVersion) throw new Error("BENCHMARK_VERSION_MISMATCH");
+    if (batch.engineVersion !== batches[0]!.engineVersion || batch.roomRulesVersion !== batches[0]!.roomRulesVersion) throw new Error("PROVENANCE_MISMATCH");
     if (canonicalJson(batch.strategyDescriptors ?? []) !== descriptorKey) throw new Error("STRATEGY_DESCRIPTORS_MISMATCH");
     const actual = new Set(batch.games.map((game) => game.matchId));
     for (const id of batch.expectedMatchIds) {
@@ -195,6 +221,8 @@ export function mergeBatches(batches: BatchManifest[]): BatchManifest {
     manifestVersion: "d0-v1",
     configHash: configHashValue,
     benchmarkVersion: batches[0]!.benchmarkVersion,
+    engineVersion: batches[0]!.engineVersion,
+    roomRulesVersion: batches[0]!.roomRulesVersion,
     strategyDescriptors: batches[0]!.strategyDescriptors,
     seedStart: Math.min(...seeds),
     seedEnd: Math.max(...seeds),
@@ -245,6 +273,63 @@ const REPORT_SUMMARY_KEYS = [
   "diagnostics",
 ] as const;
 
+/** Render the compact benchmark report as an auditable human-readable summary. */
+export function buildMarkdownReport(input: ReportInput): string {
+  const report = buildReport(input);
+  const aggregate = (report.aggregate ?? {}) as Record<string, any>;
+  const provenance = report.provenance as BenchmarkProvenance;
+  const games = report.games as Array<Record<string, any>>;
+  const lines = [
+    "# D0 AI benchmark baseline",
+    "",
+    "## Purpose",
+    "",
+    "Measure seeded, paired AI strategy outcomes in the real Guandan room while preserving public-only hashes and auditable provenance.",
+    "",
+    "## Strategy descriptors and policies",
+    "",
+    ...provenance.strategyDescriptors.map((descriptor) => `- **${descriptor.id}** — implementation ${descriptor.implementationVersion}; policy ${descriptor.candidatePolicy}; config ${descriptor.configHash}; source ${descriptor.sourceCommit}`),
+    `- Engine: ${provenance.engineVersion}`,
+    `- Room rules fingerprint: ${provenance.roomRulesVersion}`,
+    "",
+    "## Sample and fairness",
+    "",
+    `- Raw games: ${games.length}; base seeds: ${aggregate.baseSeeds ?? "n/a"}; paired rotation units: ${aggregate.pairedRotationUnits ?? "n/a"}.`,
+    "- Each base seed uses four seat rotations and both AB/BA allocations; seeded deals and seat rotation are controlled by the harness.",
+    "",
+    "## Wins, rates, scores, confidence intervals, significance, and Elo",
+    "",
+    `- Wins A/B/unresolved: ${aggregate.winsA ?? "n/a"}/${aggregate.winsB ?? "n/a"}/${aggregate.unresolved ?? "n/a"}; rates: ${formatNumber(aggregate.winRateA)}/${formatNumber(aggregate.winRateB)}.`,
+    `- Scores A/B/difference: ${aggregate.scoreA ?? "n/a"}/${aggregate.scoreB ?? "n/a"}/${formatNumber(aggregate.scoreDifference)}.`,
+    `- Score CI: ${formatInterval(aggregate.scoreDifferenceCI)}; win-rate CI: ${formatInterval(aggregate.winRateCI)}; statistically significant: ${aggregate.statisticallySignificant ?? "n/a"}.`,
+    `- Elo: ${aggregate.elo ? `initial ${aggregate.elo.initialRating}, K ${aggregate.elo.kFactor}, delta ${formatNumber(aggregate.elo.delta)} (${aggregate.elo.version})` : "n/a"}.`,
+    "",
+    "## Exploratory classifications",
+    "",
+    `- Classifications are post-game exploratory tags only: ${JSON.stringify(aggregate.classifications?.tags ?? {})}.`,
+    "",
+    "## Performance",
+    "",
+    `- Duration mean/median/p95 (ms): ${formatNumber(aggregate.duration?.mean)}/${formatNumber(aggregate.duration?.median)}/${formatNumber(aggregate.duration?.p95)}; error rate: ${formatNumber(aggregate.errorRate)}.`,
+    "",
+    "## Anomalies",
+    "",
+    `- Failed or safety-error games: ${games.filter((game) => game.failed || (game.errorCounters?.total ?? 0) > 0).length}.`,
+    "",
+    "## Conclusions and limitations",
+    "",
+    "Results describe this seeded single-round proxy and are not a causal claim about general play strength. Confidence intervals and exploratory classifications should be read with the paired design and seat/deal limitations in mind.",
+    "",
+  ];
+  return lines.join("\n");
+}
+
+export function writeMarkdownReport(input: ReportInput, outputPath = path.join("artifacts", "ai-benchmark-report.md")): string {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, buildMarkdownReport(input), "utf8");
+  return outputPath;
+}
+
 function compactSummary(game: GameSummary | SimulationSummary): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const key of REPORT_SUMMARY_KEYS) {
@@ -256,6 +341,49 @@ function compactSummary(game: GameSummary | SimulationSummary): Record<string, u
   }
   return result;
 }
+
+function resolveProvenance(summary: GameSummary | undefined, options: ReplayOptions = {}): BenchmarkProvenance {
+  const descriptors = normalizeDescriptors(options.strategyDescriptors, summary);
+  return {
+    engineVersion: validProvenanceValue(options.engineVersion) ? options.engineVersion! : ENGINE_VERSION,
+    roomRulesVersion: validProvenanceValue(options.roomRulesVersion) ? options.roomRulesVersion! : ROOM_RULES_VERSION,
+    strategyDescriptors: descriptors,
+  };
+}
+
+function normalizeDescriptors(input: StrategyDescriptor[] | undefined, summary: GameSummary | undefined): StrategyDescriptor[] {
+  const source = input && input.length > 0 ? input : summary === undefined ? [] : Object.values(summary.strategiesBySeat).filter((id, index, values) => values.indexOf(id) === index).map((id) => ({
+    id,
+    implementationVersion: "benchmark-adapter-v1",
+    configHash: summary.configHash,
+    sourceCommit: SOURCE_COMMIT,
+    candidatePolicy: "legal-only" as const,
+  }));
+  return source.map((descriptor) => ({
+    id: descriptor.id,
+    implementationVersion: validProvenanceValue(descriptor.implementationVersion) ? descriptor.implementationVersion : "benchmark-adapter-v1",
+    configHash: validProvenanceValue(descriptor.configHash) ? descriptor.configHash : summary?.configHash ?? "benchmark-config",
+    sourceCommit: validProvenanceValue(descriptor.sourceCommit) ? descriptor.sourceCommit : SOURCE_COMMIT,
+    candidatePolicy: descriptor.candidatePolicy === "production-policy" ? "production-policy" : "legal-only",
+  }));
+}
+
+function assertMeasuredDuration(game: GameSummary): void {
+  if (typeof game.durationMs !== "number" || !Number.isFinite(game.durationMs) || game.durationMs <= 0) throw new Error("DURATION_INVALID");
+}
+const assertMeasuredDurations = assertMeasuredDuration;
+function validProvenanceValue(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value.toLowerCase() !== "unknown"; }
+function readPackageVersion(): string {
+  try { const packageJson = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), "package.json"), "utf8")) as { version?: string }; if (validProvenanceValue(packageJson.version)) return packageJson.version!; } catch { /* use deterministic fallback */ }
+  return "0.0.0";
+}
+function readSourceCommit(): string {
+  if (validProvenanceValue(process.env.GIT_COMMIT)) return process.env.GIT_COMMIT!;
+  try { const value = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); if (validProvenanceValue(value)) return value; } catch { /* use deterministic fallback */ }
+  return "working-tree";
+}
+function formatNumber(value: unknown): string { return typeof value === "number" && Number.isFinite(value) ? value.toFixed(3) : "n/a"; }
+function formatInterval(value: unknown): string { return Array.isArray(value) && value.length >= 2 ? `[${formatNumber(value[0])}, ${formatNumber(value[1])}]` : "n/a"; }
 
 function extractEvents(input: unknown): unknown {
   if (isRecord(input) && "publicEvents" in input) return input.publicEvents;

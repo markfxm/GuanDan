@@ -141,5 +141,6 @@ function fakeGame(seed: number, index: number): GameSummary {
     actionCount: 0,
     publicTraceHash: "trace",
     finalPublicStateHash: "state",
+    durationMs: 1,
   };
 }

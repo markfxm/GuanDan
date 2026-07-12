@@ -14,6 +14,7 @@ const config: BenchmarkConfig = {
 
 it("completes a mixed real-room game through strategy actions", () => {
   const summary = simulateGame(buildGamesForSeed(config, 7)[0]!);
+  expect(summary.durationMs).toBeGreaterThan(0);
   expect(summary.finishOrder).toHaveLength(4);
   expect(summary.actionCount).toBeGreaterThan(0);
   expect(summary.publicTraceHash).toMatch(/^[a-f0-9]{64}$/);
@@ -43,7 +44,9 @@ it("is deterministic for the same task and exposes no hidden hands", () => {
   const task = buildGamesForSeed(config, 8)[1]!;
   const first = simulateGame(task);
   const second = simulateGame(task);
-  expect(second).toEqual(first);
+  expect(second.publicTraceHash).toBe(first.publicTraceHash);
+  expect(second.finalPublicStateHash).toBe(first.finalPublicStateHash);
+  expect(second.durationMs).toBeGreaterThan(0);
   expect(first).not.toHaveProperty("hands");
   expect(first).not.toHaveProperty("initialHands");
 });
