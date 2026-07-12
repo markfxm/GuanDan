@@ -42,15 +42,23 @@ export type SimulationSummary = GameSummary & {
   errorCounters: SafetyErrorCounters;
   publicEvents: PublicSimulationEvent[];
   finalPublicState?: ReturnType<typeof finalPublicState>;
+  diagnostics?: {
+    enabled: true;
+    decisionCount: number;
+    workerLocalToken: string;
+  };
 };
 
-export function simulateGame(task: BenchmarkGameTask): SimulationSummary {
+export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: boolean } = {}): SimulationSummary {
   const room = structuredClone(task.room ?? createRoom({ rank: task.config.rank, seed: task.seed }));
   const strategiesBySeat = strategyMap(task);
   const runtimes: Partial<Record<Seat, unknown>> = {};
   const errors: SimulationError[] = [];
   const errorCounters = emptyErrorCounters();
   const strategies: Partial<Record<Seat, ReturnType<typeof getStrategy>>> = {};
+  const diagnostics = options.diagnostics === true
+    ? { enabled: true as const, decisionCount: 0, workerLocalToken: task.matchId }
+    : undefined;
 
   for (const seat of seats()) {
     try {
@@ -86,6 +94,7 @@ export function simulateGame(task: BenchmarkGameTask): SimulationSummary {
       const observation = createBenchmarkObservation(room, seat);
       let decision;
       try {
+        if (diagnostics) diagnostics.decisionCount += 1;
         decision = strategy.decide(observation, runtimes[seat]);
       } catch (cause) {
         recordFailure(errors, errorCounters, task.seed, seat, strategyId, cause, "strategyErrors");
@@ -143,6 +152,7 @@ export function simulateGame(task: BenchmarkGameTask): SimulationSummary {
     errors,
     errorCounters,
     publicEvents,
+    diagnostics,
   };
 }
 

@@ -104,6 +104,7 @@ export interface ReplayDocument {
   finishOrder: Seat[];
   winnerTeam: 0 | 1 | null;
   teamScore: Record<0 | 1, number>;
+  replayMode?: "none" | "failures" | "all";
   actionCount: number;
   publicTraceHash: string;
   finalPublicStateHash: string;

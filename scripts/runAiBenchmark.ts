@@ -50,7 +50,8 @@ export function parseBenchmarkArgs(argv: string[]): BenchmarkCliOptions {
     const token = argv[index]!;
     if (!token.startsWith("--")) throw new Error(`UNKNOWN_ARGUMENT:${token}`);
     const [name, inline] = token.slice(2).split("=", 2);
-    if (["paired", "resume", "skip-existing", "diagnostics"].includes(name)) values.set(name, true);
+    if (name === "paired") values.set(name, inline === undefined ? true : inline !== "false");
+    else if (["resume", "skip-existing", "diagnostics"].includes(name)) values.set(name, true);
     else values.set(name, inline ?? argv[++index]);
   }
   const replayMatch = stringValue(values, "replay-match");
@@ -62,6 +63,7 @@ export function parseBenchmarkArgs(argv: string[]): BenchmarkCliOptions {
   const batchText = stringValue(values, "batch");
   const batch = batchText === undefined ? undefined : parseRange(batchText);
   const selectedSeeds = batch === undefined ? seeds : seeds.filter((seed) => seed >= batch.start && seed <= batch.end);
+  if (batch !== undefined && selectedSeeds.length === 0) throw new Error("BATCH_EMPTY");
   const concurrency = integerValue(values, "concurrency", DEFAULTS.concurrency);
   if (concurrency < 1) throw new Error("CONCURRENCY_INVALID");
   const timeoutMs = integerValue(values, "timeout-ms", DEFAULTS.timeoutMs);
@@ -70,7 +72,7 @@ export function parseBenchmarkArgs(argv: string[]): BenchmarkCliOptions {
   if (!["none", "failures", "all"].includes(replayMode)) throw new Error("REPLAY_MODE_INVALID");
   return {
     strategyA, strategyB, seeds: [...new Set(selectedSeeds)].sort((a, b) => a - b),
-    paired: values.get("paired") === true,
+    paired: values.get("paired") !== false,
     batch, resume: values.get("resume") === true, skipExisting: values.get("skip-existing") === true,
     output: stringValue(values, "output"), replayMode, diagnostics: values.get("diagnostics") === true,
     timeoutMs, concurrency, rank: (stringValue(values, "rank") ?? DEFAULTS.rank) as GameRank,
@@ -80,97 +82,153 @@ export function parseBenchmarkArgs(argv: string[]): BenchmarkCliOptions {
 
 export async function runBenchmark(input: Partial<BenchmarkCliOptions> & Pick<BenchmarkCliOptions, "strategyA" | "strategyB" | "seeds">): Promise<BenchmarkRunResult> {
   const options: BenchmarkCliOptions = {
-    ...DEFAULTS, paired: false, resume: false, skipExisting: false, diagnostics: false,
-    ...input, seeds: [...new Set(input.seeds)].sort((a, b) => a - b),
+    ...DEFAULTS, resume: false, skipExisting: false, diagnostics: false,
+    ...input, paired: input.paired ?? true, seeds: [...new Set(input.seeds)].sort((a, b) => a - b),
   };
   const config: BenchmarkConfig = { benchmarkVersion: options.benchmarkVersion, rank: options.rank, seeds: options.seeds, strategyA: options.strategyA, strategyB: options.strategyB, replayMode: options.replayMode };
-  const tasks = options.seeds.flatMap((seed) => buildGamesForSeed(config, seed));
+  const tasks = options.seeds.flatMap((seed) => buildGamesForSeed(config, seed)).filter((task) => options.paired || task.allocation === "AB");
   const configHash = tasks[0]?.configHash ?? hashConfig(config);
-  const reused = loadExisting(options.output, configHash, options);
+  const reused = loadExisting(options.output, configHash, options, tasks.map((task) => task.matchId));
   const existingById = new Map(reused.map((game) => [game.matchId, game]));
   const duplicate = reused.length !== existingById.size;
   if (duplicate) throw new Error("DUPLICATE_MATCH_ID");
   const expectedSet = new Set(tasks.map((task) => task.matchId));
   if (reused.some((game) => !expectedSet.has(game.matchId))) throw new Error("UNEXPECTED_MATCH_ID");
   const pending = tasks.filter((task) => !existingById.has(task.matchId));
-  const fresh = await executeTasks(pending, options.concurrency, options.timeoutMs);
+  const fresh = await executeTasks(pending, options.concurrency, options.timeoutMs, options.diagnostics);
   const games = [...existingById.values(), ...fresh].sort((left, right) => left.matchId.localeCompare(right.matchId));
   const expected = tasks.map((task) => task.matchId).sort();
   for (const id of expected) if (!games.some((game) => game.matchId === id)) throw new Error(`MISSING_EXPECTED_MATCH_ID:${id}`);
   const manifest = createManifest(config, games, { expectedMatchIds: expected });
   const metrics = games.map((game) => summarizeGame(game));
   const aggregate = aggregateTournament(metrics, config);
-  const replayPaths = games.map((game) => writeReplay(game, { replayMode: options.replayMode, strategyDescriptors }));
-  const report = buildReport({ config, games: metrics, aggregate, replayPaths }, { outputPath: options.output });
+  const paired = { enabled: options.paired, unit: "seed", rotations: 4, allocations: options.paired ? 2 : 1, gamesPerSeed: options.paired ? 8 : 4 };
+  const replayPaths = games.map((game) => writeReplay(game, {
+    replayMode: options.replayMode,
+    benchmarkVersion: config.benchmarkVersion,
+    strategyDescriptors,
+  }));
+  const report = buildReport({ config, games: metrics, aggregate, paired, replayPaths }, { outputPath: options.output });
   let outputPath: string | undefined;
-  if (options.output !== undefined) outputPath = writeReport({ config, games: metrics, aggregate, replayPaths }, options.output);
+  if (options.output !== undefined) outputPath = writeReport({ config, games: metrics, aggregate, paired, replayPaths }, options.output);
   if (options.output !== undefined) {
-    const manifestPath = `${options.output}.manifest.json`;
+    const manifestPath = options.output.endsWith(".manifest.json") ? options.output : `${options.output}.manifest.json`;
     fs.mkdirSync(path.dirname(path.resolve(manifestPath)), { recursive: true });
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   }
   return { config, configHash, games: metrics, report, manifest, outputPath };
 }
 
-async function executeTasks(tasks: BenchmarkGameTask[], concurrency: number, timeoutMs: number): Promise<SimulationSummary[]> {
+async function executeTasks(tasks: BenchmarkGameTask[], concurrency: number, timeoutMs: number, diagnostics: boolean): Promise<SimulationSummary[]> {
   if (tasks.length === 0) return [];
-  if (concurrency <= 1) return Promise.all(tasks.map((task) => withTimeout(() => simulateGame(task), task, timeoutMs)));
-  return executeWithWorkers(tasks, Math.min(concurrency, tasks.length), timeoutMs);
+  if (concurrency <= 1) return Promise.all(tasks.map((task) => withTimeout(() => simulateGame(task, { diagnostics }), task, timeoutMs, diagnostics)));
+  return executeWithWorkers(tasks, Math.min(concurrency, tasks.length), timeoutMs, diagnostics);
 }
 
-function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs: number): Promise<SimulationSummary[]> {
+function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs: number, diagnostics: boolean): Promise<SimulationSummary[]> {
   return new Promise((resolve, reject) => {
     const results: SimulationSummary[] = [];
     let cursor = 0;
     let finished = 0;
-    const workers: Worker[] = [];
-    const timers = new Map<Worker, ReturnType<typeof setTimeout>>();
-    const active = new Map<Worker, BenchmarkGameTask>();
-    const finish = (worker: Worker, result: SimulationSummary) => {
-      const current = active.get(worker);
-      if (current === undefined || current.matchId !== result.matchId) return;
-      const timer = timers.get(worker); if (timer) clearTimeout(timer); timers.delete(worker);
-      active.delete(worker);
-      results.push(result); finished += 1;
-      if (cursor < tasks.length) dispatch(worker); else if (finished === tasks.length) { for (const current of workers) void current.terminate(); resolve(results.sort((a, b) => a.matchId.localeCompare(b.matchId))); }
+    let settled = false;
+    type Slot = { worker: Worker; task?: BenchmarkGameTask; timer?: ReturnType<typeof setTimeout>; retired: boolean };
+    const slots: Slot[] = [];
+    const complete = () => {
+      if (settled || finished !== tasks.length) return;
+      settled = true;
+      for (const slot of slots) {
+        if (slot.timer) clearTimeout(slot.timer);
+        void slot.worker.terminate().catch(() => undefined);
+      }
+      resolve(results.sort((a, b) => a.matchId.localeCompare(b.matchId)));
     };
-    const dispatch = (worker: Worker) => {
-      const task = tasks[cursor++]; if (task === undefined) return;
-      active.set(worker, task);
-      worker.postMessage({ task: deepFreeze(task) });
-      timers.set(worker, setTimeout(() => { finish(worker, timeoutSummary(task, timeoutMs)); }, timeoutMs));
+    const retire = (slot: Slot) => {
+      slot.retired = true;
+      slot.task = undefined;
+      if (slot.timer) clearTimeout(slot.timer);
+      slot.timer = undefined;
+      void slot.worker.terminate().catch(() => undefined);
     };
-    for (let index = 0; index < count; index += 1) {
-      const worker = new Worker(pathToFileURL(path.resolve(process.cwd(), "tests/benchmark/worker.ts")), { execArgv: ["--import", "tsx/esm"] });
-      workers.push(worker);
-      worker.on("message", (message: BenchmarkWorkerResult) => {
-        if (message.type === "result" && message.result) finish(worker, message.result);
-        else if (message.type === "error") { const task = active.get(worker); if (task) finish(worker, timeoutSummary(task, 0, message.error)); }
+    const dispatch = (slot: Slot) => {
+      if (settled || slot.retired) return;
+      const task = tasks[cursor++];
+      if (task === undefined) return;
+      slot.task = task;
+      slot.timer = setTimeout(() => {
+        if (slot.task !== task || slot.retired) return;
+        slot.task = undefined;
+        results.push(timeoutSummary(task, timeoutMs, undefined, diagnostics));
+        finished += 1;
+        retire(slot);
+        if (cursor < tasks.length) addWorker();
+        complete();
+      }, timeoutMs);
+      slot.worker.postMessage({ task: deepFreeze(task), diagnostics });
+    };
+    const handleResult = (slot: Slot, message: BenchmarkWorkerResult) => {
+      const task = slot.task;
+      if (slot.retired || task === undefined || task.matchId !== message.matchId) return;
+      if (slot.timer) clearTimeout(slot.timer);
+      slot.timer = undefined;
+      slot.task = undefined;
+      results.push(message.type === "result" && message.result
+        ? message.result
+        : timeoutSummary(task, 0, message.error ?? "BENCHMARK_WORKER_ERROR", diagnostics));
+      finished += 1;
+      if (cursor < tasks.length) dispatch(slot); else retire(slot);
+      complete();
+    };
+    const addWorker = () => {
+      const slot: Slot = { worker: new Worker(pathToFileURL(path.resolve(process.cwd(), "tests/benchmark/worker.ts")), { execArgv: ["--import", "tsx/esm"] }), retired: false };
+      slots.push(slot);
+      slot.worker.on("message", (message: BenchmarkWorkerResult) => handleResult(slot, message));
+      slot.worker.on("error", (error) => {
+        if (settled || slot.retired) return;
+        const task = slot.task;
+        if (task === undefined) { retire(slot); return; }
+        if (slot.timer) clearTimeout(slot.timer);
+        slot.timer = undefined;
+        slot.task = undefined;
+        results.push(timeoutSummary(task, 0, error.message, diagnostics));
+        finished += 1;
+        retire(slot);
+        if (cursor < tasks.length) addWorker();
+        complete();
       });
-      worker.on("error", (error) => { for (const timer of timers.values()) clearTimeout(timer); void Promise.all(workers.map((current) => current.terminate())); reject(error); });
-      dispatch(worker);
-    }
+      dispatch(slot);
+    };
+    for (let index = 0; index < count; index += 1) addWorker();
   });
 }
 
-function withTimeout<T extends SimulationSummary>(run: () => T, task: BenchmarkGameTask, timeoutMs: number): Promise<T> {
-  return new Promise((resolve) => { const started = Date.now(); try { const result = run(); resolve(Date.now() - started > timeoutMs ? timeoutSummary(task, timeoutMs) as T : result); } catch (cause) { resolve(timeoutSummary(task, 0, cause instanceof Error ? cause.message : String(cause)) as T); } });
+function withTimeout<T extends SimulationSummary>(run: () => T, task: BenchmarkGameTask, timeoutMs: number, diagnostics: boolean): Promise<T> {
+  return new Promise((resolve) => { const started = Date.now(); try { const result = run(); resolve(Date.now() - started > timeoutMs ? timeoutSummary(task, timeoutMs, undefined, diagnostics) as T : result); } catch (cause) { resolve(timeoutSummary(task, 0, cause instanceof Error ? cause.message : String(cause), diagnostics) as T); } });
 }
 
-function timeoutSummary(task: BenchmarkGameTask, timeoutMs: number, error = `BENCHMARK_TIMEOUT:${timeoutMs}`): SimulationSummary {
+function timeoutSummary(task: BenchmarkGameTask, timeoutMs: number, error = `BENCHMARK_TIMEOUT:${timeoutMs}`, diagnostics = false): SimulationSummary {
   const strategiesBySeat = { 0: task.allocation === "AB" ? task.config.strategyA : task.config.strategyB, 1: task.allocation === "AB" ? task.config.strategyB : task.config.strategyA, 2: task.allocation === "AB" ? task.config.strategyA : task.config.strategyB, 3: task.allocation === "AB" ? task.config.strategyB : task.config.strategyA } as Record<Seat, string>;
   const failure: SimulationError = { seed: task.seed, seat: 0, strategy: strategiesBySeat[0], error };
   const counters: SafetyErrorCounters = { total: 1, strategyErrors: error.includes("UNKNOWN_STRATEGY") ? 1 : 0, runtimeErrors: 0, illegalActions: 0, engineErrors: error.includes("UNKNOWN_STRATEGY") ? 0 : 1, guardErrors: 0 };
-  return { matchId: task.matchId, configHash: task.configHash, seed: task.seed, rank: task.config.rank, rotation: task.rotation, strategiesBySeat, finishOrder: [], winnerTeam: null, teamScore: { 0: 0, 1: 0 }, actionCount: 0, publicTraceHash: "", finalPublicStateHash: "", completed: false, failed: true, errors: [failure], errorCounters: counters, publicEvents: [] };
+  return { matchId: task.matchId, configHash: task.configHash, seed: task.seed, rank: task.config.rank, rotation: task.rotation, strategiesBySeat, finishOrder: [], winnerTeam: null, teamScore: { 0: 0, 1: 0 }, actionCount: 0, publicTraceHash: "", finalPublicStateHash: "", completed: false, failed: true, errors: [failure], errorCounters: counters, publicEvents: [], diagnostics: diagnostics ? { enabled: true, decisionCount: 0, workerLocalToken: task.matchId } : undefined };
 }
 
-function loadExisting(output: string | undefined, configHash: string, options: BenchmarkCliOptions): Array<SimulationSummary> {
-  if ((!options.resume && !options.skipExisting) || output === undefined || !fs.existsSync(output)) return [];
-  const raw = JSON.parse(fs.readFileSync(output, "utf8")) as Partial<BatchManifest> & { games?: Array<SimulationSummary> };
+function loadExisting(output: string | undefined, configHash: string, options: BenchmarkCliOptions, expectedIds: string[]): Array<SimulationSummary> {
+  if (!options.resume && !options.skipExisting) return [];
+  if (output === undefined) throw new Error("MANIFEST_REQUIRED");
+  const manifestPath = output.endsWith(".manifest.json") ? output : `${output}.manifest.json`;
+  const source = fs.existsSync(manifestPath) ? manifestPath : output;
+  if (!fs.existsSync(source)) throw new Error("MANIFEST_NOT_FOUND");
+  const raw = JSON.parse(fs.readFileSync(source, "utf8")) as Partial<BatchManifest> & { games?: Array<SimulationSummary> };
   if (raw.configHash !== configHash) throw new Error("CONFIG_HASH_MISMATCH");
   const games = Array.isArray(raw.games) ? raw.games : [];
   const ids = new Set(games.map((game) => game.matchId));
   if (ids.size !== games.length) throw new Error("DUPLICATE_MATCH_ID");
+  const expected = raw.expectedMatchIds ?? expectedIds;
+  if (expected.length !== new Set(expected).size) throw new Error("DUPLICATE_EXPECTED_MATCH_ID");
+  if (expected.some((id) => !expectedIds.includes(id))) throw new Error("UNEXPECTED_MATCH_ID");
+  if (expectedIds.some((id) => !expected.includes(id))) throw new Error(`MISSING_EXPECTED_MATCH_ID:${expectedIds.find((id) => !expected.includes(id))}`);
+  if (expected.some((id) => !ids.has(id))) throw new Error(`MISSING_EXPECTED_MATCH_ID:${expected.find((id) => !ids.has(id))}`);
+  if (games.some((game) => game.configHash !== configHash)) throw new Error("CONFIG_HASH_MISMATCH");
   return games;
 }
 

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { parseBenchmarkArgs, runBenchmark, stripVolatile } from "../../scripts/runAiBenchmark";
+import { replayMatch } from "../../scripts/replayAiBenchmark";
+import { buildGamesForSeed } from "./rotations";
+import { simulateGame } from "./simulator";
+import { writeReplay } from "./reporting";
+import type { BenchmarkConfig } from "./contracts";
 import type { SimulationSummary } from "./simulator";
 
 describe("AI benchmark CLI", () => {
@@ -28,5 +36,75 @@ describe("AI benchmark CLI", () => {
   it("rejects unknown strategy as a recorded failure", async () => {
     const result = await runBenchmark({ strategyA: "does-not-exist", strategyB: "legal-random", seeds: [1], paired: true, replayMode: "none", concurrency: 1 });
     expect(result.games.some((game) => { const simulation = game as SimulationSummary; return simulation.failed && simulation.errors.some((error) => error.error.includes("UNKNOWN_STRATEGY")); })).toBe(true);
+  });
+
+  it("keeps action hashes invariant when diagnostics are enabled and reports independent diagnostics", async () => {
+    const base = { strategyA: "unknown-a", strategyB: "unknown-b", seeds: [1], paired: true, replayMode: "none" as const };
+    const off = await runBenchmark({ ...base, diagnostics: false });
+    const on = await runBenchmark({ ...base, diagnostics: true });
+    expect(stripVolatile(on.games)).toEqual(stripVolatile(off.games));
+    const diagnostics = on.games.map((game) => (game as { diagnostics?: { enabled: true; workerLocalToken: string } }).diagnostics);
+    expect(diagnostics.every((value) => value?.enabled === true)).toBe(true);
+    expect(new Set(diagnostics.map((value) => value?.workerLocalToken)).size).toBe(on.games.length);
+    expect(on.report?.games).toEqual(expect.arrayContaining([expect.objectContaining({ diagnostics: expect.any(Object) })]));
+    expect(on.report?.paired).toEqual({ enabled: true, unit: "seed", rotations: 4, allocations: 2, gamesPerSeed: 8 });
+  });
+
+  it("reuses only a complete, matching manifest", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-benchmark-manifest-"));
+    const output = path.join(root, "report.json");
+    const base = { strategyA: "unknown-a", strategyB: "unknown-b", seeds: [1], paired: true, replayMode: "none" as const, output };
+    const first = await runBenchmark(base);
+    const manifestPath = `${output}.manifest.json`;
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { games: Array<Record<string, unknown>>; expectedMatchIds: string[]; configHash: string };
+    manifest.games[0]!.configHash = "wrong";
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    await expect(runBenchmark({ ...base, resume: true })).rejects.toThrow("CONFIG_HASH_MISMATCH");
+    manifest.games[0]!.configHash = first.configHash;
+    manifest.games.push({ ...manifest.games[0] });
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    await expect(runBenchmark({ ...base, skipExisting: true })).rejects.toThrow("DUPLICATE_MATCH_ID");
+    manifest.games.pop();
+    manifest.expectedMatchIds.pop();
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    await expect(runBenchmark({ ...base, resume: true })).rejects.toThrow("MISSING_EXPECTED_MATCH_ID");
+  });
+
+  it("preserves custom replay config and defaults saved replay mode to failures", () => {
+    const config: BenchmarkConfig = { benchmarkVersion: "custom-v2", rank: "2", seeds: [1], strategyA: "unknown-a", strategyB: "unknown-b", replayMode: "failures" };
+    const task = buildGamesForSeed(config, 1)[0]!;
+    const summary = simulateGame(task);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-benchmark-replay-"));
+    const replayPath = writeReplay(summary, { outputDir: root, benchmarkVersion: config.benchmarkVersion });
+    expect(replayPath).toBeDefined();
+    const document = JSON.parse(fs.readFileSync(replayPath!, "utf8")) as { benchmarkVersion: string; replayMode: string };
+    expect(document.benchmarkVersion).toBe("custom-v2");
+    expect(document.replayMode).toBe("failures");
+    expect(replayMatch(summary.matchId, root).verified).toBe(true);
+  });
+
+  it("records every timed-out worker task once without stale results", async () => {
+    const result = await runBenchmark({ strategyA: "legal-greedy", strategyB: "legal-random", seeds: [1], paired: true, replayMode: "none", concurrency: 2, timeoutMs: 1 });
+    expect(result.games).toHaveLength(8);
+    expect(new Set(result.games.map((game) => game.matchId)).size).toBe(8);
+    expect(result.games.every((game) => (game as { failed?: boolean }).failed)).toBe(true);
+  });
+
+  it("applies an inclusive batch seed filter and parses paired aliases", () => {
+    expect(() => parseBenchmarkArgs(["--strategy-a", "a", "--strategy-b", "b", "--seeds", "1-4", "--batch", "2-3"])).not.toThrow();
+    expect(parseBenchmarkArgs(["--strategy-a", "a", "--strategy-b", "b", "--seeds", "1-4", "--batch", "2-3"]).seeds).toEqual([2, 3]);
+    expect(parseBenchmarkArgs(["--strategy-a", "a", "--strategy-b", "b", "--paired=false"]).paired).toBe(false);
+  });
+
+  it("defaults to the paired D0 matrix and supports explicit unpaired runs", async () => {
+    const base = { strategyA: "unknown-a", strategyB: "unknown-b", seeds: [1], replayMode: "none" as const };
+    const parsedDefault = parseBenchmarkArgs(["--strategy-a", "unknown-a", "--strategy-b", "unknown-b", "--seeds", "1", "--replay", "none"]);
+    expect(parsedDefault.paired).toBe(true);
+    const paired = await runBenchmark(parsedDefault);
+    expect(paired.games).toHaveLength(8);
+    expect(paired.report?.paired).toEqual({ enabled: true, unit: "seed", rotations: 4, allocations: 2, gamesPerSeed: 8 });
+    const unpaired = await runBenchmark({ ...base, paired: false });
+    expect(unpaired.games).toHaveLength(4);
+    expect(unpaired.report?.paired).toEqual({ enabled: false, unit: "seed", rotations: 4, allocations: 1, gamesPerSeed: 4 });
   });
 });

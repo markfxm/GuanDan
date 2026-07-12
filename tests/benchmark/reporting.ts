@@ -91,6 +91,7 @@ export function writeReplay(summary: SimulationSummary | (GameSummary & Partial<
     finishOrder: [...summary.finishOrder],
     winnerTeam: summary.winnerTeam,
     teamScore: { 0: summary.teamScore[0], 1: summary.teamScore[1] },
+    replayMode: mode,
     actionCount: summary.actionCount,
     publicTraceHash: summary.publicTraceHash,
     finalPublicStateHash: summary.finalPublicStateHash,
@@ -241,6 +242,7 @@ const REPORT_SUMMARY_KEYS = [
   "settlementOutcome", "levelStep", "individualDiagnosticScore", "playPassRatio", "bombCount", "bombs", "planContinuation",
   "planContinuationActions", "finalTenActions", "finalTenCardActions", "durationMs", "durationStats", "categoryTags",
   "classification", "errorCounters", "seatDealLimitations", "completed", "failed", "errors", "replayPath",
+  "diagnostics",
 ] as const;
 
 function compactSummary(game: GameSummary | SimulationSummary): Record<string, unknown> {

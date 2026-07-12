@@ -9,12 +9,16 @@ export function replayMatch(matchId: string, replayRoot = "artifacts/ai-benchmar
   const file = findReplay(matchId, replayRoot);
   if (file === undefined) throw new Error(`REPLAY_NOT_FOUND:${matchId}`);
   const document = JSON.parse(fs.readFileSync(file, "utf8")) as ReplayDocument;
+  if (document.matchId !== matchId) throw new Error("REPLAY_MATCH_ID_MISMATCH");
   const identity = JSON.parse(document.matchId) as { matchup: string; allocation: "AB" | "BA"; rotation: 0 | 1 | 2 | 3; seed: number };
   const [strategyA, strategyB] = identity.matchup.split("-vs-");
   if (!strategyA || !strategyB) throw new Error("REPLAY_MATCHUP_INVALID");
-  const config: BenchmarkConfig = { benchmarkVersion: document.benchmarkVersion, rank: document.rank, seeds: [document.seed], strategyA, strategyB, replayMode: "all" };
+  const replayMode = document.replayMode ?? "failures";
+  if (replayMode !== "none" && replayMode !== "failures" && replayMode !== "all") throw new Error("REPLAY_MODE_INVALID");
+  const config: BenchmarkConfig = { benchmarkVersion: document.benchmarkVersion, rank: document.rank, seeds: [document.seed], strategyA, strategyB, replayMode };
   const task = buildGamesForSeed(config, document.seed).find((candidate) => candidate.matchId === document.matchId);
   if (task === undefined) throw new Error("REPLAY_TASK_NOT_FOUND");
+  if (task.configHash !== document.configHash) throw new Error("REPLAY_CONFIG_HASH_MISMATCH");
   const result = simulateGame(task);
   const publicTraceHash = hashPublicTrace(result.publicEvents);
   const finalPublicStateHash = hashFinalPublicState(result.finalPublicState);
