@@ -5,6 +5,11 @@ import type { BreakReason, PolicyContext, PolicyVerdict } from "../contracts";
 const BLOCKING_TYPES = new Set<CardGroup["type"]>(["pair", "triple", "full-house", "straight", "consecutive-pairs", "plate", "straight-flush", "bomb", "joker-bomb"]);
 
 export type PowerProtectionLevel = "HARD" | "CONDITIONAL" | "NONE";
+export type PowerGroupPolicyIndex = { protectedGroups: readonly CardGroup[] };
+
+export function createPowerGroupPolicyIndex(allGroups: CardGroup[], gameRank: GameRank): PowerGroupPolicyIndex {
+  return { protectedGroups: protectedPowerGroups(allGroups, gameRank) };
+}
 
 export function protectedPowerGroups(allGroups: CardGroup[], gameRank: GameRank): CardGroup[] {
   const selected: CardGroup[] = [];
@@ -43,8 +48,8 @@ export function isLegalBombReduction(sourceBomb: CardGroup, consumingGroup: Card
     ));
 }
 
-export function evaluatePowerGroupUse(group: CardGroup, hand: Card[], allGroups: CardGroup[], gameRank: GameRank, context: PolicyContext = {}): PolicyVerdict {
-  const protectedGroups = protectedPowerGroups(allGroups, gameRank);
+export function evaluatePowerGroupUse(group: CardGroup, hand: Card[], allGroups: CardGroup[], gameRank: GameRank, context: PolicyContext = {}, index?: PowerGroupPolicyIndex): PolicyVerdict {
+  const protectedGroups = index?.protectedGroups ?? protectedPowerGroups(allGroups, gameRank);
   if (protectedGroups.some((power) => sameCards(group, power))) {
     return { allowed: true, hardViolation: false, reasonCodes: [] };
   }

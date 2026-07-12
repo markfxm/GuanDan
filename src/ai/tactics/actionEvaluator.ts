@@ -1,9 +1,9 @@
 import { isHeartRankWild, rankStrength } from "../../engine/cards";
-import type { ActionCandidate } from "../contracts";
+import type { ActionCandidate, ActionScore } from "../contracts";
 import { ACTION_SCORE_WEIGHTS } from "../config";
 import type { ActionGenerationInput } from "./actionGenerator";
 
-export function evaluateActionCandidate(candidate: ActionCandidate, input: ActionGenerationInput) {
+export function evaluateActionCandidate(candidate: ActionCandidate, input: ActionGenerationInput): ActionScore {
   if (!candidate.policyVerdict.allowed || candidate.policyVerdict.hardViolation) {
     throw new Error("ACTION_CANDIDATE_MUST_BE_LEGAL_AND_POLICY_APPROVED");
   }

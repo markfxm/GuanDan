@@ -1,5 +1,6 @@
 import type { Card, GameRank } from "../engine/cards";
 import type { CardGroup, GroupType } from "../engine/groups";
+import type { AiPlanningDiagnostics } from "./diagnostics/aiPlanningDiagnostics";
 
 export type AiAction = { type: "pass" } | { type: "play"; group: CardGroup };
 
@@ -102,8 +103,13 @@ export type AiDecision = {
   action: AiAction;
   runtime: AiRuntimeState;
   selectedPlan?: HandPlan;
+  selectedPlanId?: string;
   score: ActionScore;
+  scoreBreakdown?: ActionScore;
   candidateCount: number;
+  consideredActions?: number;
   elapsedMs: number;
   reasonCodes: BreakReason[];
 };
+
+export type AiDecisionConfig = AiPerformanceConfig & { turn: number; diagnostics?: AiPlanningDiagnostics };

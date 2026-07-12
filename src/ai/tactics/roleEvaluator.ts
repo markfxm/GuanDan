@@ -1,6 +1,7 @@
 import { rankStrength, type Card, type GameRank } from "../../engine/cards";
 import type { CardGroup } from "../../engine/groups";
 import { HandAnalysisCache } from "../analysis/handAnalysisCache";
+import type { HandAnalysis } from "../contracts";
 import { ROLE_EVALUATION_THRESHOLDS } from "../config";
 
 export type AiRole = "attacker" | "support" | "balanced";
@@ -13,8 +14,8 @@ export type AiRoleEvaluation = {
 
 const analysisCache = new HandAnalysisCache(64);
 
-export function evaluateAiRole(input: { hand: Card[]; gameRank: GameRank }): AiRoleEvaluation {
-  const groups = analysisCache.getOrCreate(input.hand, input.gameRank).groups;
+export function evaluateAiRole(input: { hand: Card[]; gameRank: GameRank; analysis?: HandAnalysis }): AiRoleEvaluation {
+  const groups = (input.analysis ?? analysisCache.getOrCreate(input.hand, input.gameRank)).groups;
   const powerCount = powerResourceCount(input.hand, groups);
   const controlScore = controlResourceScore(input.hand, groups, input.gameRank);
   const thresholds = ROLE_EVALUATION_THRESHOLDS;

@@ -4,6 +4,7 @@ logs/
 outputs/
 work/
 .superpowers/
+artifacts/
 
 *.log
 *.pid
