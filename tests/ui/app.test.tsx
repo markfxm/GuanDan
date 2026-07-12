@@ -670,7 +670,7 @@ it("plays all cards from a selected legal manual pair group", async () => {
       "/api/rooms/room-1/play",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ seat: 0, cardIds: ["S2-1", "C2-1"] }),
+        body: JSON.stringify({ playerId: "player-1", cardIds: ["S2-1", "C2-1"] }),
       }),
     );
   });
@@ -796,6 +796,7 @@ it("drags all selected cards into one manual straight group", async () => {
 function createRoom(overrides: Partial<PublicRoom> = {}): PublicRoom {
   return {
     id: "room-1",
+    playerId: "player-1",
     rank: "10",
     players: [
       { seat: 0, name: "玩家", isAI: false, handCount: 3, team: 0 },

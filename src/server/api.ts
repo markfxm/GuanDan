@@ -37,12 +37,18 @@ type RoomQuery = {
 };
 
 type PlayBody = {
+  playerId?: unknown;
   seat?: unknown;
   cardIds?: unknown;
 };
 
-type SeatBody = {
+type ActionBody = {
+  playerId?: unknown;
   seat?: unknown;
+};
+
+type TributeBody = ActionBody & {
+  cardIds?: unknown;
 };
 
 const DEFAULT_RANK: GameRank = "10";
@@ -248,57 +254,66 @@ export function buildApi() {
     }
     const room = onlineRoom.room;
 
-    if (!isSeat(request.body?.seat) || !Array.isArray(request.body?.cardIds) || !request.body.cardIds.every((id) => typeof id === "string")) {
-      return reply.code(400).send({ error: "Seat and cardIds are required." });
+    if (!isPlayerActionBody(request.body) || !Array.isArray(request.body.cardIds) || !request.body.cardIds.every((id) => typeof id === "string")) {
+      return reply.code(400).send({ error: "playerId and cardIds are required." });
+    }
+
+    const session = onlineRoom.sessions.get(request.body.playerId);
+    if (session === undefined || !session.connected) {
+      return reply.code(403).send({ error: "Invalid player session." });
     }
 
     try {
-      playCards(room, request.body.seat, request.body.cardIds);
-      return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
+      playCards(room, session.seat, request.body.cardIds);
+      return { room: getPublicRoom(room, session.seat, { ensurePlans: false }) };
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid play." });
     }
   });
 
-  app.post<{ Params: { id: string }; Body: PlayBody }>("/api/rooms/:id/tribute", async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: TributeBody }>("/api/rooms/:id/tribute", async (request, reply) => {
     const onlineRoom = onlineRooms.get(request.params.id);
     if (onlineRoom === undefined) {
       return reply.code(404).send({ error: "Room not found." });
     }
     const room = onlineRoom.room;
 
-    const seat = request.body?.seat;
-    const cardIds = request.body?.cardIds ?? [];
-    if (seat !== undefined && !isSeat(seat)) {
-      return reply.code(400).send({ error: "Seat must be valid." });
+    if (!isPlayerActionBody(request.body) || (request.body.cardIds !== undefined && !isCardIdList(request.body.cardIds))) {
+      return reply.code(400).send({ error: "playerId and cardIds must be valid." });
     }
 
-    if (!Array.isArray(cardIds) || !cardIds.every((id) => typeof id === "string")) {
-      return reply.code(400).send({ error: "cardIds must be strings." });
+    const session = onlineRoom.sessions.get(request.body.playerId);
+    if (session === undefined || !session.connected) {
+      return reply.code(403).send({ error: "Invalid player session." });
     }
 
     try {
-      advanceOpeningTribute(room, seat, cardIds);
-      return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
+      advanceOpeningTribute(room, session.seat, request.body.cardIds ?? []);
+      return { room: getPublicRoom(room, session.seat, { ensurePlans: false }) };
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid tribute action." });
     }
   });
 
-  app.post<{ Params: { id: string }; Body: SeatBody }>("/api/rooms/:id/pass", async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: ActionBody }>("/api/rooms/:id/pass", async (request, reply) => {
     const onlineRoom = onlineRooms.get(request.params.id);
     if (onlineRoom === undefined) {
       return reply.code(404).send({ error: "Room not found." });
     }
     const room = onlineRoom.room;
 
-    if (!isSeat(request.body?.seat)) {
-      return reply.code(400).send({ error: "Seat is required." });
+    if (!isPlayerActionBody(request.body)) {
+      return reply.code(400).send({ error: "playerId is required." });
+    }
+
+    const session = onlineRoom.sessions.get(request.body.playerId);
+    if (session === undefined || !session.connected) {
+      return reply.code(403).send({ error: "Invalid player session." });
     }
 
     try {
-      passTurn(room, request.body.seat);
-      return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
+      passTurn(room, session.seat);
+      return { room: getPublicRoom(room, session.seat, { ensurePlans: false }) };
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid pass." });
     }
@@ -359,6 +374,14 @@ function selectAvailableSeat(onlineRoom: OnlineRoom, preferredSeat: Seat | undef
 
 function findSessionForSeat(onlineRoom: OnlineRoom, seat: Seat): PlayerSession | undefined {
   return [...onlineRoom.sessions.values()].find((session) => session.seat === seat);
+}
+
+function isPlayerActionBody<T extends ActionBody>(body: T | undefined): body is T & { playerId: string } {
+  return typeof body?.playerId === "string" && body.playerId.length > 0 && body.seat === undefined;
+}
+
+function isCardIdList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((id) => typeof id === "string");
 }
 
 function isAllowedOrigin(origin: string): boolean {

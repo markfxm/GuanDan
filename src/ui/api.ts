@@ -86,13 +86,15 @@ export type PublicRoom = {
   openingTribute?: TributeState;
   status: "playing" | "finished";
   actionLog: string[];
-  humanSeat: 0;
+  humanSeat: Seat;
   humanHand: Card[];
   announcements: string[];
+  playerId?: string;
 };
 
 type RoomResponse = {
   room: PublicRoom;
+  playerId?: string;
 };
 
 export async function dealHand(rank: GameRank): Promise<Card[]> {
@@ -117,17 +119,17 @@ export async function generatePlans(cards: Card[], rank: GameRank, count = 5): P
 
 export async function createGameRoom(rank: GameRank, pendingTributeItems: TributeItem[] = []): Promise<PublicRoom> {
   const data = await postJson<RoomResponse>("/api/rooms", { rank, pendingTributeItems });
-  return normalizePublicRoom(data.room);
+  return normalizePublicRoom(data.room, data.playerId);
 }
 
-export async function playRoomCards(roomId: string, cardIds: string[]): Promise<PublicRoom> {
-  const data = await postJson<RoomResponse>(`/api/rooms/${roomId}/play`, { seat: 0, cardIds });
-  return normalizePublicRoom(data.room);
+export async function playRoomCards(roomId: string, playerId: string, cardIds: string[]): Promise<PublicRoom> {
+  const data = await postJson<RoomResponse>(`/api/rooms/${roomId}/play`, { playerId, cardIds });
+  return normalizePublicRoom(data.room, playerId);
 }
 
-export async function passRoomTurn(roomId: string): Promise<PublicRoom> {
-  const data = await postJson<RoomResponse>(`/api/rooms/${roomId}/pass`, { seat: 0 });
-  return normalizePublicRoom(data.room);
+export async function passRoomTurn(roomId: string, playerId: string): Promise<PublicRoom> {
+  const data = await postJson<RoomResponse>(`/api/rooms/${roomId}/pass`, { playerId });
+  return normalizePublicRoom(data.room, playerId);
 }
 
 export async function runRoomAi(roomId: string): Promise<PublicRoom> {
@@ -135,21 +137,22 @@ export async function runRoomAi(roomId: string): Promise<PublicRoom> {
   return normalizePublicRoom(data.room);
 }
 
-export async function runRoomAiStep(roomId: string): Promise<PublicRoom> {
+export async function runRoomAiStep(roomId: string, playerId: string): Promise<PublicRoom> {
   const data = await postJson<RoomResponse>(`/api/rooms/${roomId}/ai-step`, {});
-  return normalizePublicRoom(data.room);
+  return normalizePublicRoom(data.room, playerId);
 }
 
-export async function submitOpeningTribute(roomId: string, seat?: Seat, cardIds: string[] = []): Promise<PublicRoom> {
-  const data = await postJson<RoomResponse>(`/api/rooms/${roomId}/tribute`, { seat, cardIds });
-  return normalizePublicRoom(data.room);
+export async function submitOpeningTribute(roomId: string, playerId: string, cardIds: string[] = []): Promise<PublicRoom> {
+  const data = await postJson<RoomResponse>(`/api/rooms/${roomId}/tribute`, { playerId, cardIds });
+  return normalizePublicRoom(data.room, playerId);
 }
 
-function normalizePublicRoom(room: PublicRoom): PublicRoom {
+function normalizePublicRoom(room: PublicRoom, playerId?: string): PublicRoom {
   const trick = room.trick ?? { leadSeat: room.currentTurn, passSeats: [], plays: [] };
 
   return {
     ...room,
+    playerId: playerId ?? room.playerId,
     currentTrickIndex: typeof room.currentTrickIndex === "number" ? room.currentTrickIndex : 0,
     aiPlans: room.aiPlans ?? {},
     playHistory: Array.isArray(room.playHistory) ? room.playHistory : [],

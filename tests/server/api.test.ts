@@ -104,7 +104,11 @@ it("advances opening tribute through API and accepts a human return card", async
     expect(room.openingTribute.status).toBe("pending");
     expect(room.openingTribute.phase).toBe("tribute");
 
-    const tribute = await app.inject({ method: "POST", url: `/api/rooms/${room.id}/tribute`, payload: {} });
+    const tribute = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/tribute`,
+      payload: { playerId: created.json().playerId },
+    });
     expect(tribute.statusCode).toBe(200);
     const afterTribute = tribute.json().room;
     expect(afterTribute.openingTribute.phase).toBe("return");
@@ -120,7 +124,7 @@ it("advances opening tribute through API and accepts a human return card", async
     const returned = await app.inject({
       method: "POST",
       url: `/api/rooms/${room.id}/tribute`,
-      payload: { seat: 0, cardIds: [returnCard.id] },
+      payload: { playerId: created.json().playerId, cardIds: [returnCard.id] },
     });
     expect(returned.statusCode).toBe(200);
     expect(returned.json().room.openingTribute.status).toBe("completed");
@@ -134,7 +138,11 @@ it("plays, passes, and advances AI through room APIs", async () => {
     const room = created.json().room;
     const cardId = room.humanHand[0].id;
 
-    const played = await app.inject({ method: "POST", url: `/api/rooms/${room.id}/play`, payload: { seat: 0, cardIds: [cardId] } });
+    const played = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/play`,
+      payload: { playerId: created.json().playerId, cardIds: [cardId] },
+    });
     expect(played.statusCode).toBe(200);
     expect(played.json().room.humanHand.map((card: { id: string }) => card.id)).not.toContain(cardId);
     expect(played.json().room.currentTurn).toBe(3);
@@ -146,6 +154,70 @@ it("plays, passes, and advances AI through room APIs", async () => {
     expect(ai.json().room.trick.plays.length).toBeGreaterThanOrEqual(2);
   });
 }, 15000);
+
+it("passes using the session seat resolved from playerId", async () => {
+  await withApp(async (app) => {
+    const created = await app.inject({ method: "POST", url: "/api/rooms", payload: { rank: "10", seed: 1 } });
+    const joined = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${created.json().room.id}/join`,
+      payload: { name: "West", preferredSeat: 3 },
+    });
+    const cardId = created.json().room.humanHand[0].id;
+    const played = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${created.json().room.id}/play`,
+      payload: { playerId: created.json().playerId, cardIds: [cardId] },
+    });
+    expect(played.statusCode).toBe(200);
+
+    const passed = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${created.json().room.id}/pass`,
+      payload: { playerId: joined.json().playerId },
+    });
+
+    expect(passed.statusCode).toBe(200);
+    expect(passed.json().room.humanSeat).toBe(3);
+  });
+});
+
+it("rejects room actions with a missing or invalid playerId", async () => {
+  await withApp(async (app) => {
+    const created = await app.inject({ method: "POST", url: "/api/rooms", payload: { rank: "10", seed: 1 } });
+    const roomId = created.json().room.id;
+    const cardId = created.json().room.humanHand[0].id;
+
+    const missing = await app.inject({ method: "POST", url: `/api/rooms/${roomId}/play`, payload: { cardIds: [cardId] } });
+    const invalid = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${roomId}/pass`,
+      payload: { playerId: "not-a-session" },
+    });
+
+    expect(missing.statusCode).toBe(400);
+    expect(invalid.statusCode).toBe(403);
+  });
+});
+
+it("does not accept a client-provided seat for play authorization", async () => {
+  await withApp(async (app) => {
+    const created = await app.inject({ method: "POST", url: "/api/rooms", payload: { rank: "10", seed: 1 } });
+    const roomId = created.json().room.id;
+    const playerId = created.json().playerId;
+    const cardId = created.json().room.humanHand[0].id;
+
+    const spoofed = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${roomId}/play`,
+      payload: { playerId, seat: 1, cardIds: [cardId] },
+    });
+    const ownView = await app.inject({ method: "GET", url: `/api/rooms/${roomId}?playerId=${playerId}` });
+
+    expect(spoofed.statusCode).toBe(400);
+    expect(ownView.json().room.humanHand.map((card: { id: string }) => card.id)).toContain(cardId);
+  });
+});
 
 it("rejects invalid deal seed values", async () => {
   await withApp(async (app) => {

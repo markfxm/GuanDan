@@ -140,7 +140,7 @@ export function App() {
     }
 
     await runAction("AI 正在出牌...", async () => {
-      const nextRoom = await runRoomAiStep(room.id);
+      const nextRoom = await runRoomAiStep(room.id, room.playerId ?? "");
       applyRealtimeRoomUpdate(room, nextRoom);
       setStatus(statusForRoom(nextRoom));
       setShowSettlementDialog(nextRoom.status === "finished");
@@ -154,7 +154,7 @@ export function App() {
       }
 
       await runAction("正在处理贡还牌...", async () => {
-        const nextRoom = await submitOpeningTribute(room.id, cardIds.length > 0 ? 0 : undefined, cardIds);
+        const nextRoom = await submitOpeningTribute(room.id, room.playerId ?? "", cardIds);
         setRoom(nextRoom);
         setSelectedCardIds([]);
         setStatus(openingTributeText(nextRoom) ?? statusForRoom(nextRoom));
@@ -289,7 +289,7 @@ export function App() {
     }
 
     await runAction("正在出牌...", async () => {
-      const nextRoom = await playRoomCards(room.id, selectedCardIds);
+      const nextRoom = await playRoomCards(room.id, room.playerId ?? "", selectedCardIds);
       applyRealtimeRoomUpdate(room, nextRoom);
       setSelectedCardIds([]);
       setStatus(statusForRoom(nextRoom));
@@ -303,7 +303,7 @@ export function App() {
     }
 
     await runAction("正在过牌...", async () => {
-      const nextRoom = await passRoomTurn(room.id);
+      const nextRoom = await passRoomTurn(room.id, room.playerId ?? "");
       applyRealtimeRoomUpdate(room, nextRoom);
       setSelectedCardIds([]);
       setStatus(statusForRoom(nextRoom));
