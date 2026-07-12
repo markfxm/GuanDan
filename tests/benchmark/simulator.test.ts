@@ -1,6 +1,7 @@
 import type { BenchmarkConfig } from "./contracts";
 import { buildGamesForSeed } from "./rotations";
 import { simulateGame } from "./simulator";
+import { finalPublicStateHash, publicTraceHash } from "./reporting";
 
 const config: BenchmarkConfig = {
   benchmarkVersion: "d0-v1",
@@ -27,6 +28,8 @@ it("completes a mixed real-room game through strategy actions", () => {
     guardErrors: 0,
   });
   expect(summary.publicEvents.length).toBe(summary.actionCount);
+  expect(summary.publicTraceHash).toBe(publicTraceHash(summary.publicEvents));
+  expect(summary.finalPublicStateHash).toBe(finalPublicStateHash(summary));
   expect(summary.publicEvents[0]).toMatchObject({
     handCounts: expect.any(Object),
     handCountChanges: expect.any(Object),

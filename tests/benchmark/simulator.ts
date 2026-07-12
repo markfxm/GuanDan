@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createBenchmarkObservation } from "./observation";
 import { getStrategy } from "./strategies";
 import type { GameAction, GameSummary, PublicTributeEvent, StrategyAction } from "./contracts";
-import { canonicalJson } from "./contracts";
+import { finalPublicStateHash, publicTraceHash } from "./reporting";
 import { createRoom, playCards, passTurn, type RoomState, type Seat } from "../../src/game/room";
 import type { BenchmarkGameTask } from "./rotations";
 
@@ -41,6 +41,7 @@ export type SimulationSummary = GameSummary & {
   errors: SimulationError[];
   errorCounters: SafetyErrorCounters;
   publicEvents: PublicSimulationEvent[];
+  finalPublicState?: ReturnType<typeof finalPublicState>;
 };
 
 export function simulateGame(task: BenchmarkGameTask): SimulationSummary {
@@ -122,6 +123,7 @@ export function simulateGame(task: BenchmarkGameTask): SimulationSummary {
 
   const winnerTeam = room.settlement?.winningTeam ?? null;
   const teamScore: Record<0 | 1, number> = { 0: winnerTeam === 0 ? 1 : 0, 1: winnerTeam === 1 ? 1 : 0 };
+  const publicState = finalPublicState(room);
   return {
     matchId: task.matchId,
     configHash: task.configHash,
@@ -133,8 +135,9 @@ export function simulateGame(task: BenchmarkGameTask): SimulationSummary {
     winnerTeam,
     teamScore,
     actionCount: room.playHistory.length,
-    publicTraceHash: hash(canonicalJson(publicEvents)),
-    finalPublicStateHash: hash(canonicalJson(finalPublicState(room))),
+    publicTraceHash: publicTraceHash(publicEvents),
+    finalPublicStateHash: finalPublicStateHash(publicState),
+    finalPublicState: publicState,
     completed: room.status === "finished" && room.finishOrder.length === 4,
     failed: errors.length > 0,
     errors,
@@ -215,15 +218,11 @@ function recordFailure(
 }
 
 function deriveSeed(matchId: string, seat: Seat): string {
-  return hash(`${matchId}:strategy:${seat}`);
+  return createHash("sha256").update(`${matchId}:strategy:${seat}`).digest("hex");
 }
 
 function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
-}
-
-function hash(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
 }
 
 function seats(): Seat[] {
