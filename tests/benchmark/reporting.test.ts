@@ -11,6 +11,8 @@ import {
   writeReplay,
   writeReport,
   buildMarkdownReport,
+  ENGINE_VERSION,
+  ROOM_RULES_VERSION,
 } from "./reporting";
 
 const config: BenchmarkConfig = {
@@ -45,6 +47,8 @@ const summary = (seed: number, rotation: 0 | 1 | 2 | 3, allocation: "AB" | "BA")
   durationMs: 1,
 });
 
+const provenance = { engineVersion: ENGINE_VERSION, roomRulesVersion: ROOM_RULES_VERSION, strategyDescriptors: descriptors };
+
 it("canonical public hashes ignore timings, paths, stacks, and worker IDs", () => {
   const first = [{ actionIndex: 0, seat: 0, action: { type: "play", cardIds: ["S10-1", "S2-1"] }, durationMs: 4, diagnostics: { elapsed: 9 }, path: "a", workerId: 1, errorStack: "x" }];
   const second = [{ workerId: 8, errorStack: "y", path: "b", diagnostics: { elapsed: 90 }, durationMs: 99, action: { cardIds: ["S2-1", "S10-1"], type: "play" }, seat: 0, actionIndex: 0 }];
@@ -65,11 +69,11 @@ it("writes schema-complete replay and privacy-safe report", () => {
     errorCounters: { total: 0, strategyErrors: 0, runtimeErrors: 0, illegalActions: 0, engineErrors: 0, guardErrors: 0 },
     publicEvents: [{ actionIndex: 0, seat: 0, action: { type: "pass" }, handCounts: { 0: 0, 1: 1, 2: 1, 3: 1 }, handCountChanges: { 0: 0, 1: 0, 2: 0, 3: 0 }, trick: { leadSeat: 0, passSeats: [], plays: [] }, tributeEvents: [], finishOrder: [] }],
   } as SimulationSummary;
-  const replayPath = writeReplay(game, { outputDir: dir, replayMode: "all", strategyDescriptors: descriptors, engineVersion: "pkg@sha", roomRulesVersion: "rules" });
+  const replayPath = writeReplay(game, { outputDir: dir, replayMode: "all", strategyDescriptors: descriptors, engineVersion: "pkg@sha", roomRulesVersion: ROOM_RULES_VERSION });
   const replay = JSON.parse(fs.readFileSync(replayPath!, "utf8"));
-  expect(replay).toMatchObject({ schemaVersion: "1", replayVersion: "d0-v1", benchmarkVersion: "d0-v1", engineVersion: "pkg@sha", roomRulesVersion: "rules", configHash: "8955814f70f940c7fa2bbe4e09e2b3d27e95449013d39c1f9c11e6ac33ad3d19", finalPublicStateHash: "state" });
+  expect(replay).toMatchObject({ schemaVersion: "1", replayVersion: "d0-v1", benchmarkVersion: "d0-v1", engineVersion: "pkg@sha", roomRulesVersion: ROOM_RULES_VERSION, configHash: "8955814f70f940c7fa2bbe4e09e2b3d27e95449013d39c1f9c11e6ac33ad3d19", finalPublicStateHash: "state" });
   expect(replay.strategyDescriptors).toEqual(descriptors);
-  const reportPath = writeReport({ config, games: [game], replayPaths: ["../replays/m.json"] }, { outputPath: path.join(dir, "report.json") });
+  const reportPath = writeReport({ config, games: [game], replayPaths: ["../replays/m.json"], provenance }, { outputPath: path.join(dir, "report.json") });
   const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
   expect(report.games[0]).not.toHaveProperty("publicEvents");
   expect(report.games[0]).not.toHaveProperty("hands");
@@ -78,7 +82,7 @@ it("writes schema-complete replay and privacy-safe report", () => {
 
 it("rejects zero-duration formal rows and renders the required baseline sections", () => {
   expect(() => writeReport({ config, games: [{ ...summary(1, 0, "AB"), durationMs: 0 }] })).toThrow("DURATION_INVALID");
-  const markdown = buildMarkdownReport({ config, games: [{ ...summary(1, 0, "AB"), durationMs: 1 }], aggregate: {
+  const markdown = buildMarkdownReport({ config, games: [{ ...summary(1, 0, "AB"), durationMs: 1 }], provenance, aggregate: {
     winsA: 1, winsB: 0, unresolved: 0, winRateA: 1, winRateB: 0, scoreA: 1, scoreB: 0,
     scoreDifferenceCI: [0, 1], winRateCI: [0.5, 1], statisticallySignificant: true,
     significance: { score: { ci: [0, 1], excludesNeutral: true }, winRate: { ci: [0.5, 1], excludesNeutral: true } },
@@ -93,19 +97,16 @@ it("rejects zero-duration formal rows and renders the required baseline sections
 it("defaults replay mode to failures", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d0-default-replay-"));
   const game = summary(1, 0, "AB") as SimulationSummary;
-  expect(writeReplay({ ...game, failed: false }, { outputDir: dir })).toBeUndefined();
-  expect(writeReplay({ ...game, failed: true }, { outputDir: dir })).toBeDefined();
+  expect(writeReplay({ ...game, failed: false }, { outputDir: dir, ...provenance })).toBeUndefined();
+  expect(writeReplay({ ...game, failed: true }, { outputDir: dir, ...provenance })).toBeDefined();
 });
 
-it("fills default replay provenance with real non-unknown values", () => {
+it("rejects missing replay provenance", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d0-provenance-"));
   const game = { ...summary(1, 0, "AB"), failed: true } as SimulationSummary;
-  const replayPath = writeReplay(game, { outputDir: dir });
-  const replay = JSON.parse(fs.readFileSync(replayPath!, "utf8")) as Record<string, any>;
-  expect(replay.engineVersion).toMatch(/^\d+\.\d+\.\d+@[^@]+$/);
-  expect(replay.roomRulesVersion).toMatch(/^[a-f0-9]{64}$/);
-  expect(replay.strategyDescriptors.length).toBeGreaterThan(0);
-  expect(JSON.stringify(replay)).not.toMatch(/unknown/i);
+  expect(() => writeReplay(game, { outputDir: dir })).toThrow("PROVENANCE_MISSING");
+  expect(() => writeReport({ config, games: [game] })).toThrow("PROVENANCE_MISSING");
+  expect(() => createManifest(config, [summary(1, 0, "AB")])).toThrow("PROVENANCE_MISSING");
 });
 
 it("rejects games whose config hash differs from their manifest", () => {
@@ -113,7 +114,7 @@ it("rejects games whose config hash differs from their manifest", () => {
   expect(() => createManifest(config, games.map((game) => ({ ...game, configHash: "arbitrary" })))).toThrow(/CONFIG_HASH/);
   expect(() => createManifest(config, [{ ...games[0]!, configHash: "other" }, ...games.slice(1)])).toThrow(/CONFIG_HASH/);
   expect(() => writeReport({ config, games: [{ ...games[0]!, configHash: "arbitrary" }] })).toThrow(/CONFIG_HASH/);
-  const batch = createManifest(config, games.slice(0, 8));
+  const batch = createManifest(config, games.slice(0, 8), provenance);
   expect(() => mergeBatches([{ ...batch, games: [{ ...batch.games[0]!, configHash: "other" }, ...batch.games.slice(1)] }])).toThrow(/CONFIG_HASH/);
 });
 
@@ -122,7 +123,7 @@ it("uses an explicit compact-summary whitelist and drops circular/private state"
   const circular: Record<string, unknown> = {};
   circular.self = circular;
   const game = { ...summary(1, 0, "AB"), hiddenHands: ["secret"], privateHands: ["secret"], state: circular } as GameSummary & Record<string, unknown>;
-  const reportPath = writeReport({ config, games: [game] }, { outputPath: path.join(dir, "report.json") });
+  const reportPath = writeReport({ config, games: [game], provenance }, { outputPath: path.join(dir, "report.json") });
   const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
   expect(report.games[0]).not.toHaveProperty("hiddenHands");
   expect(report.games[0]).not.toHaveProperty("privateHands");
@@ -131,11 +132,11 @@ it("uses an explicit compact-summary whitelist and drops circular/private state"
 
 it("merges complete batches and rejects duplicates, gaps, incomplete blocks, and config mismatch", () => {
   const games = [0, 1, 2, 3].flatMap((seed) => [0, 1, 2, 3].flatMap((rotation) => [summary(seed, rotation as 0 | 1 | 2 | 3, "AB"), summary(seed, rotation as 0 | 1 | 2 | 3, "BA")]));
-  const batches = [0, 1, 2, 3].map((index) => createManifest(config, games.filter((game) => game.seed === index)));
+  const batches = [0, 1, 2, 3].map((index) => createManifest(config, games.filter((game) => game.seed === index), provenance));
   expect(mergeBatches(batches).games).toHaveLength(32);
   expect(() => mergeBatches([...batches, batches[0]!])).toThrow(/DUPLICATE_MATCH_ID/);
   expect(() => mergeBatches(batches.map((batch, index) => index === 1 ? { ...batch, configHash: "other" } : batch))).toThrow(/CONFIG_HASH/);
-  expect(() => mergeBatches([createManifest(config, games.slice(0, 7))])).toThrow(/INCOMPLETE/);
-  const missingExpected = createManifest(config, games.filter((game) => game.seed !== 3), { expectedMatchIds: [...games.filter((game) => game.seed !== 3).map((game) => game.matchId), "missing"] });
+  expect(() => mergeBatches([createManifest(config, games.slice(0, 7), provenance)])).toThrow(/INCOMPLETE/);
+  const missingExpected = createManifest(config, games.filter((game) => game.seed !== 3), { ...provenance, expectedMatchIds: [...games.filter((game) => game.seed !== 3).map((game) => game.matchId), "missing"] });
   expect(() => mergeBatches([missingExpected])).toThrow(/MISSING/);
 });

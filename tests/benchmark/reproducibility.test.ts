@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import { runBenchmark, stripVolatile } from "../../scripts/runAiBenchmark";
 import { replayMatch } from "../../scripts/replayAiBenchmark";
 import { buildGamesForSeed } from "./rotations";
-import { createManifest, mergeBatches, writeReplay } from "./reporting";
+import { createManifest, mergeBatches, writeReplay, ENGINE_VERSION, ROOM_RULES_VERSION } from "./reporting";
+import { strategyDescriptors } from "./strategies";
 import { simulateGame, type SimulationSummary } from "./simulator";
 import type { BenchmarkConfig } from "./contracts";
 
@@ -16,6 +17,8 @@ const base = {
   replayMode: "failures" as const,
   timeoutMs: 30_000,
 };
+
+const resolvedDescriptors = strategyDescriptors.map((descriptor) => ({ ...descriptor, sourceCommit: descriptor.sourceCommit.toLowerCase() === "unknown" ? ENGINE_VERSION.split("@").slice(1).join("@") : descriptor.sourceCommit }));
 
 describe("AI benchmark reproducibility", () => {
   it("keeps one-shot and four 50-seed batch manifests identical after volatile fields are removed", async () => {
@@ -34,7 +37,7 @@ describe("AI benchmark reproducibility", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "d0-repro-replay-"));
     const config: BenchmarkConfig = { benchmarkVersion: "d0-v1", rank: "2", seeds: [1], strategyA: "legacy-reference", strategyB: "legacy-reference", replayMode: "all" };
     const summary = simulateGame(buildGamesForSeed(config, 1)[0]!);
-    const replayPath = writeReplay(summary, { outputDir: root, replayMode: "all" });
+    const replayPath = writeReplay(summary, { outputDir: root, replayMode: "all", engineVersion: ENGINE_VERSION, roomRulesVersion: ROOM_RULES_VERSION, strategyDescriptors: resolvedDescriptors });
     expect(replayPath).toBeDefined();
     const document = JSON.parse(fs.readFileSync(replayPath!, "utf8")) as Record<string, unknown>;
     const replay = replayMatch(summary.matchId, root);

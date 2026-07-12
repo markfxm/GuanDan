@@ -158,12 +158,12 @@ export function writeReport(input: ReportInput, optionsOrPath: ReportOptions | s
 export function createManifest(
   config: BenchmarkConfig,
   games: Array<GameSummary | SimulationSummary>,
-  options: { expectedMatchIds?: string[]; strategyDescriptors?: StrategyDescriptor[] } = {},
+  options: { expectedMatchIds?: string[]; engineVersion?: string; roomRulesVersion?: string; strategyDescriptors?: StrategyDescriptor[] } = {},
 ): BatchManifest {
   const configHashValue = configHash(config);
   if (games.some((game) => game.configHash !== configHashValue)) throw new Error("CONFIG_HASH_MISMATCH");
   games.forEach(assertMeasuredDuration);
-  const provenance = resolveProvenance(games[0]!, { strategyDescriptors: options.strategyDescriptors });
+  const provenance = resolveProvenance(games[0], options);
   const ids = [...new Set(options.expectedMatchIds ?? games.map((game) => game.matchId))].sort();
   const seeds = games.map((game) => game.seed);
   return {
@@ -343,29 +343,20 @@ function compactSummary(game: GameSummary | SimulationSummary): Record<string, u
 }
 
 function resolveProvenance(summary: GameSummary | undefined, options: ReplayOptions = {}): BenchmarkProvenance {
-  const descriptors = normalizeDescriptors(options.strategyDescriptors, summary);
+  if (!validProvenanceValue(options.engineVersion) || !validProvenanceValue(options.roomRulesVersion) || !options.strategyDescriptors || options.strategyDescriptors.length === 0) {
+    throw new Error("PROVENANCE_MISSING");
+  }
+  if (!/^[a-f0-9]{64}$/.test(options.roomRulesVersion)) throw new Error("ROOM_RULES_VERSION_INVALID");
+  for (const descriptor of options.strategyDescriptors) {
+    if (!validProvenanceValue(descriptor.id) || !validProvenanceValue(descriptor.implementationVersion) || !validProvenanceValue(descriptor.configHash) || !validProvenanceValue(descriptor.sourceCommit) || !["legal-only", "production-policy"].includes(descriptor.candidatePolicy)) {
+      throw new Error("STRATEGY_DESCRIPTOR_INVALID");
+    }
+  }
   return {
-    engineVersion: validProvenanceValue(options.engineVersion) ? options.engineVersion! : ENGINE_VERSION,
-    roomRulesVersion: validProvenanceValue(options.roomRulesVersion) ? options.roomRulesVersion! : ROOM_RULES_VERSION,
-    strategyDescriptors: descriptors,
+    engineVersion: options.engineVersion!,
+    roomRulesVersion: options.roomRulesVersion!,
+    strategyDescriptors: options.strategyDescriptors.map((descriptor) => ({ ...descriptor })),
   };
-}
-
-function normalizeDescriptors(input: StrategyDescriptor[] | undefined, summary: GameSummary | undefined): StrategyDescriptor[] {
-  const source = input && input.length > 0 ? input : summary === undefined ? [] : Object.values(summary.strategiesBySeat).filter((id, index, values) => values.indexOf(id) === index).map((id) => ({
-    id,
-    implementationVersion: "benchmark-adapter-v1",
-    configHash: summary.configHash,
-    sourceCommit: SOURCE_COMMIT,
-    candidatePolicy: "legal-only" as const,
-  }));
-  return source.map((descriptor) => ({
-    id: descriptor.id,
-    implementationVersion: validProvenanceValue(descriptor.implementationVersion) ? descriptor.implementationVersion : "benchmark-adapter-v1",
-    configHash: validProvenanceValue(descriptor.configHash) ? descriptor.configHash : summary?.configHash ?? "benchmark-config",
-    sourceCommit: validProvenanceValue(descriptor.sourceCommit) ? descriptor.sourceCommit : SOURCE_COMMIT,
-    candidatePolicy: descriptor.candidatePolicy === "production-policy" ? "production-policy" : "legal-only",
-  }));
 }
 
 function assertMeasuredDuration(game: GameSummary): void {

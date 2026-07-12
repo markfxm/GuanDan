@@ -86,6 +86,7 @@ export async function runBenchmark(input: Partial<BenchmarkCliOptions> & Pick<Be
     ...input, paired: input.paired ?? true, seeds: [...new Set(input.seeds)].sort((a, b) => a - b),
   };
   const config: BenchmarkConfig = { benchmarkVersion: options.benchmarkVersion, rank: options.rank, seeds: options.seeds, strategyA: options.strategyA, strategyB: options.strategyB, replayMode: options.replayMode };
+  const resolvedStrategyDescriptors = strategyDescriptors.map((descriptor) => ({ ...descriptor, sourceCommit: descriptor.sourceCommit.toLowerCase() === "unknown" ? ENGINE_VERSION.split("@").slice(1).join("@") : descriptor.sourceCommit }));
   const tasks = options.seeds.flatMap((seed) => buildGamesForSeed(config, seed)).filter((task) => options.paired || task.allocation === "AB");
   const configHash = tasks[0]?.configHash ?? hashConfig(config);
   const reused = loadExisting(options.output, configHash, options, tasks.map((task) => task.matchId));
@@ -99,18 +100,18 @@ export async function runBenchmark(input: Partial<BenchmarkCliOptions> & Pick<Be
   const games = [...existingById.values(), ...fresh].sort((left, right) => left.matchId.localeCompare(right.matchId));
   const expected = tasks.map((task) => task.matchId).sort();
   for (const id of expected) if (!games.some((game) => game.matchId === id)) throw new Error(`MISSING_EXPECTED_MATCH_ID:${id}`);
-  const manifest = createManifest(config, games, { expectedMatchIds: expected, strategyDescriptors });
+  const manifest = createManifest(config, games, { expectedMatchIds: expected, engineVersion: ENGINE_VERSION, roomRulesVersion: ROOM_RULES_VERSION, strategyDescriptors: resolvedStrategyDescriptors });
   const metrics = games.map((game) => summarizeGame(game));
   const aggregate = aggregateTournament(metrics, config);
   const paired = { enabled: options.paired, unit: "seed", rotations: 4, allocations: options.paired ? 2 : 1, gamesPerSeed: options.paired ? 8 : 4 };
   const replayPaths = games.map((game) => writeReplay(game, {
     replayMode: options.replayMode,
     benchmarkVersion: config.benchmarkVersion,
-    strategyDescriptors,
+    strategyDescriptors: resolvedStrategyDescriptors,
     engineVersion: ENGINE_VERSION,
     roomRulesVersion: ROOM_RULES_VERSION,
   }));
-  const provenance = { engineVersion: ENGINE_VERSION, roomRulesVersion: ROOM_RULES_VERSION, strategyDescriptors };
+  const provenance = { engineVersion: ENGINE_VERSION, roomRulesVersion: ROOM_RULES_VERSION, strategyDescriptors: resolvedStrategyDescriptors };
   const reportInput = { config, games: metrics, aggregate, paired, replayPaths, provenance };
   const report = buildReport(reportInput, { outputPath: options.output, provenance });
   let outputPath: string | undefined;
@@ -139,7 +140,7 @@ function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs
     let cursor = 0;
     let finished = 0;
     let settled = false;
-    type Slot = { worker: Worker; task?: BenchmarkGameTask; timer?: ReturnType<typeof setTimeout>; retired: boolean };
+    type Slot = { worker: Worker; task?: BenchmarkGameTask; timer?: ReturnType<typeof setTimeout>; startedAt?: number; retired: boolean };
     const slots: Slot[] = [];
     const complete = () => {
       if (settled || finished !== tasks.length) return;
@@ -162,10 +163,11 @@ function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs
       const task = tasks[cursor++];
       if (task === undefined) return;
       slot.task = task;
+      slot.startedAt = performance.now();
       slot.timer = setTimeout(() => {
         if (slot.task !== task || slot.retired) return;
         slot.task = undefined;
-        results.push(timeoutSummary(task, timeoutMs, undefined, diagnostics));
+        results.push(timeoutSummary(task, elapsedSince(slot.startedAt), `BENCHMARK_TIMEOUT:${timeoutMs}`, diagnostics));
         finished += 1;
         retire(slot);
         if (cursor < tasks.length) addWorker();
@@ -176,12 +178,14 @@ function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs
     const handleResult = (slot: Slot, message: BenchmarkWorkerResult) => {
       const task = slot.task;
       if (slot.retired || task === undefined || task.matchId !== message.matchId) return;
+      const elapsed = elapsedSince(slot.startedAt);
       if (slot.timer) clearTimeout(slot.timer);
       slot.timer = undefined;
       slot.task = undefined;
+      slot.startedAt = undefined;
       results.push(message.type === "result" && message.result
         ? message.result
-        : timeoutSummary(task, 0, message.error ?? "BENCHMARK_WORKER_ERROR", diagnostics));
+        : timeoutSummary(task, elapsed, message.error ?? "BENCHMARK_WORKER_ERROR", diagnostics));
       finished += 1;
       if (cursor < tasks.length) dispatch(slot); else retire(slot);
       complete();
@@ -197,7 +201,7 @@ function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs
         if (slot.timer) clearTimeout(slot.timer);
         slot.timer = undefined;
         slot.task = undefined;
-        results.push(timeoutSummary(task, 0, error.message, diagnostics));
+        results.push(timeoutSummary(task, elapsedSince(slot.startedAt), error.message, diagnostics));
         finished += 1;
         retire(slot);
         if (cursor < tasks.length) addWorker();
@@ -210,15 +214,17 @@ function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs
 }
 
 function withTimeout<T extends SimulationSummary>(run: () => T, task: BenchmarkGameTask, timeoutMs: number, diagnostics: boolean): Promise<T> {
-  return new Promise((resolve) => { const started = Date.now(); try { const result = run(); resolve(Date.now() - started > timeoutMs ? timeoutSummary(task, timeoutMs, undefined, diagnostics) as T : result); } catch (cause) { resolve(timeoutSummary(task, 0, cause instanceof Error ? cause.message : String(cause), diagnostics) as T); } });
+  return new Promise((resolve) => { const started = performance.now(); try { const result = run(); const elapsed = performance.now() - started; resolve(elapsed > timeoutMs ? timeoutSummary(task, elapsed, `BENCHMARK_TIMEOUT:${timeoutMs}`, diagnostics) as T : result); } catch (cause) { resolve(timeoutSummary(task, performance.now() - started, cause instanceof Error ? cause.message : String(cause), diagnostics) as T); } });
 }
 
-function timeoutSummary(task: BenchmarkGameTask, timeoutMs: number, error = `BENCHMARK_TIMEOUT:${timeoutMs}`, diagnostics = false): SimulationSummary {
+function timeoutSummary(task: BenchmarkGameTask, durationMs: number, error = "BENCHMARK_TIMEOUT", diagnostics = false): SimulationSummary {
   const strategiesBySeat = { 0: task.allocation === "AB" ? task.config.strategyA : task.config.strategyB, 1: task.allocation === "AB" ? task.config.strategyB : task.config.strategyA, 2: task.allocation === "AB" ? task.config.strategyA : task.config.strategyB, 3: task.allocation === "AB" ? task.config.strategyB : task.config.strategyA } as Record<Seat, string>;
   const failure: SimulationError = { seed: task.seed, seat: 0, strategy: strategiesBySeat[0], error };
   const counters: SafetyErrorCounters = { total: 1, strategyErrors: error.includes("UNKNOWN_STRATEGY") ? 1 : 0, runtimeErrors: 0, illegalActions: 0, engineErrors: error.includes("UNKNOWN_STRATEGY") ? 0 : 1, guardErrors: 0 };
-  return { matchId: task.matchId, configHash: task.configHash, seed: task.seed, rank: task.config.rank, rotation: task.rotation, strategiesBySeat, finishOrder: [], winnerTeam: null, teamScore: { 0: 0, 1: 0 }, actionCount: 0, publicTraceHash: "", finalPublicStateHash: "", durationMs: Math.max(0.001, timeoutMs), completed: false, failed: true, errors: [failure], errorCounters: counters, publicEvents: [], diagnostics: diagnostics ? { enabled: true, decisionCount: 0, workerLocalToken: task.matchId } : undefined };
+  return { matchId: task.matchId, configHash: task.configHash, seed: task.seed, rank: task.config.rank, rotation: task.rotation, strategiesBySeat, finishOrder: [], winnerTeam: null, teamScore: { 0: 0, 1: 0 }, actionCount: 0, publicTraceHash: "", finalPublicStateHash: "", durationMs: Math.max(0.001, durationMs), completed: false, failed: true, errors: [failure], errorCounters: counters, publicEvents: [], diagnostics: diagnostics ? { enabled: true, decisionCount: 0, workerLocalToken: task.matchId } : undefined };
 }
+
+function elapsedSince(startedAt: number | undefined): number { return startedAt === undefined ? 0.001 : Math.max(0.001, performance.now() - startedAt); }
 
 function loadExisting(output: string | undefined, configHash: string, options: BenchmarkCliOptions, expectedIds: string[]): Array<SimulationSummary> {
   if (!options.resume && !options.skipExisting) return [];

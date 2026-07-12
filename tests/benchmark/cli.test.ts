@@ -6,9 +6,12 @@ import { parseBenchmarkArgs, runBenchmark, stripVolatile } from "../../scripts/r
 import { replayMatch } from "../../scripts/replayAiBenchmark";
 import { buildGamesForSeed } from "./rotations";
 import { simulateGame } from "./simulator";
-import { writeReplay } from "./reporting";
+import { writeReplay, ENGINE_VERSION, ROOM_RULES_VERSION } from "./reporting";
+import { strategyDescriptors } from "./strategies";
 import type { BenchmarkConfig } from "./contracts";
 import type { SimulationSummary } from "./simulator";
+
+const resolvedDescriptors = strategyDescriptors.map((descriptor) => ({ ...descriptor, sourceCommit: descriptor.sourceCommit.toLowerCase() === "unknown" ? ENGINE_VERSION.split("@").slice(1).join("@") : descriptor.sourceCommit }));
 
 describe("AI benchmark CLI", () => {
   it("parses required options, aliases, ranges and replay mode", () => {
@@ -75,7 +78,7 @@ describe("AI benchmark CLI", () => {
     const task = buildGamesForSeed(config, 1)[0]!;
     const summary = simulateGame(task);
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-benchmark-replay-"));
-    const replayPath = writeReplay(summary, { outputDir: root, benchmarkVersion: config.benchmarkVersion });
+    const replayPath = writeReplay(summary, { outputDir: root, benchmarkVersion: config.benchmarkVersion, engineVersion: ENGINE_VERSION, roomRulesVersion: ROOM_RULES_VERSION, strategyDescriptors: resolvedDescriptors });
     expect(replayPath).toBeDefined();
     const document = JSON.parse(fs.readFileSync(replayPath!, "utf8")) as { benchmarkVersion: string; replayMode: string };
     expect(document.benchmarkVersion).toBe("custom-v2");
@@ -88,6 +91,7 @@ describe("AI benchmark CLI", () => {
     expect(result.games).toHaveLength(8);
     expect(new Set(result.games.map((game) => game.matchId)).size).toBe(8);
     expect(result.games.every((game) => (game as { failed?: boolean }).failed)).toBe(true);
+    expect(result.games.every((game) => typeof game.durationMs === "number" && game.durationMs > 0)).toBe(true);
   });
 
   it("applies an inclusive batch seed filter and parses paired aliases", () => {
