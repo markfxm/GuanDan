@@ -6,6 +6,7 @@ import type { ScoredPlan } from "../engine/scorer";
 import { CardFace } from "./CardFace";
 import { groupCardsForHandDisplay } from "./handLayout";
 import { createGameRoom, generatePlans, passRoomTurn, playRoomCards, runRoomAiStep, submitOpeningTribute, type PublicRoom, type Seat, type TrickPlay } from "./api";
+import { useRoomSocket } from "./useRoomSocket";
 import { draggedCardIds, ManualGroupTray, setDraggedCardIds } from "./ManualGroupTray";
 import {
   addCardToManualGroup,
@@ -75,7 +76,7 @@ export function App() {
 
   const applyRealtimeRoomUpdate = useCallback((previousRoom: PublicRoom, nextRoom: PublicRoom) => {
     const nextBombEffect = detectNewBombPlay(previousRoom, nextRoom);
-    setRoom(nextRoom);
+    setRoom({ ...nextRoom, playerId: nextRoom.playerId ?? previousRoom.playerId });
     if (nextBombEffect === undefined) {
       return;
     }
@@ -89,6 +90,14 @@ export function App() {
       bombEffectTimerRef.current = undefined;
     }, bombEffectDurationMs());
   }, []);
+
+  const handleRoomSocketUpdate = useCallback((nextRoom: PublicRoom) => {
+    setRoom((previousRoom) => ({ ...nextRoom, playerId: nextRoom.playerId ?? previousRoom?.playerId }));
+    setStatus(statusForRoom(nextRoom));
+    setShowSettlementDialog(nextRoom.status === "finished");
+  }, []);
+
+  useRoomSocket(room?.id, room?.playerId, handleRoomSocketUpdate);
 
   useEffect(() => {
     if (room === undefined) {

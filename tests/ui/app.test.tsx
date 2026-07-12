@@ -8,12 +8,24 @@ const cardK: Card = { id: "SK-1", kind: "suited", rank: "K", suit: "spades", cop
 const cardQ: Card = { id: "SQ-1", kind: "suited", rank: "Q", suit: "spades", copy: 1 };
 const card5: Card = { id: "C5-1", kind: "suited", rank: "5", suit: "clubs", copy: 1 };
 
+class MockRoomWebSocket {
+  onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  close = vi.fn();
+
+  constructor(readonly url: string) {}
+}
+
+beforeEach(() => {
+  vi.stubGlobal("WebSocket", MockRoomWebSocket);
+});
+
 afterEach(() => {
   delete (globalThis as { __GUANDAN_AI_PAUSE_MS__?: number }).__GUANDAN_AI_PAUSE_MS__;
   delete (globalThis as { __GUANDAN_AI_LEAD_PAUSE_MS__?: number }).__GUANDAN_AI_LEAD_PAUSE_MS__;
   delete (globalThis as { __GUANDAN_BOMB_EFFECT_MS__?: number }).__GUANDAN_BOMB_EFFECT_MS__;
   delete (globalThis as { __GUANDAN_FLAG_LOWER_MS__?: number }).__GUANDAN_FLAG_LOWER_MS__;
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 it("defaults new rooms to rank 2 and does not render the game information sidebar", async () => {

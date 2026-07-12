@@ -1,5 +1,6 @@
 import { buildApi } from "../../src/server/api";
 import { createDeck } from "../../src/engine/cards";
+import WebSocket from "ws";
 
 async function withApp(run: (app: ReturnType<typeof buildApi>) => Promise<void>) {
   const app = buildApi();
@@ -9,6 +10,71 @@ async function withApp(run: (app: ReturnType<typeof buildApi>) => Promise<void>)
   } finally {
     await app.close();
   }
+}
+
+async function withListeningApp(run: (app: ReturnType<typeof buildApi>, wsBaseUrl: string) => Promise<void>) {
+  const app = buildApi();
+  await app.listen({ host: "127.0.0.1", port: 0 });
+  const address = app.server.address();
+  if (address === null || typeof address === "string") {
+    await app.close();
+    throw new Error("Expected a TCP server address.");
+  }
+
+  try {
+    await run(app, `ws://127.0.0.1:${address.port}`);
+  } finally {
+    await app.close();
+  }
+}
+
+type SocketRoomUpdate = { type: string; room: Record<string, unknown> };
+
+function openRoomSocket(wsBaseUrl: string, roomId: string, playerId: string): Promise<{ socket: WebSocket; initial: SocketRoomUpdate }> {
+  const socket = new WebSocket(`${wsBaseUrl}/ws/rooms/${roomId}?playerId=${encodeURIComponent(playerId)}`);
+  return new Promise((resolve, reject) => {
+    let opened = false;
+    let initial: SocketRoomUpdate | undefined;
+    const resolveWhenReady = () => {
+      if (opened && initial !== undefined) {
+        resolve({ socket, initial });
+      }
+    };
+
+    socket.once("open", () => {
+      opened = true;
+      resolveWhenReady();
+    });
+    socket.once("message", (data) => {
+      try {
+        initial = JSON.parse(data.toString()) as SocketRoomUpdate;
+        resolveWhenReady();
+      } catch (error) {
+        reject(error);
+      }
+    });
+    socket.once("error", reject);
+  });
+}
+
+function nextSocketMessage(socket: WebSocket): Promise<SocketRoomUpdate> {
+  return new Promise((resolve, reject) => {
+    socket.once("message", (data) => {
+      try {
+        resolve(JSON.parse(data.toString()) as SocketRoomUpdate);
+      } catch (error) {
+        reject(error);
+      }
+    });
+    socket.once("error", reject);
+  });
+}
+
+function closeSocket(socket: WebSocket): Promise<void> {
+  return new Promise((resolve) => {
+    socket.once("close", () => resolve());
+    socket.close();
+  });
 }
 
 it("deals 27 cards", async () => {
@@ -303,6 +369,59 @@ it("joins an AI seat as a named human player", async () => {
     expect(joined.json().room.initialHands).toBeUndefined();
   });
 });
+
+it("sends personal room updates to every connected player socket", async () => {
+  await withListeningApp(async (app, wsBaseUrl) => {
+    const created = await app.inject({ method: "POST", url: "/api/rooms", payload: { rank: "10", seed: 1 } });
+    const roomId = created.json().room.id;
+    const playerOneId = created.json().playerId;
+    const playerOneConnection = await openRoomSocket(wsBaseUrl, roomId, playerOneId);
+    const playerOneSocket = playerOneConnection.socket;
+    const initialPlayerOne = playerOneConnection.initial;
+
+    expect(initialPlayerOne.type).toBe("room:update");
+    expect(initialPlayerOne.room.humanSeat).toBe(0);
+
+    const joinUpdate = nextSocketMessage(playerOneSocket);
+    const joined = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${roomId}/join`,
+      payload: { name: "East", preferredSeat: 1 },
+    });
+    const afterJoin = await joinUpdate;
+
+    expect(joined.statusCode).toBe(200);
+    expect(afterJoin.type).toBe("room:update");
+    expect(afterJoin.room.players).toEqual(expect.arrayContaining([
+      expect.objectContaining({ seat: 1, name: "East", isAI: false }),
+    ]));
+
+    const playerTwoId = joined.json().playerId;
+    const playerTwoConnection = await openRoomSocket(wsBaseUrl, roomId, playerTwoId);
+    const playerTwoSocket = playerTwoConnection.socket;
+    const initialPlayerTwo = playerTwoConnection.initial;
+    expect(initialPlayerTwo.type).toBe("room:update");
+    expect(initialPlayerTwo.room.humanSeat).toBe(1);
+    expect(initialPlayerOne.room.humanHand).not.toEqual(initialPlayerTwo.room.humanHand);
+
+    const playerOneUpdate = nextSocketMessage(playerOneSocket);
+    const playerTwoUpdate = nextSocketMessage(playerTwoSocket);
+    const played = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${roomId}/play`,
+      payload: { playerId: playerOneId, cardIds: [created.json().room.humanHand[0].id] },
+    });
+    const [afterPlayOne, afterPlayTwo] = await Promise.all([playerOneUpdate, playerTwoUpdate]);
+
+    expect(played.statusCode).toBe(200);
+    expect(afterPlayOne.type).toBe("room:update");
+    expect(afterPlayTwo.type).toBe("room:update");
+    expect(afterPlayOne.room.humanSeat).toBe(0);
+    expect(afterPlayTwo.room.humanSeat).toBe(1);
+
+    await Promise.all([closeSocket(playerOneSocket), closeSocket(playerTwoSocket)]);
+  });
+}, 15000);
 
 it("falls back to the first available seat and isolates player hands by playerId", async () => {
   await withApp(async (app) => {

@@ -1,3 +1,4 @@
+import fastifyWebsocket from "@fastify/websocket";
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { createDeck, RANKS, SUITS, type Card, type GameRank, type JokerRank, type Rank } from "../engine/cards";
@@ -6,6 +7,7 @@ import { scorePlans } from "../engine/scorer";
 import { dealHand, validateHand } from "../engine/validation";
 import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, type RoomState, type Seat } from "../game/room";
 import type { TributeItem } from "../game/settlement";
+import type { WebSocket } from "ws";
 
 type DealBody = {
   rank?: unknown;
@@ -71,10 +73,17 @@ export type PlayerSession = {
 export type OnlineRoom = {
   room: RoomState;
   sessions: Map<string, PlayerSession>;
+  sockets: Set<RoomSocket>;
+};
+
+type RoomSocket = {
+  playerId: string;
+  socket: WebSocket;
 };
 
 export function buildApi() {
   const app = Fastify({ logger: false });
+  app.register(fastifyWebsocket);
   const onlineRooms = new Map<string, OnlineRoom>();
 
   app.addHook("onRequest", async (request, reply) => {
@@ -185,7 +194,7 @@ export function buildApi() {
 
     const room = createRoom({ rank: rank as GameRank, seed, pendingTributeItems });
     const session = createPlayerSession(room.players[0].name, 0);
-    onlineRooms.set(room.id, { room, sessions: new Map([[session.playerId, session]]) });
+    onlineRooms.set(room.id, { room, sessions: new Map([[session.playerId, session]]), sockets: new Set() });
     return {
       playerId: session.playerId,
       seat: session.seat,
@@ -223,6 +232,7 @@ export function buildApi() {
     player.name = session.name;
     player.isAI = false;
     onlineRoom.sessions.set(session.playerId, session);
+    broadcastRoom(onlineRoom);
 
     return {
       playerId: session.playerId,
@@ -247,6 +257,34 @@ export function buildApi() {
     return { room: getPublicRoom(onlineRoom.room, session.seat, { ensurePlans: false }) };
   });
 
+  app.register(async function websocketRoomRoutes(instance) {
+    instance.get<{ Params: { id: string }; Querystring: RoomQuery }>("/ws/rooms/:id", { websocket: true }, (socket, request) => {
+      const onlineRoom = onlineRooms.get(request.params.id);
+      const playerId = request.query.playerId;
+      const session = playerId === undefined ? undefined : onlineRoom?.sessions.get(playerId);
+
+      if (onlineRoom === undefined) {
+        socket.close(1008, "Room not found.");
+        return;
+      }
+
+      if (session === undefined) {
+        socket.close(1008, "Invalid player session.");
+        return;
+      }
+
+      const connection = { playerId: session.playerId, socket } satisfies RoomSocket;
+      onlineRoom.sockets.add(connection);
+      session.connected = true;
+      sendRoomUpdate(connection, onlineRoom);
+
+      socket.on("close", () => {
+        onlineRoom.sockets.delete(connection);
+        session.connected = [...onlineRoom.sockets].some((candidate) => candidate.playerId === session.playerId);
+      });
+    });
+  });
+
   app.post<{ Params: { id: string }; Body: PlayBody }>("/api/rooms/:id/play", async (request, reply) => {
     const onlineRoom = onlineRooms.get(request.params.id);
     if (onlineRoom === undefined) {
@@ -259,12 +297,13 @@ export function buildApi() {
     }
 
     const session = onlineRoom.sessions.get(request.body.playerId);
-    if (session === undefined || !session.connected) {
+    if (session === undefined) {
       return reply.code(403).send({ error: "Invalid player session." });
     }
 
     try {
       playCards(room, session.seat, request.body.cardIds);
+      broadcastRoom(onlineRoom);
       return { room: getPublicRoom(room, session.seat, { ensurePlans: false }) };
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid play." });
@@ -283,12 +322,13 @@ export function buildApi() {
     }
 
     const session = onlineRoom.sessions.get(request.body.playerId);
-    if (session === undefined || !session.connected) {
+    if (session === undefined) {
       return reply.code(403).send({ error: "Invalid player session." });
     }
 
     try {
       advanceOpeningTribute(room, session.seat, request.body.cardIds ?? []);
+      broadcastRoom(onlineRoom);
       return { room: getPublicRoom(room, session.seat, { ensurePlans: false }) };
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid tribute action." });
@@ -307,12 +347,13 @@ export function buildApi() {
     }
 
     const session = onlineRoom.sessions.get(request.body.playerId);
-    if (session === undefined || !session.connected) {
+    if (session === undefined) {
       return reply.code(403).send({ error: "Invalid player session." });
     }
 
     try {
       passTurn(room, session.seat);
+      broadcastRoom(onlineRoom);
       return { room: getPublicRoom(room, session.seat, { ensurePlans: false }) };
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid pass." });
@@ -328,6 +369,7 @@ export function buildApi() {
 
     try {
       runAiUntilHumanTurn(room, 0);
+      broadcastRoom(onlineRoom);
       return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
     } catch (error) {
       request.log.error(error, "AI turn failed");
@@ -344,6 +386,7 @@ export function buildApi() {
 
     try {
       runAiStep(room);
+      broadcastRoom(onlineRoom);
       return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
     } catch (error) {
       request.log.error(error, "AI step failed");
@@ -359,7 +402,7 @@ function createPlayerSession(name: string, seat: Seat): PlayerSession {
     playerId: randomUUID(),
     name,
     seat,
-    connected: true,
+    connected: false,
   };
 }
 
@@ -382,6 +425,28 @@ function isPlayerActionBody<T extends ActionBody>(body: T | undefined): body is 
 
 function isCardIdList(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((id) => typeof id === "string");
+}
+
+export function broadcastRoom(onlineRoom: OnlineRoom): void {
+  for (const connection of onlineRoom.sockets) {
+    sendRoomUpdate(connection, onlineRoom);
+  }
+}
+
+function sendRoomUpdate(connection: RoomSocket, onlineRoom: OnlineRoom): void {
+  const session = onlineRoom.sessions.get(connection.playerId);
+  if (session === undefined || connection.socket.readyState !== 1) {
+    return;
+  }
+
+  try {
+    connection.socket.send(JSON.stringify({
+      type: "room:update",
+      room: getPublicRoom(onlineRoom.room, session.seat, { ensurePlans: false }),
+    }));
+  } catch {
+    connection.socket.close();
+  }
 }
 
 function isAllowedOrigin(origin: string): boolean {
