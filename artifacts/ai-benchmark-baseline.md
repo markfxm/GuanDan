@@ -1,135 +1,55 @@
 # D0 AI benchmark baseline
 
-Migrated from the validated 0fd45df formal artifacts after 5788e24. Gameplay/public hashes and measured durations are preserved; only canonical identity, provenance, replay aliases, and paths changed.
+## Configuration
 
-## unified-current vs legal-random
+- Schema/report: 2/d0-r2; benchmark: d0-r2.
+- Seeds: 1–200 (200); raw games: 4800; paired units: 2400; base seeds: 600.
+- Rotations/placements/games per seed per matchup: 4/2/8; matchups: 3; replay mode: failures.
+- Config hash: 8f2bd2e3445f54d03500dae5a8e11c563c59251e4e16c0bd8dd7a943c7cb65f6; source commit: 6aad8b32d96f996944a91f8ada5cb646530548b6; room rules: 1dd758f6dedf71de3a4244a84d4b838b7f54ba2fb38a95e3417f8acb2ef3b8b8; generatedAt: 2026-07-14T00:00:00.000Z.
 
+## Matchup results
 
-## Purpose
+### unified-current vs legal-greedy
 
-Measure seeded, paired AI strategy outcomes in the real Guandan room while preserving public-only hashes and auditable provenance.
+- Base seeds/raw games/paired units: 200/1600/800.
+- Raw win rate A/B/draw: 0.470/0.530/0.000; wins: 752/848/0.
+- Paired win rate A/B/draw: 0.432/0.568/0.560; wins: 152/200/448.
+- Mean/median paired score difference: -0.060/0.000; 95% CI: [-0.129, 0.009].
+- Paired win-rate 95% CI: [0.357, 0.510]; bootstrap: base-seed, 200 iterations, seed 1.
+- Significance: score CI includes neutral; win rate CI includes neutral; 未观察到显著差异.
+- Elo (secondary descriptive): delta -0.960 (d0-elo-v1).
+- Duration mean/median/p95 (ms): 15811.845/12315.618/36092.641; errors total/failed/timeouts/illegal: 0/0/0/0.
+- Replay/hash validation: 800/800 verified; hidden-state leaks 0.
 
-## Strategy descriptors and policies
+### unified-current vs legacy-reference
 
-- **unified-current** — implementation production-ai-v1; policy production-policy; config d0-v1; source 5788e24e87b5224979d175999c98faef3363a1d3
-- **legacy-reference** — implementation legacy-reference-v1; policy production-policy; config d0-v1; source 5788e24e87b5224979d175999c98faef3363a1d3
-- **legal-random** — implementation legal-random-v1; policy legal-only; config d0-v1; source 5788e24e87b5224979d175999c98faef3363a1d3
-- **legal-greedy** — implementation legal-greedy-v1; policy legal-only; config d0-v1; source 5788e24e87b5224979d175999c98faef3363a1d3
-- Engine: 0.1.0@5788e24e87b5224979d175999c98faef3363a1d3
-- Room rules fingerprint: 1dd758f6dedf71de3a4244a84d4b838b7f54ba2fb38a95e3417f8acb2ef3b8b8
+- Base seeds/raw games/paired units: 200/1600/800.
+- Raw win rate A/B/draw: 0.970/0.030/0.000; wins: 1552/48/0.
+- Paired win rate A/B/draw: 1.000/0.000/0.060; wins: 752/0/48.
+- Mean/median paired score difference: 0.940/1.000; 95% CI: [0.914, 0.967].
+- Paired win-rate 95% CI: [1.000, 1.000]; bootstrap: base-seed, 200 iterations, seed 1.
+- Significance: score CI excludes neutral; win rate CI excludes neutral; paired CI excludes neutral.
+- Elo (secondary descriptive): delta 15.040 (d0-elo-v1).
+- Duration mean/median/p95 (ms): 10906.724/9562.552/20285.873; errors total/failed/timeouts/illegal: 0/0/0/0.
+- Replay/hash validation: 800/800 verified; hidden-state leaks 0.
 
-## Sample and fairness
+### unified-current vs legal-random
 
-- Raw games: 1600; base seeds: 200; paired rotation units: 800.
-- Each base seed uses four seat rotations and both AB/BA allocations; seeded deals and seat rotation are controlled by the harness.
+- Base seeds/raw games/paired units: 200/1600/800.
+- Raw win rate A/B/draw: 0.903/0.097/0.000; wins: 1445/155/0.
+- Paired win rate A/B/draw: 0.997/0.003/0.189; wins: 647/2/151.
+- Mean/median paired score difference: 0.806/1.000; 95% CI: [0.781, 0.827].
+- Paired win-rate 95% CI: [0.995, 1.000]; bootstrap: base-seed, 200 iterations, seed 1.
+- Significance: score CI excludes neutral; win rate CI excludes neutral; paired CI excludes neutral.
+- Elo (secondary descriptive): delta 12.900 (d0-elo-v1).
+- Duration mean/median/p95 (ms): 14575.988/12541.834/27082.070; errors total/failed/timeouts/illegal: 0/0/0/0.
+- Replay/hash validation: 800/800 verified; hidden-state leaks 0.
 
-## Wins, rates, scores, confidence intervals, significance, and Elo
+## Validation
 
-- Wins A/B/unresolved: 1418/182/0; rates: 0.886/0.114.
-- Scores A/B/difference: 1418/182/0.772.
-- Score CI: [0.000, 1.000]; win-rate CI: [0.500, 1.000]; paired score-difference CI: [0.000, 1.000]; paired win-rate CI: [0.500, 1.000]; statistically significant: false.
-- Elo: initial 1500, K 32, delta 12.360 (d0-elo-v1).
+- Manifest expected/completed/duplicate/missing/unknown: 4800/4800/0/0/0.
+- Manifest configHash consistent: true; provenance missing: 0; non-positive duration: 0.
+- Replay files expected/found/verified: 2400/2400/2400; hash/version verified: 2400/2400.
+- Random/greedy/legacy replay samples verified: 12/4/4.
 
-## Exploratory classifications
-
-- Classifications are post-game exploratory tags only: {"bomb-density":0,"straight-potential":0,"consecutive-pair-potential":0,"dispersion":0,"joker-concentration":0,"wild-card-impact":0,"plan-quality-gap":0,"partner-imbalance":2437,"long-game":0,"short-game":0}.
-
-## Performance
-
-- Duration mean/median/p95 (ms): 12959.305/11398.308/24334.844; error rate: 0.000.
-
-## Anomalies
-
-- Failed or safety-error games: 0.
-
-## Conclusions and limitations
-
-Results describe this seeded single-round proxy and are not a causal claim about general play strength. Confidence intervals and exploratory classifications should be read with the paired design and seat/deal limitations in mind.
-
-## unified-current vs legal-greedy
-
-
-## Purpose
-
-Measure seeded, paired AI strategy outcomes in the real Guandan room while preserving public-only hashes and auditable provenance.
-
-## Strategy descriptors and policies
-
-- **unified-current** — implementation production-ai-v1; policy production-policy; config d0-v1; source 5788e24e87b5224979d175999c98faef3363a1d3
-- **legacy-reference** — implementation legacy-reference-v1; policy production-policy; config d0-v1; source 5788e24e87b5224979d175999c98faef3363a1d3
-- **legal-random** — implementation legal-random-v1; policy legal-only; config d0-v1; source 5788e24e87b5224979d175999c98faef3363a1d3
-- **legal-greedy** — implementation legal-greedy-v1; policy legal-only; config d0-v1; source 5788e24e87b5224979d175999c98faef3363a1d3
-- Engine: 0.1.0@5788e24e87b5224979d175999c98faef3363a1d3
-- Room rules fingerprint: 1dd758f6dedf71de3a4244a84d4b838b7f54ba2fb38a95e3417f8acb2ef3b8b8
-
-## Sample and fairness
-
-- Raw games: 1600; base seeds: 200; paired rotation units: 800.
-- Each base seed uses four seat rotations and both AB/BA allocations; seeded deals and seat rotation are controlled by the harness.
-
-## Wins, rates, scores, confidence intervals, significance, and Elo
-
-- Wins A/B/unresolved: 752/848/0; rates: 0.470/0.530.
-- Scores A/B/difference: 752/848/-0.060.
-- Score CI: [-1.000, 1.000]; win-rate CI: [0.000, 1.000]; statistically significant: false.
-- Elo: initial 1500, K 32, delta -0.960 (d0-elo-v1).
-
-## Exploratory classifications
-
-- Classifications are post-game exploratory tags only: {"bomb-density":0,"straight-potential":0,"consecutive-pair-potential":0,"dispersion":0,"joker-concentration":0,"wild-card-impact":0,"plan-quality-gap":0,"partner-imbalance":1708,"long-game":0,"short-game":0}.
-
-## Performance
-
-- Duration mean/median/p95 (ms): 15811.845/12315.618/36092.641; error rate: 0.000.
-
-## Anomalies
-
-- Failed or safety-error games: 0.
-
-## Conclusions and limitations
-
-Results describe this seeded single-round proxy and are not a causal claim about general play strength. Confidence intervals and exploratory classifications should be read with the paired design and seat/deal limitations in mind.
-
-## unified-current vs legacy-reference
-
-
-## Purpose
-
-Measure seeded, paired AI strategy outcomes in the real Guandan room while preserving public-only hashes and auditable provenance.
-
-## Strategy descriptors and policies
-
-- **unified-current** — implementation production-ai-v1; policy production-policy; config d0-v1; source 5788e24e87b5224979d175999c98faef3363a1d3
-- **legacy-reference** — implementation legacy-reference-v1; policy production-policy; config d0-v1; source 5788e24e87b5224979d175999c98faef3363a1d3
-- **legal-random** — implementation legal-random-v1; policy legal-only; config d0-v1; source 5788e24e87b5224979d175999c98faef3363a1d3
-- **legal-greedy** — implementation legal-greedy-v1; policy legal-only; config d0-v1; source 5788e24e87b5224979d175999c98faef3363a1d3
-- Engine: 0.1.0@5788e24e87b5224979d175999c98faef3363a1d3
-- Room rules fingerprint: 1dd758f6dedf71de3a4244a84d4b838b7f54ba2fb38a95e3417f8acb2ef3b8b8
-
-## Sample and fairness
-
-- Raw games: 1600; base seeds: 200; paired rotation units: 800.
-- Each base seed uses four seat rotations and both AB/BA allocations; seeded deals and seat rotation are controlled by the harness.
-
-## Wins, rates, scores, confidence intervals, significance, and Elo
-
-- Wins A/B/unresolved: 1552/48/0; rates: 0.970/0.030.
-- Scores A/B/difference: 1552/48/0.940.
-- Score CI: [0.000, 1.000]; win-rate CI: [0.500, 1.000]; statistically significant: false.
-- Elo: initial 1500, K 32, delta 15.040 (d0-elo-v1).
-
-## Exploratory classifications
-
-- Classifications are post-game exploratory tags only: {"bomb-density":0,"straight-potential":0,"consecutive-pair-potential":0,"dispersion":0,"joker-concentration":0,"wild-card-impact":0,"plan-quality-gap":0,"partner-imbalance":2984,"long-game":0,"short-game":0}.
-
-## Performance
-
-- Duration mean/median/p95 (ms): 10906.724/9562.552/20285.873; error rate: 0.000.
-
-## Anomalies
-
-- Failed or safety-error games: 0.
-
-## Conclusions and limitations
-
-Results describe this seeded single-round proxy and are not a causal claim about general play strength. Confidence intervals and exploratory classifications should be read with the paired design and seat/deal limitations in mind.
+Classification is exploratory only. Elo is a secondary descriptive metric. Score neutrality is 0 and win-rate neutrality is 0.5; confidence intervals containing the neutral value are not reported as statistically significant.
