@@ -30,7 +30,7 @@ export function freezeD0Benchmark(options: { generatedAt?: string } = {}): void 
   const sources = sourceDefinitions.map((definition) => loadSource(definition.files, definition.strategyA, definition.strategyB));
   const sourceCommit = readCommit();
   const generatedAt = options.generatedAt ?? new Date().toISOString();
-  const model = buildBenchmarkReportModel({ benchmarkVersion: "d0-r2", rank: "2", replayMode: "all", generatedAt, sourceCommit, roomRulesVersion: sources[0]!.roomRulesVersion, matchups: sources, replayValidation });
+  const model = buildBenchmarkReportModel({ benchmarkVersion: "d0-r2", rank: "2", replayMode: "failures", generatedAt, sourceCommit, roomRulesVersion: sources[0]!.roomRulesVersion, matchups: sources, replayValidation });
   const baselineJson = path.join(root, "artifacts", "ai-benchmark-baseline.json");
   const baselineMd = path.join(root, "artifacts", "ai-benchmark-baseline.md");
   const manifestPath = path.join(root, "artifacts", "ai-benchmark-manifest.json");
