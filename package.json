@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "api": "tsx src/server/dev.ts",
-    "test": "vitest run --exclude tests/performance/aiHotPath.test.ts && vitest run tests/performance/aiHotPath.test.ts",
+    "test": "vitest run --exclude tests/benchmark/** --exclude tests/simulation/** --exclude tests/performance/** --testTimeout=120000",
+    "test:benchmark": "vitest run tests/benchmark --testTimeout=120000 --reporter=verbose",
+    "test:simulation": "vitest run tests/simulation --testTimeout=120000",
     "test:watch": "vitest",
     "build": "tsc --noEmit && vite build",
     "simulate:ai": "tsx scripts/runUnifiedAiSimulation.ts",

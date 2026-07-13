@@ -140,23 +140,27 @@ function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs
     let cursor = 0;
     let finished = 0;
     let settled = false;
-    type Slot = { worker: Worker; task?: BenchmarkGameTask; timer?: ReturnType<typeof setTimeout>; startedAt?: number; retired: boolean };
+    type Slot = { worker: Worker; task?: BenchmarkGameTask; timer?: ReturnType<typeof setTimeout>; startedAt?: number; retired: boolean; termination?: Promise<void> };
     const slots: Slot[] = [];
+    const terminateSlot = (slot: Slot): Promise<void> => {
+      if (slot.termination) return slot.termination;
+      slot.termination = (async () => {
+        if (slot.timer) clearTimeout(slot.timer);
+        slot.timer = undefined;
+        try { await slot.worker.terminate(); } catch { /* worker already exited */ }
+        slot.worker.removeAllListeners();
+      })();
+      return slot.termination;
+    };
     const complete = () => {
       if (settled || finished !== tasks.length) return;
       settled = true;
-      for (const slot of slots) {
-        if (slot.timer) clearTimeout(slot.timer);
-        void slot.worker.terminate().catch(() => undefined);
-      }
-      resolve(results.sort((a, b) => a.matchId.localeCompare(b.matchId)));
+      void Promise.all(slots.map((slot) => terminateSlot(slot))).then(() => resolve(results.sort((a, b) => a.matchId.localeCompare(b.matchId))));
     };
     const retire = (slot: Slot) => {
       slot.retired = true;
       slot.task = undefined;
-      if (slot.timer) clearTimeout(slot.timer);
-      slot.timer = undefined;
-      void slot.worker.terminate().catch(() => undefined);
+      void terminateSlot(slot);
     };
     const dispatch = (slot: Slot) => {
       if (settled || slot.retired) return;
