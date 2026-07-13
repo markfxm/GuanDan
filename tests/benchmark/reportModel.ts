@@ -195,6 +195,7 @@ function buildMatchup(source: MatchupSource, replayValidation: ReplayValidationS
   const bootstrap = bootstrapUnits(games, source.strategyA, BOOTSTRAP_ITERATIONS, BOOTSTRAP_SEED);
   const rawDenominator = games.length || 1;
   const unitDenominator = units.length || 1;
+  const decisiveDenominator = pairedCounts.a + pairedCounts.b || 1;
   const errors = games.reduce((result, game) => { const counters = (game as GameSummary & { errorCounters?: Record<string, number> }).errorCounters ?? {}; result.total += counters.total ?? 0; result.illegalActions += counters.illegalActions ?? 0; result.engineErrors += counters.engineErrors ?? 0; result.strategyErrors += counters.strategyErrors ?? 0; result.failed += (game as GameSummary & { failed?: boolean }).failed ? 1 : 0; result.timeouts += String((game as GameSummary & { errors?: unknown[] }).errors ?? []).includes("TIMEOUT") ? 1 : 0; return result; }, { total: 0, failed: 0, timeouts: 0, illegalActions: 0, engineErrors: 0, strategyErrors: 0 });
   return {
     strategyA: source.strategyA,
@@ -204,7 +205,7 @@ function buildMatchup(source: MatchupSource, replayValidation: ReplayValidationS
     rawGameCount: games.length,
     pairedUnitCount: units.length,
     raw: { winsA: rawCounts.a, winsB: rawCounts.b, draws: rawCounts.draw, winRateA: rawCounts.a / rawDenominator, winRateB: rawCounts.b / rawDenominator, drawRate: rawCounts.draw / rawDenominator },
-    paired: { winsA: pairedCounts.a, winsB: pairedCounts.b, draws: pairedCounts.draw, winRateA: pairedCounts.a / unitDenominator, winRateB: pairedCounts.b / unitDenominator, drawRate: pairedCounts.draw / unitDenominator, meanScoreDifference: mean(scoreDifferences), medianScoreDifference: median(scoreDifferences), scoreDifferenceCI: bootstrap.scoreCI, winRateCI: bootstrap.winCI },
+    paired: { winsA: pairedCounts.a, winsB: pairedCounts.b, draws: pairedCounts.draw, winRateA: pairedCounts.a / decisiveDenominator, winRateB: pairedCounts.b / decisiveDenominator, drawRate: pairedCounts.draw / unitDenominator, meanScoreDifference: mean(scoreDifferences), medianScoreDifference: median(scoreDifferences), scoreDifferenceCI: bootstrap.scoreCI, winRateCI: bootstrap.winCI },
     bootstrap: { blockUnit: "base-seed", iterations: BOOTSTRAP_ITERATIONS, seed: BOOTSTRAP_SEED },
     elo: { initialRating: 1500, kFactor: 32, delta: 32 * (rawCounts.a / rawDenominator - 0.5), version: "d0-elo-v1" },
     duration: durationStats(games.map((game) => game.durationMs)),
@@ -231,7 +232,7 @@ function bootstrapUnits(games: GameSummary[], strategyA: string, iterations: num
   const bySeed = new Map<number, GameSummary[]>();
   for (const game of games) (bySeed.get(game.seed) ?? (bySeed.set(game.seed, []), bySeed.get(game.seed)!)).push(game);
   const blocks = [...bySeed.values()]; let state = seed >>> 0 || 1; const scores: number[] = []; const wins: number[] = [];
-  for (let iteration = 0; iteration < iterations; iteration += 1) { const sampled: GameSummary[] = []; for (let draw = 0; draw < blocks.length; draw += 1) { state = nextState(state); sampled.push(...blocks[state % blocks.length]!); } const units = pairedUnits(sampled, strategyA); scores.push(mean(units.map((unit) => unit.scoreDifference))); wins.push(units.length === 0 ? 0 : units.filter((unit) => unit.outcome === "a").length / units.length); }
+  for (let iteration = 0; iteration < iterations; iteration += 1) { const sampled: GameSummary[] = []; for (let draw = 0; draw < blocks.length; draw += 1) { state = nextState(state); sampled.push(...blocks[state % blocks.length]!); } const units = pairedUnits(sampled, strategyA); const decisive = units.filter((unit) => unit.outcome !== "draw"); scores.push(mean(units.map((unit) => unit.scoreDifference))); wins.push(decisive.length === 0 ? 0.5 : decisive.filter((unit) => unit.outcome === "a").length / decisive.length); }
   return { scoreCI: percentileInterval(scores), winCI: percentileInterval(wins) };
 }
 

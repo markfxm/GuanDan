@@ -66,6 +66,7 @@ describe("D0-R2 report model", () => {
     expect(model.matchups).toHaveLength(3);
     expect(model.matchups[0]?.bootstrap).toEqual({ blockUnit: "base-seed", iterations: 200, seed: 1 });
     expect(model.matchups[0]?.paired.winRateA).toBeDefined();
+    expect(model.matchups.every((matchup) => matchup.paired.winRateA + matchup.paired.winRateB === 1 || matchup.paired.winsA + matchup.paired.winsB === 0)).toBe(true);
     expect(model.matchups[0]?.paired.scoreDifferenceCI).toHaveLength(2);
   });
 
