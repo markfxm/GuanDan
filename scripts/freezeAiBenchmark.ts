@@ -19,7 +19,7 @@ interface ManifestLike {
   roomRulesVersion: string;
   strategyDescriptors: StrategyDescriptor[];
   expectedMatchIds: string[];
-  completedMatchIds: string[];
+  completedMatchIds?: string[];
   games: GameSummary[];
 }
 
@@ -47,7 +47,7 @@ function loadSource(files: string[], strategyA: string, strategyB: string): Matc
     strategyDescriptors: first.strategyDescriptors,
     games: manifests.flatMap((manifest) => manifest.games),
     expectedMatchIds: manifests.flatMap((manifest) => manifest.expectedMatchIds),
-    completedMatchIds: manifests.flatMap((manifest) => manifest.completedMatchIds),
+    completedMatchIds: manifests.flatMap((manifest) => manifest.completedMatchIds ?? manifest.games.map((game) => game.matchId)),
     batchConfigHashes: manifests.map((manifest) => manifest.configHash),
   };
 }
