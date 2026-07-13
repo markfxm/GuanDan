@@ -2,7 +2,7 @@ import { decideAiAction } from "../../src/ai/aiDecisionEngine";
 import { DEFAULT_AI_PERFORMANCE_CONFIG } from "../../src/ai/config";
 import type { AiRuntimeState } from "../../src/ai/contracts";
 import { classifyPlay, playPower } from "../../src/game/playRules";
-import { chooseAiAction } from "../helpers/legacyAiReference";
+import { chooseAiAction } from "./legacyAiReference";
 import { legalCandidates } from "./candidates";
 import type {
   AiStrategy,
@@ -121,8 +121,12 @@ const strategies: Record<string, Strategy> = {
   "simple-greedy": legalGreedy,
 };
 
+export function canonicalStrategyId(id: string): string {
+  return id === "deterministic-random" ? "legal-random" : id === "simple-greedy" ? "legal-greedy" : id;
+}
+
 export function getStrategy(id: string): Strategy {
-  const strategy = strategies[id];
+  const strategy = strategies[canonicalStrategyId(id)];
   if (strategy === undefined) throw new Error(`UNKNOWN_STRATEGY:${id}`);
   return strategy;
 }

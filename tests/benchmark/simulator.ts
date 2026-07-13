@@ -67,9 +67,9 @@ export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: b
       strategies[seat] = strategy;
       try {
         runtimes[seat] = strategy.createRuntime({
-          matchId: task.matchId,
+          runtimeId: deriveRuntimeId(task.matchId, seat),
           seat,
-          strategyRandomSeed: deriveSeed(task.matchId, seat),
+          strategyRandomSeed: deriveStrategySeed(task.matchId, seat),
         });
       } catch (cause) {
         recordFailure(errors, errorCounters, task.seed, seat, strategiesBySeat[seat], cause, "runtimeErrors");
@@ -234,8 +234,13 @@ function recordFailure(
   counters[category] += 1;
 }
 
-function deriveSeed(matchId: string, seat: Seat): string {
-  return createHash("sha256").update(`${matchId}:strategy:${seat}`).digest("hex");
+function deriveRuntimeId(matchId: string, seat: Seat): string {
+  return createHash("sha256").update(`${matchId}:runtime:${seat}`).digest("hex");
+}
+
+function deriveStrategySeed(matchId: string, seat: Seat): string {
+  const runtimeId = deriveRuntimeId(matchId, seat);
+  return createHash("sha256").update(`${runtimeId}:strategy-seed`).digest("hex");
 }
 
 function errorMessage(cause: unknown): string {

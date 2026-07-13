@@ -69,7 +69,8 @@ export function aggregateTournament(
   const winSamples: number[] = [];
   for (const sample of bootstrap.samples) {
     const sampleGames = sample.games.map((game) => summarizeGame(game as SimulationSummary));
-    const sampleCore = aggregateCore(sampleGames, config, 1, 1);
+    const sampleBlockCount = sampleGames.length / 8;
+    const sampleCore = aggregateCore(sampleGames, config, sampleBlockCount * 1, sampleBlockCount);
     scoreSamples.push(sampleCore.scoreDifference);
     winSamples.push(sampleCore.winRateA);
   }
@@ -106,9 +107,15 @@ export function pairedBootstrap(
   const samples: BootstrapSample[] = [];
   let state = seed >>> 0 || 1;
   for (let index = 0; index < iterations; index += 1) {
-    state = nextState(state);
-    const block = blocks.length === 0 ? undefined : blocks[state % blocks.length];
-    samples.push({ index, seed: block?.seed ?? block?.baseSeed ?? 0, games: block === undefined ? [] : block.games.map((game) => game) });
+    const sampledGames: Array<GameMetrics | SimulationSummary | GameSummary> = [];
+    let firstSeed = 0;
+    for (let draw = 0; draw < blocks.length; draw += 1) {
+      state = nextState(state);
+      const block = blocks[state % blocks.length]!;
+      if (draw === 0) firstSeed = block.seed ?? block.baseSeed ?? 0;
+      sampledGames.push(...block.games.map((game) => game));
+    }
+    samples.push({ index, seed: firstSeed, games: sampledGames });
   }
   return { samples, iterations, seed };
 }

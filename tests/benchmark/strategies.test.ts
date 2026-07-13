@@ -6,8 +6,8 @@ const observation = createBenchmarkObservation(createRoom({ rank: "10", seed: 17
 
 it("replaces only the acting strategy runtime", () => {
   const strategy = getStrategy("legal-random");
-  const first = strategy.createRuntime({ matchId: "game-a", seat: 0, strategyRandomSeed: "seed-a" });
-  const second = strategy.createRuntime({ matchId: "game-b", seat: 1, strategyRandomSeed: "seed-b" });
+  const first = strategy.createRuntime({ runtimeId: "runtime-a", seat: 0, strategyRandomSeed: "seed-a" });
+  const second = strategy.createRuntime({ runtimeId: "runtime-b", seat: 1, strategyRandomSeed: "seed-b" });
   const secondBefore = structuredClone(second);
 
   const decision = strategy.decide(observation, first);
@@ -27,11 +27,20 @@ it("passes legacy only a restricted public input", () => {
 
 it("makes legal-random deterministic from its derived seed", () => {
   const strategy = getStrategy("legal-random");
-  const context = { matchId: "game-a", seat: 0 as const, strategyRandomSeed: "same-seed" };
+  const context = { runtimeId: "runtime-a", seat: 0 as const, strategyRandomSeed: "same-seed" };
   const first = strategy.decide(observation, strategy.createRuntime(context));
   const second = strategy.decide(observation, strategy.createRuntime(context));
 
   expect(first.action).toEqual(second.action);
+});
+
+it("keeps runtime context opaque and seat-isolated", () => {
+  const strategy = getStrategy("legal-random");
+  const left = strategy.createRuntime({ runtimeId: "opaque-left", seat: 0, strategyRandomSeed: "seed-left" });
+  const right = strategy.createRuntime({ runtimeId: "opaque-right", seat: 1, strategyRandomSeed: "seed-right" });
+  expect(left).not.toHaveProperty("matchId");
+  expect(left).not.toHaveProperty("seed");
+  expect(right).not.toEqual(left);
 });
 
 it("resolves canonical IDs and aliases with legal descriptor names", () => {

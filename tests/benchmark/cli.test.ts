@@ -26,7 +26,17 @@ describe("AI benchmark CLI", () => {
     expect(options.paired).toBe(true);
     expect(options.replayMode).toBe("all");
     expect(options.concurrency).toBe(2);
+    expect(parseBenchmarkArgs(["--strategy-a", "deterministic-random", "--strategy-b", "simple-greedy"]).strategyA).toBe("legal-random");
+    expect(parseBenchmarkArgs(["--strategy-a", "deterministic-random", "--strategy-b", "simple-greedy"]).strategyB).toBe("legal-greedy");
   });
+
+  it("keeps gameplay identity stable when replay policy changes", async () => {
+    const base = { strategyA: "unknown-a", strategyB: "unknown-b", seeds: [1], paired: false, concurrency: 1 };
+    const none = await runBenchmark({ ...base, replayMode: "none" });
+    const all = await runBenchmark({ ...base, replayMode: "all" });
+    expect(all.configHash).toBe(none.configHash);
+    expect(all.games.map((game) => game.matchId)).toEqual(none.games.map((game) => game.matchId));
+  }, 30_000);
 
   it("produces stable summaries independent of worker count", async () => {
     const base = { strategyA: "unknown-a", strategyB: "unknown-b", seeds: [1], paired: true, replayMode: "none" as const };
@@ -49,7 +59,7 @@ describe("AI benchmark CLI", () => {
     const diagnostics = on.games.map((game) => (game as { diagnostics?: { enabled: true; workerLocalToken: string } }).diagnostics);
     expect(diagnostics.every((value) => value?.enabled === true)).toBe(true);
     expect(new Set(diagnostics.map((value) => value?.workerLocalToken)).size).toBe(on.games.length);
-    expect(on.report?.games).toEqual(expect.arrayContaining([expect.objectContaining({ diagnostics: expect.any(Object) })]));
+    expect(on.report?.games).toEqual(expect.arrayContaining([expect.not.objectContaining({ diagnostics: expect.any(Object), durationMs: expect.anything() })]));
     expect(on.report?.paired).toEqual({ enabled: true, unit: "seed", rotations: 4, allocations: 2, gamesPerSeed: 8 });
   });
 
@@ -72,6 +82,21 @@ describe("AI benchmark CLI", () => {
     fs.writeFileSync(manifestPath, JSON.stringify(manifest));
     await expect(runBenchmark({ ...base, resume: true })).rejects.toThrow("MISSING_EXPECTED_MATCH_ID");
   });
+
+  it("recomputes corrupt reused rows instead of silently reusing them", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-benchmark-corrupt-"));
+    const output = path.join(root, "report.json");
+    const base = { strategyA: "unknown-a", strategyB: "unknown-b", seeds: [1], paired: false, replayMode: "none" as const, output };
+    const first = await runBenchmark(base);
+    const manifestPath = `${output}.manifest.json`;
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { games: Array<Record<string, unknown>> };
+    manifest.games[0]!.completed = false;
+    manifest.games[0]!.durationMs = 0;
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    const resumed = await runBenchmark({ ...base, resume: true });
+    expect(resumed.games).toHaveLength(first.games.length);
+    expect(resumed.games.every((game) => (game as { durationMs?: number }).durationMs !== 0)).toBe(true);
+  }, 30_000);
 
   it("preserves custom replay config and defaults saved replay mode to failures", () => {
     const config: BenchmarkConfig = { benchmarkVersion: "custom-v2", rank: "2", seeds: [1], strategyA: "unknown-a", strategyB: "unknown-b", replayMode: "failures" };

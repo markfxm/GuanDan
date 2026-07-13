@@ -12,7 +12,7 @@ import { summarizeGame, type GameMetrics } from "../tests/benchmark/metrics";
 import { buildGamesForSeed, type BenchmarkGameTask } from "../tests/benchmark/rotations";
 import { createManifest, buildReport, writeReport, writeMarkdownReport, writeReplay, ENGINE_VERSION, ROOM_RULES_VERSION, type BatchManifest } from "../tests/benchmark/reporting";
 import { simulateGame, type SimulationError, type SimulationSummary, type SafetyErrorCounters } from "../tests/benchmark/simulator";
-import { strategyDescriptors } from "../tests/benchmark/strategies";
+import { canonicalStrategyId, strategyDescriptors } from "../tests/benchmark/strategies";
 import type { BenchmarkWorkerResult } from "../tests/benchmark/worker";
 
 export interface BenchmarkCliOptions {
@@ -71,7 +71,7 @@ export function parseBenchmarkArgs(argv: string[]): BenchmarkCliOptions {
   const replayMode = (stringValue(values, "replay") ?? DEFAULTS.replayMode) as BenchmarkCliOptions["replayMode"];
   if (!["none", "failures", "all"].includes(replayMode)) throw new Error("REPLAY_MODE_INVALID");
   return {
-    strategyA, strategyB, seeds: [...new Set(selectedSeeds)].sort((a, b) => a - b),
+    strategyA: canonicalStrategyId(strategyA), strategyB: canonicalStrategyId(strategyB), seeds: [...new Set(selectedSeeds)].sort((a, b) => a - b),
     paired: values.get("paired") !== false,
     batch, resume: values.get("resume") === true, skipExisting: values.get("skip-existing") === true,
     output: stringValue(values, "output"), replayMode, diagnostics: values.get("diagnostics") === true,
@@ -85,11 +85,11 @@ export async function runBenchmark(input: Partial<BenchmarkCliOptions> & Pick<Be
     ...DEFAULTS, resume: false, skipExisting: false, diagnostics: false,
     ...input, paired: input.paired ?? true, seeds: [...new Set(input.seeds)].sort((a, b) => a - b),
   };
-  const config: BenchmarkConfig = { benchmarkVersion: options.benchmarkVersion, rank: options.rank, seeds: options.seeds, strategyA: options.strategyA, strategyB: options.strategyB, replayMode: options.replayMode };
+  const config: BenchmarkConfig = { benchmarkVersion: options.benchmarkVersion, rank: options.rank, seeds: options.seeds, strategyA: canonicalStrategyId(options.strategyA), strategyB: canonicalStrategyId(options.strategyB), replayMode: options.replayMode };
   const resolvedStrategyDescriptors = strategyDescriptors.map((descriptor) => ({ ...descriptor, sourceCommit: descriptor.sourceCommit.toLowerCase() === "unknown" ? ENGINE_VERSION.split("@").slice(1).join("@") : descriptor.sourceCommit }));
   const tasks = options.seeds.flatMap((seed) => buildGamesForSeed(config, seed)).filter((task) => options.paired || task.allocation === "AB");
   const configHash = tasks[0]?.configHash ?? hashConfig(config);
-  const reused = loadExisting(options.output, configHash, options, tasks.map((task) => task.matchId));
+  const reused = loadExisting(options.output, configHash, options, tasks.map((task) => task.matchId), { engineVersion: ENGINE_VERSION, roomRulesVersion: ROOM_RULES_VERSION, strategyDescriptors: resolvedStrategyDescriptors });
   const existingById = new Map(reused.map((game) => [game.matchId, game]));
   const duplicate = reused.length !== existingById.size;
   if (duplicate) throw new Error("DUPLICATE_MATCH_ID");
@@ -130,8 +130,7 @@ export async function runBenchmark(input: Partial<BenchmarkCliOptions> & Pick<Be
 
 async function executeTasks(tasks: BenchmarkGameTask[], concurrency: number, timeoutMs: number, diagnostics: boolean): Promise<SimulationSummary[]> {
   if (tasks.length === 0) return [];
-  if (concurrency <= 1) return Promise.all(tasks.map((task) => withTimeout(() => simulateGame(task, { diagnostics }), task, timeoutMs, diagnostics)));
-  return executeWithWorkers(tasks, Math.min(concurrency, tasks.length), timeoutMs, diagnostics);
+  return executeWithWorkers(tasks, Math.min(Math.max(1, concurrency), tasks.length), timeoutMs, diagnostics);
 }
 
 function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs: number, diagnostics: boolean): Promise<SimulationSummary[]> {
@@ -213,10 +212,6 @@ function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs
   });
 }
 
-function withTimeout<T extends SimulationSummary>(run: () => T, task: BenchmarkGameTask, timeoutMs: number, diagnostics: boolean): Promise<T> {
-  return new Promise((resolve) => { const started = performance.now(); try { const result = run(); const elapsed = performance.now() - started; resolve(elapsed > timeoutMs ? timeoutSummary(task, elapsed, `BENCHMARK_TIMEOUT:${timeoutMs}`, diagnostics) as T : result); } catch (cause) { resolve(timeoutSummary(task, performance.now() - started, cause instanceof Error ? cause.message : String(cause), diagnostics) as T); } });
-}
-
 function timeoutSummary(task: BenchmarkGameTask, durationMs: number, error = "BENCHMARK_TIMEOUT", diagnostics = false): SimulationSummary {
   const strategiesBySeat = { 0: task.allocation === "AB" ? task.config.strategyA : task.config.strategyB, 1: task.allocation === "AB" ? task.config.strategyB : task.config.strategyA, 2: task.allocation === "AB" ? task.config.strategyA : task.config.strategyB, 3: task.allocation === "AB" ? task.config.strategyB : task.config.strategyA } as Record<Seat, string>;
   const failure: SimulationError = { seed: task.seed, seat: 0, strategy: strategiesBySeat[0], error };
@@ -226,7 +221,7 @@ function timeoutSummary(task: BenchmarkGameTask, durationMs: number, error = "BE
 
 function elapsedSince(startedAt: number | undefined): number { return startedAt === undefined ? 0.001 : Math.max(0.001, performance.now() - startedAt); }
 
-function loadExisting(output: string | undefined, configHash: string, options: BenchmarkCliOptions, expectedIds: string[]): Array<SimulationSummary> {
+function loadExisting(output: string | undefined, configHash: string, options: BenchmarkCliOptions, expectedIds: string[], provenance: { engineVersion: string; roomRulesVersion: string; strategyDescriptors: typeof strategyDescriptors }): Array<SimulationSummary> {
   if (!options.resume && !options.skipExisting) return [];
   if (output === undefined) throw new Error("MANIFEST_REQUIRED");
   const manifestPath = output.endsWith(".manifest.json") ? output : `${output}.manifest.json`;
@@ -234,7 +229,8 @@ function loadExisting(output: string | undefined, configHash: string, options: B
   if (!fs.existsSync(source)) throw new Error("MANIFEST_NOT_FOUND");
   const raw = JSON.parse(fs.readFileSync(source, "utf8")) as Partial<BatchManifest> & { games?: Array<SimulationSummary> };
   if (raw.configHash !== configHash) throw new Error("CONFIG_HASH_MISMATCH");
-  const games = Array.isArray(raw.games) ? raw.games : [];
+  if (raw.engineVersion !== provenance.engineVersion || raw.roomRulesVersion !== provenance.roomRulesVersion || canonicalJson(raw.strategyDescriptors ?? []) !== canonicalJson(provenance.strategyDescriptors)) throw new Error("PROVENANCE_MISMATCH");
+  const games = (Array.isArray(raw.games) ? raw.games : []) as SimulationSummary[];
   const ids = new Set(games.map((game) => game.matchId));
   if (ids.size !== games.length) throw new Error("DUPLICATE_MATCH_ID");
   const expected = raw.expectedMatchIds ?? expectedIds;
@@ -243,7 +239,19 @@ function loadExisting(output: string | undefined, configHash: string, options: B
   if (expectedIds.some((id) => !expected.includes(id))) throw new Error(`MISSING_EXPECTED_MATCH_ID:${expectedIds.find((id) => !expected.includes(id))}`);
   if (expected.some((id) => !ids.has(id))) throw new Error(`MISSING_EXPECTED_MATCH_ID:${expected.find((id) => !ids.has(id))}`);
   if (games.some((game) => game.configHash !== configHash)) throw new Error("CONFIG_HASH_MISMATCH");
-  return games;
+  const valid = games.filter((game) => isReusable(game, options, output));
+  return valid;
+}
+
+function isReusable(game: SimulationSummary, options: BenchmarkCliOptions, output: string): boolean {
+  const counters = game.errorCounters;
+  if (game.completed !== true || game.failed !== false || counters === undefined || counters.total !== 0 || Object.values(counters).some((value) => typeof value !== "number" || value !== 0)) return false;
+  if (typeof game.durationMs !== "number" || !Number.isFinite(game.durationMs) || game.durationMs <= 0 || typeof game.publicTraceHash !== "string" || game.publicTraceHash.length === 0 || typeof game.finalPublicStateHash !== "string" || game.finalPublicStateHash.length === 0) return false;
+  if (options.replayMode !== "all") return true;
+  const matchup = `${game.strategiesBySeat?.[0] ?? "A"}-vs-${game.strategiesBySeat?.[1] ?? "B"}`;
+  const file = `${game.matchId.replace(/[\\/:*?"<>|]/g, "_")}.json`;
+  const replayRoots = [path.resolve("artifacts", "ai-benchmark-replays"), path.join(path.dirname(path.resolve(output)), "ai-benchmark-replays")];
+  return replayRoots.some((root) => fs.existsSync(path.join(root, matchup, file)));
 }
 
 function parseSeeds(value: string): number[] { return value.split(",").flatMap((part) => part.includes("-") ? range(parseRange(part)) : [parseIntStrict(part)]); }
@@ -252,7 +260,7 @@ function range(rangeValue: { start: number; end: number }): number[] { return Ar
 function parseIntStrict(value: string | undefined): number { const parsed = Number(value); if (!Number.isInteger(parsed)) throw new Error("INTEGER_INVALID"); return parsed; }
 function stringValue(values: Map<string, string | boolean>, key: string): string | undefined { const value = values.get(key); return typeof value === "string" ? value : undefined; }
 function integerValue(values: Map<string, string | boolean>, key: string, fallback: number): number { const value = stringValue(values, key); return value === undefined ? fallback : parseIntStrict(value); }
-function hashConfig(config: BenchmarkConfig): string { return sha256(canonicalJson({ benchmarkVersion: config.benchmarkVersion, rank: config.rank, strategyA: config.strategyA, strategyB: config.strategyB, replayMode: config.replayMode })).digest("hex"); }
+function hashConfig(config: BenchmarkConfig): string { return sha256(canonicalJson({ benchmarkVersion: config.benchmarkVersion, rank: config.rank, strategyA: config.strategyA, strategyB: config.strategyB })).digest("hex"); }
 function deepFreeze<T>(value: T): T { if (value && typeof value === "object") { Object.freeze(value); for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child); } return value; }
 export function stripVolatile<T>(value: T): T { return JSON.parse(JSON.stringify(value, (key, current) => /duration|diagnostic|tim(e|ing)|worker|path|timestamp/i.test(key) ? undefined : current)); }
 

@@ -60,7 +60,7 @@ describe("benchmark metrics and statistics", () => {
     const second = pairedBootstrap(games, 4, 123);
     expect(second).toEqual(first);
     expect(first.samples).toHaveLength(4);
-    expect(first.samples[0]!.games).toHaveLength(8);
+    expect(first.samples[0]!.games).toHaveLength(16);
     expect(new Set(first.samples[0]!.games.map((game) => game.rotation)).size).toBe(4);
     expect(new Set(first.samples[0]!.games.map((game) => game.matchId.includes("allocation:BA"))).size).toBe(2);
   });

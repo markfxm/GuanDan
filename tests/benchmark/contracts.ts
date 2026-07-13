@@ -39,7 +39,8 @@ export interface BenchmarkObservation {
 }
 
 export interface StrategyRuntimeContext {
-  matchId: string;
+  /** Opaque, seat-local identifier. Canonical match identity is never exposed to strategies. */
+  runtimeId: string;
   seat: Seat;
   strategyRandomSeed: string;
 }

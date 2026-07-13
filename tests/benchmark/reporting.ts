@@ -119,7 +119,8 @@ export function writeReplay(summary: SimulationSummary | (GameSummary & Partial<
 }
 
 export function buildReport(input: ReportInput, options: ReportOptions = {}): Record<string, unknown> {
-  const expectedConfigHash = configHash(input.config);
+  const reportConfig = canonicalConfig(input.config);
+  const expectedConfigHash = configHash(reportConfig);
   if (input.games.some((game) => game.configHash !== expectedConfigHash)) throw new Error("CONFIG_HASH_MISMATCH");
   input.games.forEach(assertMeasuredDuration);
   const provenance = resolveProvenance(input.games[0]!, { ...options.provenance, ...(input.provenance ?? {}) });
@@ -128,15 +129,15 @@ export function buildReport(input: ReportInput, options: ReportOptions = {}): Re
     const compact = compactSummary(game);
     const replayPath = input.replayPaths?.[index];
     if (replayPath !== undefined) compact.replayPath = outputDir === undefined || !path.isAbsolute(replayPath)
-      ? replayPath
-      : path.relative(outputDir, replayPath).replaceAll(path.sep, "/");
+      ? replayPath.replaceAll("\\", "/")
+      : path.relative(outputDir, replayPath).replaceAll("\\", "/");
     return compact;
   });
   const report: Record<string, unknown> = {
     schemaVersion: "1",
     reportVersion: "d0-v1",
-    benchmarkVersion: input.config.benchmarkVersion,
-    config: input.config,
+    benchmarkVersion: reportConfig.benchmarkVersion,
+    config: reportConfig,
     configHash: expectedConfigHash,
     provenance,
     games,
@@ -160,7 +161,8 @@ export function createManifest(
   games: Array<GameSummary | SimulationSummary>,
   options: { expectedMatchIds?: string[]; engineVersion?: string; roomRulesVersion?: string; strategyDescriptors?: StrategyDescriptor[] } = {},
 ): BatchManifest {
-  const configHashValue = configHash(config);
+  const manifestConfig = canonicalConfig(config);
+  const configHashValue = configHash(manifestConfig);
   if (games.some((game) => game.configHash !== configHashValue)) throw new Error("CONFIG_HASH_MISMATCH");
   games.forEach(assertMeasuredDuration);
   const provenance = resolveProvenance(games[0], options);
@@ -170,7 +172,7 @@ export function createManifest(
     schemaVersion: "1",
     manifestVersion: "d0-v1",
     configHash: configHashValue,
-    benchmarkVersion: config.benchmarkVersion,
+    benchmarkVersion: manifestConfig.benchmarkVersion,
     engineVersion: provenance.engineVersion,
     roomRulesVersion: provenance.roomRulesVersion,
     strategyDescriptors: provenance.strategyDescriptors,
@@ -268,9 +270,8 @@ const REPORT_SUMMARY_KEYS = [
   "matchId", "configHash", "seed", "rank", "rotation", "strategiesBySeat", "finishOrder", "winnerTeam", "teamScore",
   "actionCount", "publicTraceHash", "finalPublicStateHash", "teamPlacementScore", "placementByTeam", "advancementProxy",
   "settlementOutcome", "levelStep", "individualDiagnosticScore", "playPassRatio", "bombCount", "bombs", "planContinuation",
-  "planContinuationActions", "finalTenActions", "finalTenCardActions", "durationMs", "durationStats", "categoryTags",
+  "planContinuationActions", "finalTenActions", "finalTenCardActions", "durationMs", "categoryTags",
   "classification", "errorCounters", "seatDealLimitations", "completed", "failed", "errors", "replayPath",
-  "diagnostics",
 ] as const;
 
 /** Render the compact benchmark report as an auditable human-readable summary. */
@@ -409,7 +410,15 @@ function orderedSeatMap<T>(record: Record<number, T>): Record<number, T> {
 }
 
 function configHash(config: BenchmarkConfig): string {
-  return sha256(canonicalJson({ benchmarkVersion: config.benchmarkVersion, rank: config.rank, strategyA: config.strategyA, strategyB: config.strategyB, replayMode: config.replayMode }));
+  return sha256(canonicalJson({ benchmarkVersion: config.benchmarkVersion, rank: config.rank, strategyA: config.strategyA, strategyB: config.strategyB }));
+}
+
+function canonicalConfig(config: BenchmarkConfig): BenchmarkConfig {
+  return { ...config, strategyA: canonicalStrategyId(config.strategyA), strategyB: canonicalStrategyId(config.strategyB) };
+}
+
+function canonicalStrategyId(id: string): string {
+  return id === "deterministic-random" ? "legal-random" : id === "simple-greedy" ? "legal-greedy" : id;
 }
 
 function sha256(value: string): string { return createHash("sha256").update(Buffer.from(value, "utf8")).digest("hex"); }

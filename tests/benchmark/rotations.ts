@@ -3,6 +3,7 @@ import { createRoom, type RoomState, type Seat, type TrickPlay } from "../../src
 import type { RoundSettlement, TributeState } from "../../src/game/settlement";
 import type { BenchmarkConfig } from "./contracts";
 import { canonicalJson } from "./contracts";
+import { canonicalStrategyId } from "./strategies";
 
 export type Allocation = "AB" | "BA";
 
@@ -58,21 +59,21 @@ export function rotateRoom(room: RoomState, rotation: Seat): RoomState {
 }
 
 export function buildGamesForSeed(config: BenchmarkConfig, seed: number): BenchmarkGameTask[] {
+  const canonicalConfig = { ...config, strategyA: canonicalStrategyId(config.strategyA), strategyB: canonicalStrategyId(config.strategyB) };
   const configHash = hash(canonicalJson({
-    benchmarkVersion: config.benchmarkVersion,
-    rank: config.rank,
-    strategyA: config.strategyA,
-    strategyB: config.strategyB,
-    replayMode: config.replayMode,
+    benchmarkVersion: canonicalConfig.benchmarkVersion,
+    rank: canonicalConfig.rank,
+    strategyA: canonicalConfig.strategyA,
+    strategyB: canonicalConfig.strategyB,
   }));
   const games: BenchmarkGameTask[] = [];
   for (const rotation of seats()) {
     for (const allocation of ["AB", "BA"] as const) {
-      const baseRoom = createRoom({ rank: config.rank, seed });
+      const baseRoom = createRoom({ rank: canonicalConfig.rank, seed });
       const room = rotateRoom(baseRoom, rotation);
-      const matchup = `${config.strategyA}-vs-${config.strategyB}`;
+      const matchup = `${canonicalConfig.strategyA}-vs-${canonicalConfig.strategyB}`;
       const matchId = canonicalJson({ matchup, allocation, configHash, rotation, seed });
-      games.push({ config, configHash, seed, rotation, allocation, matchId, room });
+      games.push({ config: canonicalConfig, configHash, seed, rotation, allocation, matchId, room });
     }
   }
   return games;
