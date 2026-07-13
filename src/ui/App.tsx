@@ -5,9 +5,11 @@ import { RANKS, type Card, type GameRank, type Suit } from "../engine/cards";
 import type { ScoredPlan } from "../engine/scorer";
 import { CardFace } from "./CardFace";
 import { groupCardsForHandDisplay } from "./handLayout";
-import { ApiRequestError, createGameRoom, generatePlans, getGameRoom, passRoomTurn, playRoomCards, runRoomAiStep, submitOpeningTribute, type PublicRoom, type Seat, type TrickPlay } from "./api";
+import { ApiRequestError, createGameRoom, generatePlans, getGameRoom, joinGameRoom, passRoomTurn, playRoomCards, runRoomAiStep, submitOpeningTribute, type PublicRoom, type Seat, type TrickPlay } from "./api";
+import { LobbyScreen } from "./LobbyScreen";
 import { clearStoredRoomSession, persistPublicRoomSession, readStoredRoomSession } from "./session";
 import { useRoomSocket, type RoomSocketState } from "./useRoomSocket";
+import { WaitingRoom } from "./WaitingRoom";
 import { draggedCardIds, ManualGroupTray, setDraggedCardIds } from "./ManualGroupTray";
 import {
   addCardToManualGroup,
@@ -43,6 +45,8 @@ type BombEffectState = {
 export function App() {
   const [gameRank, setGameRank] = useState<GameRank>(DEFAULT_RANK);
   const [room, setRoom] = useState<PublicRoom>();
+  const [playerName, setPlayerName] = useState("");
+  const [joinRoomId, setJoinRoomId] = useState("");
   const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
   const [plans, setPlans] = useState<ScoredPlan[]>([]);
   const [selectedPlanId, setSelectedPlanId] = useState<string>();
@@ -61,6 +65,7 @@ export function App() {
   const [replaySpeed, setReplaySpeed] = useState(1);
   const [replayScale, setReplayScale] = useState(1);
   const [bombEffect, setBombEffect] = useState<BombEffectState>();
+  const [copyInviteLabel, setCopyInviteLabel] = useState("复制邀请链接");
   const bombEffectTimerRef = useRef<number>();
 
   const visibleHumanHand = useMemo(() => ungroupedCards(room?.humanHand ?? [], manualGroups), [room?.humanHand, manualGroups]);
@@ -322,12 +327,39 @@ export function App() {
 
   async function handleCreateRoom() {
     await runAction("正在创建房间...", async () => {
-      const nextRoom = await createGameRoom(gameRank);
+      const name = playerName.trim() || "玩家";
+      setPlayerName(name);
+      const nextRoom = await createGameRoom(gameRank, [], name);
       setRoom(nextRoom);
       setGameRank(nextRoom.rank);
       setSelectedCardIds([]);
       setShowSettlementDialog(nextRoom.status === "finished");
       setStatus(openingTributeText(nextRoom) ?? "房间已创建，轮到你先出。");
+      setCopyInviteLabel("复制邀请链接");
+    });
+  }
+
+  async function handleJoinRoom() {
+    const name = playerName.trim();
+    const roomId = joinRoomId.trim();
+    if (name.length === 0) {
+      setStatus("请输入玩家姓名。");
+      return;
+    }
+
+    if (roomId.length === 0) {
+      setStatus("请输入房间号。");
+      return;
+    }
+
+    await runAction("正在加入房间...", async () => {
+      const nextRoom = await joinGameRoom(roomId, name);
+      setRoom(nextRoom);
+      setGameRank(nextRoom.rank);
+      setSelectedCardIds([]);
+      setShowSettlementDialog(nextRoom.status === "finished");
+      setStatus(openingTributeText(nextRoom) ?? "已加入房间，等待牌局同步。");
+      setCopyInviteLabel("复制邀请链接");
     });
   }
 
@@ -337,6 +369,7 @@ export function App() {
     setSelectedCardIds([]);
     setPlans([]);
     setShowSettlementDialog(false);
+    setCopyInviteLabel("复制邀请链接");
     setStatus("已离开房间。");
   }
 
@@ -345,12 +378,34 @@ export function App() {
     const pendingTributeItems = room?.settlement?.tribute.status === "pending" ? room.settlement.tribute.items : [];
     setGameRank(nextRank);
     await runAction("正在创建下一局...", async () => {
-      const nextRoom = await createGameRoom(nextRank, pendingTributeItems);
+      const nextRoom = await createGameRoom(nextRank, pendingTributeItems, room?.players.find((player) => player.seat === room.humanSeat)?.name ?? playerName);
       setRoom(nextRoom);
       setSelectedCardIds([]);
       setShowSettlementDialog(false);
       setStatus(openingTributeText(nextRoom) ?? `下一局开始，当前打 ${nextRank}。`);
+      setCopyInviteLabel("复制邀请链接");
     });
+  }
+
+  async function handleCopyInviteLink() {
+    if (room === undefined) {
+      return;
+    }
+
+    const inviteUrl = new URL(window.location.href);
+    inviteUrl.searchParams.set("roomId", room.id);
+
+    try {
+      if (navigator.clipboard === undefined) {
+        throw new Error("Clipboard unavailable");
+      }
+
+      await navigator.clipboard.writeText(inviteUrl.toString());
+      setCopyInviteLabel("已复制邀请链接");
+      setStatus("邀请链接已复制。");
+    } catch {
+      setStatus("当前浏览器不支持自动复制，请手动复制当前地址。");
+    }
   }
 
   async function handlePlay() {
@@ -439,6 +494,33 @@ export function App() {
     setSelectedCardIds((current) => current.filter((id) => !cardIds.includes(id)));
   }
 
+  if (room === undefined) {
+    return (
+      <main className="app-shell lobby-shell">
+        <header className="app-header">
+          <div>
+            <p className="eyebrow">Online Room</p>
+            <h1>掼蛋牌桌</h1>
+          </div>
+          <div className="header-status">
+            <p className="status-line">{status}</p>
+          </div>
+        </header>
+        <LobbyScreen
+          playerName={playerName}
+          roomId={joinRoomId}
+          gameRank={gameRank}
+          loading={loading}
+          onPlayerNameChange={setPlayerName}
+          onRoomIdChange={setJoinRoomId}
+          onGameRankChange={setGameRank}
+          onCreateRoom={() => void handleCreateRoom()}
+          onJoinRoom={() => void handleJoinRoom()}
+        />
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell game-shell">
       <header className="app-header">
@@ -468,7 +550,7 @@ export function App() {
                 aria-label="当前级牌"
                 value={gameRank}
                 onChange={(event) => setGameRank(event.target.value as GameRank)}
-                disabled={room !== undefined && room.status === "playing"}
+                disabled={room.status === "playing"}
               >
               {RANKS.map((rank) => (
                   <option key={rank} value={rank}>
@@ -480,11 +562,9 @@ export function App() {
                 <DoorOpen aria-hidden="true" size={18} />
                 开房
               </button>
-              {room !== undefined && (
-                <button type="button" onClick={handleLeaveRoom} disabled={loading}>
-                  离开房间
-                </button>
-              )}
+              <button type="button" onClick={handleLeaveRoom} disabled={loading}>
+                离开房间
+              </button>
               <button
                 className={`replay-button${replayAvailable ? " ready" : ""}`}
                 data-testid="replay-button"
@@ -503,30 +583,27 @@ export function App() {
             </div>
           </div>
 
-          {room === undefined ? (
-            <div className="empty-state">点击开房后，系统会发牌并用 AI 补齐西、北、东三个座位。</div>
-          ) : (
-            <div className="table-surface">
-              {room.players.map((player) => (
-                <div className={`seat-panel seat-${player.seat}${room.currentTurn === player.seat ? " active" : ""}`} key={player.seat}>
-                  <span className="seat-name">
-                    {SEAT_NAMES[player.seat]} · {player.name}
-                  </span>
-                  <span className="seat-count">{player.handCount} 张</span>
-                  <LowCardFlag count={player.handCount} seat={player.seat} />
-                  <FinishBadge finishOrder={room.finishOrder} seat={player.seat} />
-                  {player.isAI ? <Bot aria-label="AI" size={16} /> : <Hand aria-label="玩家" size={16} />}
-                </div>
-              ))}
+          <WaitingRoom room={room} copyInviteLabel={copyInviteLabel} onCopyInviteLink={() => void handleCopyInviteLink()} />
 
-              {bombEffect !== undefined && <BombEffect effect={bombEffect} />}
+          <div className="table-surface">
+            {room.players.map((player) => (
+              <div className={`seat-panel seat-${player.seat}${room.currentTurn === player.seat ? " active" : ""}`} key={player.seat}>
+                <span className="seat-name">
+                  {SEAT_NAMES[player.seat]} · {player.name}
+                </span>
+                <span className="seat-count">{player.handCount} 张</span>
+                <LowCardFlag count={player.handCount} seat={player.seat} />
+                <FinishBadge finishOrder={room.finishOrder} seat={player.seat} />
+                {player.isAI ? <Bot aria-label="AI" size={16} /> : <Hand aria-label="玩家" size={16} />}
+              </div>
+            ))}
 
-              <TrickBoard room={room} />
-            </div>
-          )}
+            {bombEffect !== undefined && <BombEffect effect={bombEffect} />}
 
-          {room !== undefined && (
-            <>
+            <TrickBoard room={room} />
+          </div>
+
+          <>
               <OpeningTributePanel room={room} countdownSeconds={tributeCountdownSeconds} />
 
               <div className="action-row">
@@ -607,8 +684,7 @@ export function App() {
                   </button>
                 </div>
               )}
-            </>
-          )}
+          </>
         </section>
 
         <section
@@ -635,7 +711,7 @@ export function App() {
         </section>
 
       </div>
-      {room?.settlement !== undefined && showSettlementDialog && (
+      {room.settlement !== undefined && showSettlementDialog && (
         <div className="modal-backdrop">
           <section className="settlement-dialog" role="dialog" aria-modal="true" aria-label="本局结算">
             <h2>本局结算</h2>
@@ -652,7 +728,7 @@ export function App() {
           </section>
         </div>
       )}
-      {room !== undefined && showReplayDialog && (
+      {showReplayDialog && (
         <ReplayDialog
           room={room}
           perspectiveSeat={replaySeat}

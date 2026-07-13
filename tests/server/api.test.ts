@@ -248,6 +248,19 @@ it("passes using the session seat resolved from playerId", async () => {
   });
 });
 
+it("uses the provided player name when creating an online room", async () => {
+  await withApp(async (app) => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/rooms",
+      payload: { rank: "10", seed: 1, name: "Alice" },
+    });
+
+    expect(created.statusCode).toBe(200);
+    expect(created.json().room.players[0]).toMatchObject({ seat: 0, name: "Alice", isAI: false });
+  });
+});
+
 it("rejects room actions with a missing or invalid playerId", async () => {
   await withApp(async (app) => {
     const created = await app.inject({ method: "POST", url: "/api/rooms", payload: { rank: "10", seed: 1 } });

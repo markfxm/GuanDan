@@ -48,7 +48,8 @@ it("restores a stored room and reconnects with the same player session after sta
 
   render(<App />);
 
-  expect(await screen.findByText("北 · 北方玩家")).toBeInTheDocument();
+  const waitingRoom = await screen.findByRole("region", { name: "房间等待区" });
+  expect(within(waitingRoom).getByText("北 · 北方玩家")).toBeInTheDocument();
   expect(fetch).toHaveBeenCalledWith("/api/rooms/room-1?playerId=player-1");
   expect(MockRoomWebSocket.instances[0].url).toBe(`ws://${window.location.host}/ws/rooms/room-1?playerId=player-1`);
 });
@@ -61,10 +62,11 @@ it("leaves the room by clearing the stored session and returning to the lobby", 
   mockFetchQueue([{ room: createRoom() }, { plans: [] }]);
 
   render(<App />);
-  await screen.findByText("南 · 玩家");
+  const waitingRoom = await screen.findByRole("region", { name: "房间等待区" });
+  expect(within(waitingRoom).getByText("南 · 玩家")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "离开房间" }));
 
-  expect(screen.getByText("点击开房后，系统会发牌并用 AI 补齐西、北、东三个座位。")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "房间大厅" })).toBeInTheDocument();
   expect(localStorage.length).toBe(0);
   expect(MockRoomWebSocket.instances[0].close).toHaveBeenCalledTimes(1);
 });
@@ -77,11 +79,11 @@ it("defaults new rooms to rank 2 and does not render the game information sideba
   expect(screen.getByLabelText("当前级牌")).toHaveValue("2");
   expect(screen.queryByRole("heading", { name: "牌局信息" })).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: /开房/ }));
+  fireEvent.click(screen.getByRole("button", { name: /创建房间/ }));
   await waitFor(() => expect(fetch).toHaveBeenCalledWith(
     "/api/rooms",
     expect.objectContaining({
-      body: JSON.stringify({ rank: "2", pendingTributeItems: [] }),
+      body: JSON.stringify({ rank: "2", pendingTributeItems: [], name: "玩家" }),
     }),
   ));
 });
@@ -218,7 +220,7 @@ it("opens a local room and renders AI seats plus the human hand", async () => {
   mockFetchQueue([{ room: createRoom() }, { plans: [] }]);
 
   render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: /开房/ }));
+  fireEvent.click(screen.getByRole("button", { name: /创建房间/ }));
 
   expect(await screen.findByText("房间已创建，轮到你先出。")).toBeInTheDocument();
   expect(screen.getByText("西 · AI 1")).toBeInTheDocument();
@@ -267,7 +269,7 @@ it("keeps current trick plays visible and lets next step advance one AI action",
   mockFetchQueue([{ room: createRoom() }, { plans: [] }, { room: afterHuman }, { room: afterAiStep }]);
 
   render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: /开房/ }));
+  fireEvent.click(screen.getByRole("button", { name: /创建房间/ }));
   await screen.findByLabelText("黑桃A 1");
 
   fireEvent.click(screen.getByLabelText("黑桃A 1"));
@@ -304,7 +306,7 @@ it("auto-advances after the configured AI pause on AI turns", async () => {
   mockFetchQueue([{ room: createRoom() }, { plans: [] }, { room: afterHuman }, { room: afterAiStep }, { plans: [] }]);
 
   render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: /开房/ }));
+  fireEvent.click(screen.getByRole("button", { name: /创建房间/ }));
   await screen.findByLabelText("黑桃A 1");
 
   fireEvent.click(screen.getByLabelText("黑桃A 1"));
@@ -399,7 +401,7 @@ it("renders settlement and starts the next room with the promoted rank", async (
   mockFetchQueue([{ room: createRoom({ status: "finished", settlement: settlement() }) }, { room: createRoom({ rank: "K" }) }, { plans: [] }]);
 
   render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: /开房/ }));
+  fireEvent.click(screen.getByRole("button", { name: /创建房间/ }));
 
   expect(await screen.findByText("双下")).toBeInTheDocument();
   expect(screen.getByText("升级：3，下一局打 K")).toBeInTheDocument();

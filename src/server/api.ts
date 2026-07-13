@@ -26,6 +26,7 @@ type PlansBody = CardsBody & {
 type CreateRoomBody = {
   rank?: unknown;
   seed?: number;
+  name?: unknown;
   pendingTributeItems?: unknown;
 };
 
@@ -177,7 +178,7 @@ export function buildApi() {
   });
 
   app.post<{ Body: CreateRoomBody }>("/api/rooms", async (request, reply) => {
-    const { rank = DEFAULT_RANK, seed, pendingTributeItems } = request.body ?? {};
+    const { rank = DEFAULT_RANK, seed, name, pendingTributeItems } = request.body ?? {};
     const invalidRank = validateGameRank(rank);
 
     if (invalidRank !== undefined) {
@@ -188,12 +189,18 @@ export function buildApi() {
       return reply.code(400).send(INVALID_SEED_ERROR);
     }
 
+    if (name !== undefined && (typeof name !== "string" || name.trim().length === 0)) {
+      return reply.code(400).send({ error: "Name must be a non-empty string." });
+    }
+
     if (!isValidOptionalTributeItems(pendingTributeItems)) {
       return reply.code(400).send({ valid: false, errors: ["pendingTributeItems must be valid seat pairs."], warnings: [] });
     }
 
     const room = createRoom({ rank: rank as GameRank, seed, pendingTributeItems });
-    const session = createPlayerSession(room.players[0].name, 0);
+    const session = createPlayerSession(typeof name === "string" ? name.trim() : room.players[0].name, 0);
+    room.players[0].name = session.name;
+    room.players[0].isAI = false;
     onlineRooms.set(room.id, { room, sessions: new Map([[session.playerId, session]]), sockets: new Set() });
     return {
       playerId: session.playerId,

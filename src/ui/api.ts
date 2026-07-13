@@ -125,8 +125,13 @@ export async function generatePlans(cards: Card[], rank: GameRank, count = 5): P
   return data.plans;
 }
 
-export async function createGameRoom(rank: GameRank, pendingTributeItems: TributeItem[] = []): Promise<PublicRoom> {
-  const data = await postJson<RoomResponse>("/api/rooms", { rank, pendingTributeItems });
+export async function createGameRoom(rank: GameRank, pendingTributeItems: TributeItem[] = [], name?: string): Promise<PublicRoom> {
+  const payload: { rank: GameRank; pendingTributeItems: TributeItem[]; name?: string } = { rank, pendingTributeItems };
+  if (name !== undefined && name.trim().length > 0) {
+    payload.name = name.trim();
+  }
+
+  const data = await postJson<RoomResponse>("/api/rooms", payload);
   const room = normalizePublicRoom(data.room, data.playerId);
   persistPublicRoomSession(room);
   return room;
