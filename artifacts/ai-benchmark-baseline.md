@@ -27,7 +27,7 @@ Measure seeded, paired AI strategy outcomes in the real Guandan room while prese
 
 - Wins A/B/unresolved: 1418/182/0; rates: 0.886/0.114.
 - Scores A/B/difference: 1418/182/0.772.
-- Score CI: [0.250, 1.000]; win-rate CI: [0.625, 1.000]; statistically significant: true.
+- Score CI: [0.000, 1.000]; win-rate CI: [0.500, 1.000]; paired score-difference CI: [0.000, 1.000]; paired win-rate CI: [0.500, 1.000]; statistically significant: false.
 - Elo: initial 1500, K 32, delta 12.360 (d0-elo-v1).
 
 ## Exploratory classifications

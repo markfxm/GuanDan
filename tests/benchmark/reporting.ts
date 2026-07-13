@@ -44,6 +44,7 @@ export interface BatchManifest {
   seedStart?: number;
   seedEnd?: number;
   expectedMatchIds: string[];
+  completedMatchIds: string[];
   games: Array<GameSummary | SimulationSummary>;
   publicTraceHashes: Record<string, string>;
   finalPublicStateHashes: Record<string, string>;
@@ -167,6 +168,7 @@ export function createManifest(
   games.forEach(assertMeasuredDuration);
   const provenance = resolveProvenance(games[0], options);
   const ids = [...new Set(options.expectedMatchIds ?? games.map((game) => game.matchId))].sort();
+  const completedMatchIds = games.filter(isCompletedGame).map((game) => game.matchId).sort();
   const seeds = games.map((game) => game.seed);
   return {
     schemaVersion: "1",
@@ -179,6 +181,7 @@ export function createManifest(
     seedStart: seeds.length === 0 ? undefined : Math.min(...seeds),
     seedEnd: seeds.length === 0 ? undefined : Math.max(...seeds),
     expectedMatchIds: ids,
+    completedMatchIds,
     games: [...games].sort((left, right) => left.matchId.localeCompare(right.matchId)),
     publicTraceHashes: Object.fromEntries(games.map((game) => [game.matchId, game.publicTraceHash])),
     finalPublicStateHashes: Object.fromEntries(games.map((game) => [game.matchId, game.finalPublicStateHash])),
@@ -194,12 +197,19 @@ export function mergeBatches(batches: BatchManifest[]): BatchManifest {
   const expected = new Set<string>();
   const trace: Record<string, string> = {};
   const state: Record<string, string> = {};
+  const completed = new Set<string>();
   for (const batch of batches) {
     if (batch.configHash !== configHashValue) throw new Error("CONFIG_HASH_MISMATCH");
     if (batch.benchmarkVersion !== batches[0]!.benchmarkVersion) throw new Error("BENCHMARK_VERSION_MISMATCH");
     if (batch.engineVersion !== batches[0]!.engineVersion || batch.roomRulesVersion !== batches[0]!.roomRulesVersion) throw new Error("PROVENANCE_MISMATCH");
     if (canonicalJson(batch.strategyDescriptors ?? []) !== descriptorKey) throw new Error("STRATEGY_DESCRIPTORS_MISMATCH");
     const actual = new Set(batch.games.map((game) => game.matchId));
+    const batchCompleted = batch.completedMatchIds ?? batch.games.filter(isCompletedGame).map((game) => game.matchId);
+    if (batchCompleted.length !== new Set(batchCompleted).size) throw new Error("DUPLICATE_COMPLETED_MATCH_ID");
+    for (const id of batchCompleted) {
+      if (!actual.has(id)) throw new Error(`UNEXPECTED_COMPLETED_MATCH_ID:${id}`);
+      completed.add(id);
+    }
     for (const id of batch.expectedMatchIds) {
       expected.add(id);
       if (!actual.has(id)) throw new Error(`MISSING_EXPECTED_MATCH_ID:${id}`);
@@ -229,6 +239,7 @@ export function mergeBatches(batches: BatchManifest[]): BatchManifest {
     seedStart: Math.min(...seeds),
     seedEnd: Math.max(...seeds),
     expectedMatchIds: [...new Set([...expected, ...sorted.map((game) => game.matchId)])].sort(),
+    completedMatchIds: [...completed].sort(),
     games: sorted,
     publicTraceHashes: trace,
     finalPublicStateHashes: state,
@@ -264,6 +275,10 @@ function allocationOf(game: GameSummary): "AB" | "BA" {
   return even === game.strategiesBySeat[2] && odd === game.strategiesBySeat[3] && even !== odd
     ? (game.strategiesBySeat[0] < game.strategiesBySeat[1] ? "AB" : "BA")
     : `${even}:${odd}` as "AB" | "BA";
+}
+
+function isCompletedGame(game: GameSummary | SimulationSummary): game is SimulationSummary {
+  return "completed" in game && game.completed === true && game.failed !== true;
 }
 
 const REPORT_SUMMARY_KEYS = [
@@ -302,7 +317,7 @@ export function buildMarkdownReport(input: ReportInput): string {
     "",
     `- Wins A/B/unresolved: ${aggregate.winsA ?? "n/a"}/${aggregate.winsB ?? "n/a"}/${aggregate.unresolved ?? "n/a"}; rates: ${formatNumber(aggregate.winRateA)}/${formatNumber(aggregate.winRateB)}.`,
     `- Scores A/B/difference: ${aggregate.scoreA ?? "n/a"}/${aggregate.scoreB ?? "n/a"}/${formatNumber(aggregate.scoreDifference)}.`,
-    `- Score CI: ${formatInterval(aggregate.scoreDifferenceCI)}; win-rate CI: ${formatInterval(aggregate.winRateCI)}; statistically significant: ${aggregate.statisticallySignificant ?? "n/a"}.`,
+    `- Score CI: ${formatInterval(aggregate.scoreDifferenceCI)}; win-rate CI: ${formatInterval(aggregate.winRateCI)}; paired score-difference CI: ${formatInterval(aggregate.pairedScoreDifferenceCI)}; paired win-rate CI: ${formatInterval(aggregate.pairedWinRateCI)}; statistically significant: ${aggregate.statisticallySignificant ?? "n/a"}.`,
     `- Elo: ${aggregate.elo ? `initial ${aggregate.elo.initialRating}, K ${aggregate.elo.kFactor}, delta ${formatNumber(aggregate.elo.delta)} (${aggregate.elo.version})` : "n/a"}.`,
     "",
     "## Exploratory classifications",

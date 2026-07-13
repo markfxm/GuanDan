@@ -143,3 +143,10 @@ it("merges complete batches and rejects duplicates, gaps, incomplete blocks, and
   const missingExpected = createManifest(config, games.filter((game) => game.seed !== 3), { ...provenance, expectedMatchIds: [...games.filter((game) => game.seed !== 3).map((game) => game.matchId), "missing"] });
   expect(() => mergeBatches([missingExpected])).toThrow(/MISSING/);
 });
+
+it("records completed match IDs separately from expected IDs", () => {
+  const games = [0, 1, 2, 3].flatMap((seed) => [0, 1, 2, 3].flatMap((rotation) => [summary(seed, rotation as 0 | 1 | 2 | 3, "AB"), summary(seed, rotation as 0 | 1 | 2 | 3, "BA")]));
+  const manifest = createManifest(config, games.map((game, index) => index === 0 ? { ...game, completed: false, failed: true } : { ...game, completed: true, failed: false }), provenance);
+  expect(manifest.expectedMatchIds).toHaveLength(32);
+  expect(manifest.completedMatchIds).toHaveLength(31);
+});

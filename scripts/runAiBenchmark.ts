@@ -234,6 +234,10 @@ function loadExisting(output: string | undefined, configHash: string, options: B
   const ids = new Set(games.map((game) => game.matchId));
   if (ids.size !== games.length) throw new Error("DUPLICATE_MATCH_ID");
   const expected = raw.expectedMatchIds ?? expectedIds;
+  const completed = raw.completedMatchIds ?? games.filter((game) => game.completed === true && game.failed !== true).map((game) => game.matchId);
+  if (completed.length !== new Set(completed).size) throw new Error("DUPLICATE_COMPLETED_MATCH_ID");
+  if (completed.some((id) => !ids.has(id))) throw new Error(`UNEXPECTED_COMPLETED_MATCH_ID:${completed.find((id) => !ids.has(id))}`);
+  if (completed.some((id) => !games.find((game) => game.matchId === id)?.completed || games.find((game) => game.matchId === id)?.failed)) throw new Error("INVALID_COMPLETED_MATCH_ID");
   if (expected.length !== new Set(expected).size) throw new Error("DUPLICATE_EXPECTED_MATCH_ID");
   if (expected.some((id) => !expectedIds.includes(id))) throw new Error("UNEXPECTED_MATCH_ID");
   if (expectedIds.some((id) => !expected.includes(id))) throw new Error(`MISSING_EXPECTED_MATCH_ID:${expectedIds.find((id) => !expected.includes(id))}`);
