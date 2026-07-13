@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
 import { createBenchmarkObservation } from "./observation";
 import { getStrategy } from "./strategies";
-import type { GameAction, GameSummary, PublicTributeEvent, StrategyAction } from "./contracts";
+import type { GameAction, GameSummary, PublicTributeEvent, RandomReplayProvenance, StrategyAction } from "./contracts";
 import { finalPublicStateHash, publicTraceHash } from "./reporting";
 import { createRoom, playCards, passTurn, type RoomState, type Seat } from "../../src/game/room";
 import type { BenchmarkGameTask } from "./rotations";
+import { CANDIDATE_ORDERING_VERSION, DECISION_INDEX_SEMANTICS, deriveRuntimeId, deriveStrategySeed, RANDOM_ALGORITHM_VERSION, STRATEGY_SEED_DERIVATION_VERSION } from "./random";
 
 export interface SimulationError {
   seed: number;
@@ -47,9 +47,10 @@ export type SimulationSummary = GameSummary & {
     decisionCount: number;
     workerLocalToken: string;
   };
+  randomProvenance?: RandomReplayProvenance;
 };
 
-export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: boolean } = {}): SimulationSummary {
+export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: boolean; strategyRandomSeeds?: Partial<Record<Seat, string>> } = {}): SimulationSummary {
   const startedAt = performance.now();
   const room = structuredClone(task.room ?? createRoom({ rank: task.config.rank, seed: task.seed }));
   const strategiesBySeat = strategyMap(task);
@@ -69,7 +70,7 @@ export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: b
         runtimes[seat] = strategy.createRuntime({
           runtimeId: deriveRuntimeId(task.matchId, seat),
           seat,
-          strategyRandomSeed: deriveStrategySeed(task.matchId, seat),
+          strategyRandomSeed: options.strategyRandomSeeds?.[seat] ?? deriveStrategySeed(task.matchId, seat),
         });
       } catch (cause) {
         recordFailure(errors, errorCounters, task.seed, seat, strategiesBySeat[seat], cause, "runtimeErrors");
@@ -156,6 +157,15 @@ export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: b
     errorCounters,
     publicEvents,
     diagnostics,
+    randomProvenance: {
+      randomAlgorithmVersion: RANDOM_ALGORITHM_VERSION,
+      strategySeedDerivationVersion: STRATEGY_SEED_DERIVATION_VERSION,
+      baseSeed: task.seed,
+      perSeatDerivedSeed: Object.fromEntries(seats().map((seat) => [seat, options.strategyRandomSeeds?.[seat] ?? deriveStrategySeed(task.matchId, seat)])) as Record<Seat, string>,
+      strategyVersionsBySeat: Object.fromEntries(seats().map((seat) => [seat, strategies[seat]?.implementationVersion ?? "unknown"])) as Record<Seat, string>,
+      candidateOrderingVersion: CANDIDATE_ORDERING_VERSION,
+      decisionIndexSemantics: DECISION_INDEX_SEMANTICS,
+    },
   };
 }
 
@@ -232,15 +242,6 @@ function recordFailure(
   errors.push({ seed, seat, strategy, error: errorMessage(cause) });
   counters.total += 1;
   counters[category] += 1;
-}
-
-function deriveRuntimeId(matchId: string, seat: Seat): string {
-  return createHash("sha256").update(`${matchId}:runtime:${seat}`).digest("hex");
-}
-
-function deriveStrategySeed(matchId: string, seat: Seat): string {
-  const runtimeId = deriveRuntimeId(matchId, seat);
-  return createHash("sha256").update(`${runtimeId}:strategy-seed`).digest("hex");
 }
 
 function errorMessage(cause: unknown): string {

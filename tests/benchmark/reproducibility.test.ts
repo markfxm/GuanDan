@@ -70,6 +70,29 @@ describe("AI benchmark reproducibility", () => {
     expect(second.finalPublicStateHash).toBe(first.finalPublicStateHash);
   });
 
+  it("replays canonicalized random identities with explicit legacy seat seeds", () => {
+    const config: BenchmarkConfig = { benchmarkVersion: "d0-v1", rank: "2", seeds: [1], strategyA: "unified-current", strategyB: "legal-random", replayMode: "all" };
+    const canonicalTask = buildGamesForSeed(config, 1)[0]!;
+    const oldConfigHash = "24bce58a48d88c5f59f30af60a0c3a5d70ad0d9738d52e532785b77084d8ec1e";
+    const oldIdentity = { ...JSON.parse(canonicalTask.matchId), configHash: oldConfigHash };
+    const oldTask = { ...canonicalTask, configHash: oldConfigHash, matchId: JSON.stringify(oldIdentity) };
+    const oldRun = simulateGame(oldTask);
+    const replayRun = simulateGame(canonicalTask, { strategyRandomSeeds: oldRun.randomProvenance!.perSeatDerivedSeed });
+    expect(replayRun.publicTraceHash).toBe(oldRun.publicTraceHash);
+    expect(replayRun.finalPublicStateHash).toBe(oldRun.finalPublicStateHash);
+  });
+
+  it("rejects missing random provenance instead of applying defaults", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "d0-random-provenance-"));
+    const config: BenchmarkConfig = { benchmarkVersion: "d0-v1", rank: "2", seeds: [1], strategyA: "unified-current", strategyB: "legal-random", replayMode: "all" };
+    const summary = simulateGame(buildGamesForSeed(config, 1)[0]!);
+    const replayPath = writeReplay(summary, { outputDir: root, replayMode: "all", engineVersion: ENGINE_VERSION, roomRulesVersion: ROOM_RULES_VERSION, strategyDescriptors: resolvedDescriptors });
+    const document = JSON.parse(fs.readFileSync(replayPath!, "utf8")) as Record<string, unknown>;
+    delete document.deterministicRandom;
+    fs.writeFileSync(replayPath!, JSON.stringify(document));
+    expect(() => replayMatch(summary.matchId, root)).toThrow("REPLAY_PROVENANCE_INVALID");
+  });
+
   it("keeps registered strategy runs deterministic across concurrency 1 and 2", async () => {
     const options = { strategyA: "legal-random", strategyB: "legal-greedy", seeds: [1], paired: false, replayMode: "none" as const, timeoutMs: 30_000 };
     const direct = await runBenchmark({ ...options, concurrency: 1 });

@@ -89,6 +89,16 @@ export interface GameSummary {
   durationMs: number;
 }
 
+export interface RandomReplayProvenance {
+  randomAlgorithmVersion: string;
+  strategySeedDerivationVersion: string;
+  baseSeed: number;
+  perSeatDerivedSeed: Record<Seat, string>;
+  strategyVersionsBySeat: Record<Seat, string>;
+  candidateOrderingVersion: string;
+  decisionIndexSemantics: string;
+}
+
 export interface BenchmarkProvenance {
   engineVersion: string;
   roomRulesVersion: string;
@@ -108,7 +118,7 @@ export interface ReplayDocument {
   rotation: Seat;
   strategiesBySeat: Record<Seat, string>;
   strategyDescriptors: StrategyDescriptor[];
-  deterministicRandom: { strategySeedDerivationVersion: string };
+  deterministicRandom: RandomReplayProvenance;
   publicEvents: GameAction[];
   finishOrder: Seat[];
   winnerTeam: 0 | 1 | null;

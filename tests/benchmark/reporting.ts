@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { BenchmarkConfig, BenchmarkProvenance, GameSummary, ReplayDocument, StrategyDescriptor } from "./contracts";
+import type { BenchmarkConfig, BenchmarkProvenance, GameSummary, RandomReplayProvenance, ReplayDocument, StrategyDescriptor } from "./contracts";
 import { canonicalJson } from "./contracts";
 import type { SimulationSummary } from "./simulator";
+import { CANDIDATE_ORDERING_VERSION, DECISION_INDEX_SEMANTICS, deriveStrategySeed, RANDOM_ALGORITHM_VERSION, STRATEGY_SEED_DERIVATION_VERSION } from "./random";
 
 const VOLATILE_KEY = /duration|tim(e|ing)|diagnostic|path|worker|stack|debug|timestamp/i;
 const PRIVATE_KEY = /^(publicEvents|hands|initialHands|ownHand|fullState|hiddenState|finalPublicState|room|aiRuntime|aiPlans)$/i;
@@ -102,7 +103,7 @@ export function writeReplay(summary: SimulationSummary | (GameSummary & Partial<
     rotation: summary.rotation,
     strategiesBySeat: orderedSeatMap(summary.strategiesBySeat),
     strategyDescriptors: provenance.strategyDescriptors,
-    deterministicRandom: { strategySeedDerivationVersion: "1" },
+    deterministicRandom: randomProvenance(summary, provenance.strategyDescriptors),
     publicEvents: Array.isArray((summary as Partial<SimulationSummary>).publicEvents)
       ? normalizePublic((summary as Partial<SimulationSummary>).publicEvents) as ReplayDocument["publicEvents"]
       : [],
@@ -117,6 +118,21 @@ export function writeReplay(summary: SimulationSummary | (GameSummary & Partial<
   };
   fs.writeFileSync(destination, `${JSON.stringify(document, null, 2)}\n`, "utf8");
   return destination;
+}
+
+function randomProvenance(summary: SimulationSummary | (GameSummary & Partial<SimulationSummary>), descriptors: StrategyDescriptor[]): RandomReplayProvenance {
+  const existing = "randomProvenance" in summary ? summary.randomProvenance : undefined;
+  if (existing !== undefined) return existing;
+  const byId = new Map(descriptors.map((descriptor) => [descriptor.id, descriptor]));
+  return {
+    randomAlgorithmVersion: RANDOM_ALGORITHM_VERSION,
+    strategySeedDerivationVersion: STRATEGY_SEED_DERIVATION_VERSION,
+    baseSeed: summary.seed,
+    perSeatDerivedSeed: Object.fromEntries([0, 1, 2, 3].map((seat) => [seat, deriveStrategySeed(summary.matchId, seat as 0 | 1 | 2 | 3)])) as Record<0 | 1 | 2 | 3, string>,
+    strategyVersionsBySeat: Object.fromEntries([0, 1, 2, 3].map((seat) => [seat, byId.get(summary.strategiesBySeat[seat as 0 | 1 | 2 | 3])?.implementationVersion ?? "unknown"])) as Record<0 | 1 | 2 | 3, string>,
+    candidateOrderingVersion: CANDIDATE_ORDERING_VERSION,
+    decisionIndexSemantics: DECISION_INDEX_SEMANTICS,
+  };
 }
 
 export function buildReport(input: ReportInput, options: ReportOptions = {}): Record<string, unknown> {

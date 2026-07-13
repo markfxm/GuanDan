@@ -14,6 +14,7 @@ import { createManifest, buildReport, writeReport, writeMarkdownReport, writeRep
 import { simulateGame, type SimulationError, type SimulationSummary, type SafetyErrorCounters } from "../tests/benchmark/simulator";
 import { canonicalStrategyId, strategyDescriptors } from "../tests/benchmark/strategies";
 import type { BenchmarkWorkerResult } from "../tests/benchmark/worker";
+import { CANDIDATE_ORDERING_VERSION, DECISION_INDEX_SEMANTICS, deriveStrategySeed, RANDOM_ALGORITHM_VERSION, STRATEGY_SEED_DERIVATION_VERSION } from "../tests/benchmark/random";
 
 export interface BenchmarkCliOptions {
   strategyA: string;
@@ -216,7 +217,7 @@ function timeoutSummary(task: BenchmarkGameTask, durationMs: number, error = "BE
   const strategiesBySeat = { 0: task.allocation === "AB" ? task.config.strategyA : task.config.strategyB, 1: task.allocation === "AB" ? task.config.strategyB : task.config.strategyA, 2: task.allocation === "AB" ? task.config.strategyA : task.config.strategyB, 3: task.allocation === "AB" ? task.config.strategyB : task.config.strategyA } as Record<Seat, string>;
   const failure: SimulationError = { seed: task.seed, seat: 0, strategy: strategiesBySeat[0], error };
   const counters: SafetyErrorCounters = { total: 1, strategyErrors: error.includes("UNKNOWN_STRATEGY") ? 1 : 0, runtimeErrors: 0, illegalActions: 0, engineErrors: error.includes("UNKNOWN_STRATEGY") ? 0 : 1, guardErrors: 0 };
-  return { matchId: task.matchId, configHash: task.configHash, seed: task.seed, rank: task.config.rank, rotation: task.rotation, strategiesBySeat, finishOrder: [], winnerTeam: null, teamScore: { 0: 0, 1: 0 }, actionCount: 0, publicTraceHash: "", finalPublicStateHash: "", durationMs: Math.max(0.001, durationMs), completed: false, failed: true, errors: [failure], errorCounters: counters, publicEvents: [], diagnostics: diagnostics ? { enabled: true, decisionCount: 0, workerLocalToken: task.matchId } : undefined };
+  return { matchId: task.matchId, configHash: task.configHash, seed: task.seed, rank: task.config.rank, rotation: task.rotation, strategiesBySeat, finishOrder: [], winnerTeam: null, teamScore: { 0: 0, 1: 0 }, actionCount: 0, publicTraceHash: "", finalPublicStateHash: "", durationMs: Math.max(0.001, durationMs), completed: false, failed: true, errors: [failure], errorCounters: counters, publicEvents: [], diagnostics: diagnostics ? { enabled: true, decisionCount: 0, workerLocalToken: task.matchId } : undefined, randomProvenance: { randomAlgorithmVersion: RANDOM_ALGORITHM_VERSION, strategySeedDerivationVersion: STRATEGY_SEED_DERIVATION_VERSION, baseSeed: task.seed, perSeatDerivedSeed: Object.fromEntries([0, 1, 2, 3].map((seat) => [seat, deriveStrategySeed(task.matchId, seat as Seat)])) as Record<Seat, string>, strategyVersionsBySeat: Object.fromEntries([0, 1, 2, 3].map((seat) => [seat, strategyDescriptors.find((descriptor) => descriptor.id === strategiesBySeat[seat as Seat])?.implementationVersion ?? "unknown"])) as Record<Seat, string>, candidateOrderingVersion: CANDIDATE_ORDERING_VERSION, decisionIndexSemantics: DECISION_INDEX_SEMANTICS } };
 }
 
 function elapsedSince(startedAt: number | undefined): number { return startedAt === undefined ? 0.001 : Math.max(0.001, performance.now() - startedAt); }

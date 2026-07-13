@@ -4,6 +4,7 @@ import { buildGamesForSeed } from "../tests/benchmark/rotations";
 import { simulateGame } from "../tests/benchmark/simulator";
 import { hashFinalPublicState, hashPublicTrace } from "../tests/benchmark/reporting";
 import type { BenchmarkConfig, ReplayDocument } from "../tests/benchmark/contracts";
+import { CANDIDATE_ORDERING_VERSION, DECISION_INDEX_SEMANTICS, RANDOM_ALGORITHM_VERSION, STRATEGY_SEED_DERIVATION_VERSION } from "../tests/benchmark/random";
 
 export function replayMatch(matchId: string, replayRoot = "artifacts/ai-benchmark-replays"): { matchId: string; publicTraceHash: string; finalPublicStateHash: string; verified: boolean } {
   const file = findReplay(matchId, replayRoot);
@@ -20,7 +21,9 @@ export function replayMatch(matchId: string, replayRoot = "artifacts/ai-benchmar
   const task = buildGamesForSeed(config, document.seed).find((candidate) => candidate.matchId === document.matchId);
   if (task === undefined) throw new Error("REPLAY_TASK_NOT_FOUND");
   if (task.configHash !== document.configHash) throw new Error("REPLAY_CONFIG_HASH_MISMATCH");
-  const result = simulateGame(task);
+  if (document.seed !== identity.seed || document.rotation !== identity.rotation || JSON.stringify(document.strategiesBySeat) !== JSON.stringify(strategyMap(task))) throw new Error("REPLAY_IDENTITY_MISMATCH");
+  if (document.deterministicRandom.baseSeed !== document.seed) throw new Error("REPLAY_RANDOM_BASE_SEED_MISMATCH");
+  const result = simulateGame(task, { strategyRandomSeeds: document.deterministicRandom.perSeatDerivedSeed });
   const publicTraceHash = hashPublicTrace(result.publicEvents);
   const finalPublicStateHash = hashFinalPublicState(result.finalPublicState);
   return { matchId, publicTraceHash, finalPublicStateHash, verified: publicTraceHash === document.publicTraceHash && finalPublicStateHash === document.finalPublicStateHash };
@@ -30,7 +33,19 @@ function isProvenanceComplete(document: ReplayDocument): boolean {
   return typeof document.engineVersion === "string" && document.engineVersion.length > 0 && document.engineVersion.toLowerCase() !== "unknown"
     && typeof document.roomRulesVersion === "string" && /^[a-f0-9]{64}$/.test(document.roomRulesVersion)
     && Array.isArray(document.strategyDescriptors) && document.strategyDescriptors.length > 0
-    && document.strategyDescriptors.every((descriptor) => descriptor.id && descriptor.implementationVersion && descriptor.configHash && descriptor.sourceCommit && descriptor.sourceCommit.toLowerCase() !== "unknown" && ["legal-only", "production-policy"].includes(descriptor.candidatePolicy));
+    && document.strategyDescriptors.every((descriptor) => descriptor.id && descriptor.implementationVersion && descriptor.configHash && descriptor.sourceCommit && descriptor.sourceCommit.toLowerCase() !== "unknown" && ["legal-only", "production-policy"].includes(descriptor.candidatePolicy))
+    && document.deterministicRandom?.randomAlgorithmVersion === RANDOM_ALGORITHM_VERSION
+    && document.deterministicRandom.strategySeedDerivationVersion === STRATEGY_SEED_DERIVATION_VERSION
+    && typeof document.deterministicRandom.baseSeed === "number"
+    && document.deterministicRandom.candidateOrderingVersion === CANDIDATE_ORDERING_VERSION
+    && document.deterministicRandom.decisionIndexSemantics === DECISION_INDEX_SEMANTICS
+    && [0, 1, 2, 3].every((seat) => typeof document.deterministicRandom.perSeatDerivedSeed?.[seat as 0 | 1 | 2 | 3] === "string" && document.deterministicRandom.perSeatDerivedSeed[seat as 0 | 1 | 2 | 3]!.length > 0)
+    && [0, 1, 2, 3].every((seat) => typeof document.deterministicRandom.strategyVersionsBySeat?.[seat as 0 | 1 | 2 | 3] === "string" && document.deterministicRandom.strategyVersionsBySeat[seat as 0 | 1 | 2 | 3]!.length > 0);
+}
+
+function strategyMap(task: { allocation: "AB" | "BA"; config: BenchmarkConfig }): Record<0 | 1 | 2 | 3, string> {
+  const aAtEven = task.allocation === "AB";
+  return { 0: aAtEven ? task.config.strategyA : task.config.strategyB, 1: aAtEven ? task.config.strategyB : task.config.strategyA, 2: aAtEven ? task.config.strategyA : task.config.strategyB, 3: aAtEven ? task.config.strategyB : task.config.strategyA };
 }
 
 function findReplay(matchId: string, root: string): string | undefined {
