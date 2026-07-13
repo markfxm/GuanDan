@@ -91,8 +91,8 @@ export function writeReplay(summary: SimulationSummary | (GameSummary & Partial<
   const destination = path.join(outputDir, matchup, `${safeFileName(summary.matchId)}.json`);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   const document: ReplayDocument = {
-    schemaVersion: "1",
-    replayVersion: options.replayVersion ?? "d0-v1",
+    schemaVersion: options.benchmarkVersion === "d0-r1" ? "2" : "1",
+    replayVersion: options.replayVersion ?? options.benchmarkVersion ?? "d0-v1",
     benchmarkVersion: options.benchmarkVersion ?? "d0-v1",
     engineVersion: provenance.engineVersion,
     roomRulesVersion: provenance.roomRulesVersion,

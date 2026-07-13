@@ -11,6 +11,7 @@ export function replayMatch(matchId: string, replayRoot = "artifacts/ai-benchmar
   if (file === undefined) throw new Error(`REPLAY_NOT_FOUND:${matchId}`);
   const document = JSON.parse(fs.readFileSync(file, "utf8")) as ReplayDocument;
   if (document.matchId !== matchId) throw new Error("REPLAY_MATCH_ID_MISMATCH");
+  if ((document.benchmarkVersion === "d0-r1" && document.schemaVersion !== "2") || (document.benchmarkVersion !== "d0-r1" && document.schemaVersion !== "1")) throw new Error("REPLAY_SCHEMA_VERSION_INVALID");
   if (!isProvenanceComplete(document)) throw new Error("REPLAY_PROVENANCE_INVALID");
   const identity = JSON.parse(document.matchId) as { matchup: string; allocation: "AB" | "BA"; rotation: 0 | 1 | 2 | 3; seed: number };
   const [strategyA, strategyB] = identity.matchup.split("-vs-");

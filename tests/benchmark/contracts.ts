@@ -106,7 +106,7 @@ export interface BenchmarkProvenance {
 }
 
 export interface ReplayDocument {
-  schemaVersion: "1";
+  schemaVersion: "1" | "2";
   replayVersion: string;
   benchmarkVersion: string;
   engineVersion: string;
