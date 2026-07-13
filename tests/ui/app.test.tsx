@@ -9,23 +9,64 @@ const cardQ: Card = { id: "SQ-1", kind: "suited", rank: "Q", suit: "spades", cop
 const card5: Card = { id: "C5-1", kind: "suited", rank: "5", suit: "clubs", copy: 1 };
 
 class MockRoomWebSocket {
+  static instances: MockRoomWebSocket[] = [];
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
   close = vi.fn();
 
-  constructor(readonly url: string) {}
+  constructor(readonly url: string) {
+    MockRoomWebSocket.instances.push(this);
+  }
 }
 
 beforeEach(() => {
+  MockRoomWebSocket.instances = [];
   vi.stubGlobal("WebSocket", MockRoomWebSocket);
 });
 
 afterEach(() => {
+  localStorage.clear();
   delete (globalThis as { __GUANDAN_AI_PAUSE_MS__?: number }).__GUANDAN_AI_PAUSE_MS__;
   delete (globalThis as { __GUANDAN_AI_LEAD_PAUSE_MS__?: number }).__GUANDAN_AI_LEAD_PAUSE_MS__;
   delete (globalThis as { __GUANDAN_BOMB_EFFECT_MS__?: number }).__GUANDAN_BOMB_EFFECT_MS__;
   delete (globalThis as { __GUANDAN_FLAG_LOWER_MS__?: number }).__GUANDAN_FLAG_LOWER_MS__;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+it("restores a stored room and reconnects with the same player session after startup", async () => {
+  localStorage.setItem("guandanRoomId", "room-1");
+  localStorage.setItem("guandanPlayerId", "player-1");
+  localStorage.setItem("guandanSeat", "2");
+  localStorage.setItem("guandanPlayerName", "北方玩家");
+  const room = createRoom({ humanSeat: 2, playerId: "player-1", players: [
+    { seat: 0, name: "AI 0", isAI: true, handCount: 27, team: 0 },
+    { seat: 1, name: "AI 1", isAI: true, handCount: 27, team: 1 },
+    { seat: 2, name: "北方玩家", isAI: false, handCount: 3, team: 0 },
+    { seat: 3, name: "AI 3", isAI: true, handCount: 27, team: 1 },
+  ] });
+  mockFetchQueue([{ room }, { plans: [] }]);
+
+  render(<App />);
+
+  expect(await screen.findByText("北 · 北方玩家")).toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledWith("/api/rooms/room-1?playerId=player-1");
+  expect(MockRoomWebSocket.instances[0].url).toBe(`ws://${window.location.host}/ws/rooms/room-1?playerId=player-1`);
+});
+
+it("leaves the room by clearing the stored session and returning to the lobby", async () => {
+  localStorage.setItem("guandanRoomId", "room-1");
+  localStorage.setItem("guandanPlayerId", "player-1");
+  localStorage.setItem("guandanSeat", "0");
+  localStorage.setItem("guandanPlayerName", "玩家");
+  mockFetchQueue([{ room: createRoom() }, { plans: [] }]);
+
+  render(<App />);
+  await screen.findByText("南 · 玩家");
+  fireEvent.click(screen.getByRole("button", { name: "离开房间" }));
+
+  expect(screen.getByText("点击开房后，系统会发牌并用 AI 补齐西、北、东三个座位。")).toBeInTheDocument();
+  expect(localStorage.length).toBe(0);
+  expect(MockRoomWebSocket.instances[0].close).toHaveBeenCalledTimes(1);
 });
 
 it("defaults new rooms to rank 2 and does not render the game information sidebar", async () => {

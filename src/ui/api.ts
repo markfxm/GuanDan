@@ -1,6 +1,7 @@
 import type { Card, GameRank } from "../engine/cards";
 import type { CardGroup } from "../engine/groups";
 import type { ScoredPlan } from "../engine/scorer";
+import { persistPublicRoomSession } from "./session";
 
 const API_BASE_URL = "";
 
@@ -97,6 +98,13 @@ type RoomResponse = {
   playerId?: string;
 };
 
+export class ApiRequestError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
+
 export async function dealHand(rank: GameRank): Promise<Card[]> {
   const data = await postJson<DealResponse>("/api/deal", { rank });
 
@@ -119,7 +127,23 @@ export async function generatePlans(cards: Card[], rank: GameRank, count = 5): P
 
 export async function createGameRoom(rank: GameRank, pendingTributeItems: TributeItem[] = []): Promise<PublicRoom> {
   const data = await postJson<RoomResponse>("/api/rooms", { rank, pendingTributeItems });
-  return normalizePublicRoom(data.room, data.playerId);
+  const room = normalizePublicRoom(data.room, data.playerId);
+  persistPublicRoomSession(room);
+  return room;
+}
+
+export async function joinGameRoom(roomId: string, name: string, preferredSeat?: Seat): Promise<PublicRoom> {
+  const data = await postJson<RoomResponse>(`/api/rooms/${roomId}/join`, { name, preferredSeat });
+  const room = normalizePublicRoom(data.room, data.playerId);
+  persistPublicRoomSession(room);
+  return room;
+}
+
+export async function getGameRoom(roomId: string, playerId: string): Promise<PublicRoom> {
+  const data = await getJson<RoomResponse>(`/api/rooms/${encodeURIComponent(roomId)}?playerId=${encodeURIComponent(playerId)}`);
+  const room = normalizePublicRoom(data.room, playerId);
+  persistPublicRoomSession(room);
+  return room;
 }
 
 export async function playRoomCards(roomId: string, playerId: string, cardIds: string[]): Promise<PublicRoom> {
@@ -178,11 +202,25 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   });
 
   if (!response.ok) {
-    const statusText = response.statusText ? ` ${response.statusText}` : "";
-    const payload = await response.json().catch(() => undefined) as { error?: unknown } | undefined;
-    const detail = typeof payload?.error === "string" ? `: ${payload.error}` : "";
-    throw new Error(`API request failed: ${response.status}${statusText}${detail}`);
+    throw await createApiRequestError(response);
   }
 
   return response.json() as Promise<T>;
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`);
+
+  if (!response.ok) {
+    throw await createApiRequestError(response);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+async function createApiRequestError(response: Response): Promise<ApiRequestError> {
+  const statusText = response.statusText ? ` ${response.statusText}` : "";
+  const payload = await response.json().catch(() => undefined) as { error?: unknown } | undefined;
+  const detail = typeof payload?.error === "string" ? `: ${payload.error}` : "";
+  return new ApiRequestError(response.status, `API request failed: ${response.status}${statusText}${detail}`);
 }

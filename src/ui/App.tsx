@@ -5,8 +5,9 @@ import { RANKS, type Card, type GameRank, type Suit } from "../engine/cards";
 import type { ScoredPlan } from "../engine/scorer";
 import { CardFace } from "./CardFace";
 import { groupCardsForHandDisplay } from "./handLayout";
-import { createGameRoom, generatePlans, passRoomTurn, playRoomCards, runRoomAiStep, submitOpeningTribute, type PublicRoom, type Seat, type TrickPlay } from "./api";
-import { useRoomSocket } from "./useRoomSocket";
+import { ApiRequestError, createGameRoom, generatePlans, getGameRoom, passRoomTurn, playRoomCards, runRoomAiStep, submitOpeningTribute, type PublicRoom, type Seat, type TrickPlay } from "./api";
+import { clearStoredRoomSession, persistPublicRoomSession, readStoredRoomSession } from "./session";
+import { useRoomSocket, type RoomSocketState } from "./useRoomSocket";
 import { draggedCardIds, ManualGroupTray, setDraggedCardIds } from "./ManualGroupTray";
 import {
   addCardToManualGroup,
@@ -46,6 +47,7 @@ export function App() {
   const [plans, setPlans] = useState<ScoredPlan[]>([]);
   const [selectedPlanId, setSelectedPlanId] = useState<string>();
   const [status, setStatus] = useState("开房后 AI 会自动补齐空位。");
+  const [socketState, setSocketState] = useState<RoomSocketState>("idle");
   const [loading, setLoading] = useState(false);
   const [countdownSeconds, setCountdownSeconds] = useState<number>();
   const [tributeCountdownSeconds, setTributeCountdownSeconds] = useState<number>();
@@ -97,7 +99,57 @@ export function App() {
     setShowSettlementDialog(nextRoom.status === "finished");
   }, []);
 
-  useRoomSocket(room?.id, room?.playerId, handleRoomSocketUpdate);
+  const handleSocketStateChange = useCallback((nextState: RoomSocketState) => {
+    setSocketState(nextState);
+  }, []);
+
+  useRoomSocket(room?.id, room?.playerId, handleRoomSocketUpdate, handleSocketStateChange);
+
+  useEffect(() => {
+    const storedSession = readStoredRoomSession();
+    if (storedSession === undefined) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    setStatus("正在恢复房间...");
+    void getGameRoom(storedSession.roomId, storedSession.playerId)
+      .then((nextRoom) => {
+        if (cancelled) {
+          return;
+        }
+
+        persistPublicRoomSession(nextRoom);
+        setRoom(nextRoom);
+        setGameRank(nextRoom.rank);
+        setSelectedCardIds([]);
+        setShowSettlementDialog(nextRoom.status === "finished");
+        setStatus(openingTributeText(nextRoom) ?? statusForRoom(nextRoom));
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return;
+        }
+
+        if (error instanceof ApiRequestError && [400, 403, 404].includes(error.status)) {
+          clearStoredRoomSession();
+          setStatus("房间已失效，请重新开房。");
+          return;
+        }
+
+        setStatus("恢复房间失败，请稍后重试。");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (room !== undefined) {
+      persistPublicRoomSession(room);
+    }
+  }, [room]);
 
   useEffect(() => {
     if (room === undefined) {
@@ -279,6 +331,15 @@ export function App() {
     });
   }
 
+  function handleLeaveRoom() {
+    clearStoredRoomSession();
+    setRoom(undefined);
+    setSelectedCardIds([]);
+    setPlans([]);
+    setShowSettlementDialog(false);
+    setStatus("已离开房间。");
+  }
+
   async function handleNextRoom() {
     const nextRank = room?.settlement?.nextRank ?? gameRank;
     const pendingTributeItems = room?.settlement?.tribute.status === "pending" ? room.settlement.tribute.items : [];
@@ -386,7 +447,7 @@ export function App() {
           <h1>掼蛋牌桌</h1>
         </div>
         <div className="header-status">
-          <p className="status-line">{status}</p>
+          <p className="status-line">{socketState === "reconnecting" ? "Disconnected, trying to reconnect..." : status}</p>
         </div>
       </header>
 
@@ -419,6 +480,11 @@ export function App() {
                 <DoorOpen aria-hidden="true" size={18} />
                 开房
               </button>
+              {room !== undefined && (
+                <button type="button" onClick={handleLeaveRoom} disabled={loading}>
+                  离开房间
+                </button>
+              )}
               <button
                 className={`replay-button${replayAvailable ? " ready" : ""}`}
                 data-testid="replay-button"
