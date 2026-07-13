@@ -275,7 +275,7 @@ it("keeps current trick plays visible and lets next step advance one AI action",
   fireEvent.click(screen.getByLabelText("黑桃A 1"));
   fireEvent.click(screen.getByRole("button", { name: "出牌" }));
 
-  expect(await screen.findByText("等待西位出牌，可停留观看或点下一步。")).toBeInTheDocument();
+  expect(await screen.findByText("西方玩家正在行动。")).toBeInTheDocument();
   expect(screen.getByText("南本轮出牌")).toBeInTheDocument();
   expect(screen.getByLabelText("黑桃A 1")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "下一步" })).toBeInTheDocument();
@@ -365,7 +365,7 @@ it("does not request new human plans after passing into an AI turn", async () =>
   expect(planRequestCount()).toBe(1);
 
   fireEvent.click(screen.getByRole("button", { name: "过牌" }));
-  await screen.findByText("等待西位出牌，可停留观看或点下一步。");
+  await screen.findByText("西方玩家正在行动。");
   await new Promise((resolve) => window.setTimeout(resolve, 20));
 
   expect(planRequestCount()).toBe(1);

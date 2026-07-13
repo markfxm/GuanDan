@@ -5,7 +5,7 @@ import { createDeck, RANKS, SUITS, type Card, type GameRank, type JokerRank, typ
 import { generatePlans } from "../engine/planner";
 import { scorePlans } from "../engine/scorer";
 import { dealHand, validateHand } from "../engine/validation";
-import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, type RoomState, type Seat } from "../game/room";
+import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilNextHumanTurn, type RoomState, type Seat } from "../game/room";
 import type { TributeItem } from "../game/settlement";
 import type { WebSocket } from "ws";
 
@@ -239,6 +239,7 @@ export function buildApi() {
     player.name = session.name;
     player.isAI = false;
     onlineRoom.sessions.set(session.playerId, session);
+    runAiUntilNextHumanTurn(onlineRoom.room);
     broadcastRoom(onlineRoom);
 
     return {
@@ -310,6 +311,7 @@ export function buildApi() {
 
     try {
       playCards(room, session.seat, request.body.cardIds);
+      runAiUntilNextHumanTurn(room);
       broadcastRoom(onlineRoom);
       return { room: getPublicRoom(room, session.seat, { ensurePlans: false }) };
     } catch (error) {
@@ -335,6 +337,7 @@ export function buildApi() {
 
     try {
       advanceOpeningTribute(room, session.seat, request.body.cardIds ?? []);
+      runAiUntilNextHumanTurn(room);
       broadcastRoom(onlineRoom);
       return { room: getPublicRoom(room, session.seat, { ensurePlans: false }) };
     } catch (error) {
@@ -360,6 +363,7 @@ export function buildApi() {
 
     try {
       passTurn(room, session.seat);
+      runAiUntilNextHumanTurn(room);
       broadcastRoom(onlineRoom);
       return { room: getPublicRoom(room, session.seat, { ensurePlans: false }) };
     } catch (error) {
@@ -375,9 +379,9 @@ export function buildApi() {
     const room = onlineRoom.room;
 
     try {
-      runAiUntilHumanTurn(room, 0);
+      runAiUntilNextHumanTurn(room);
       broadcastRoom(onlineRoom);
-      return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
+      return { room: getPublicRoom(room, defaultPerspectiveSeat(onlineRoom), { ensurePlans: false }) };
     } catch (error) {
       request.log.error(error, "AI turn failed");
       return reply.code(409).send({ error: error instanceof Error ? error.message : "AI turn failed." });
@@ -394,7 +398,7 @@ export function buildApi() {
     try {
       runAiStep(room);
       broadcastRoom(onlineRoom);
-      return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
+      return { room: getPublicRoom(room, defaultPerspectiveSeat(onlineRoom), { ensurePlans: false }) };
     } catch (error) {
       request.log.error(error, "AI step failed");
       return reply.code(409).send({ error: error instanceof Error ? error.message : "AI step failed." });
@@ -424,6 +428,10 @@ function selectAvailableSeat(onlineRoom: OnlineRoom, preferredSeat: Seat | undef
 
 function findSessionForSeat(onlineRoom: OnlineRoom, seat: Seat): PlayerSession | undefined {
   return [...onlineRoom.sessions.values()].find((session) => session.seat === seat);
+}
+
+function defaultPerspectiveSeat(onlineRoom: OnlineRoom): Seat {
+  return [...onlineRoom.sessions.values()][0]?.seat ?? 0;
 }
 
 function isPlayerActionBody<T extends ActionBody>(body: T | undefined): body is T & { playerId: string } {

@@ -76,9 +76,9 @@ export function App() {
   const tributePending = room?.openingTribute?.status === "pending";
   const tributeRevealBlocking = false;
   const roomReadyForPlay = !tributePending && !tributeRevealBlocking;
-  const humanTributeTurn = tributePending && room?.openingTribute?.activeSeat === 0 && !tributeRevealBlocking;
-  const humanTurn = room?.currentTurn === 0 && room.status === "playing" && roomReadyForPlay;
-  const aiTurn = room !== undefined && room.status === "playing" && roomReadyForPlay && room.currentTurn !== 0 && room.players.find((player) => player.seat === room.currentTurn)?.isAI === true;
+  const humanTributeTurn = tributePending && room?.openingTribute?.activeSeat === room?.humanSeat && !tributeRevealBlocking;
+  const humanTurn = room?.currentTurn === room?.humanSeat && room?.status === "playing" && roomReadyForPlay;
+  const aiTurn = room !== undefined && room.status === "playing" && roomReadyForPlay && room.players.find((player) => player.seat === room.currentTurn)?.isAI === true;
   const replayAvailable = room !== undefined && room.status === "finished" && replayStepCount(room) > 0;
 
   const applyRealtimeRoomUpdate = useCallback((previousRoom: PublicRoom, nextRoom: PublicRoom) => {
@@ -201,7 +201,7 @@ export function App() {
   }, [room?.humanHand, room]);
 
   const handleNextStep = useCallback(async () => {
-    if (room === undefined || room.status !== "playing" || room.currentTurn === 0) {
+    if (room === undefined || room.status !== "playing" || room.players.find((player) => player.seat === room.currentTurn)?.isAI !== true) {
       return;
     }
 
@@ -270,7 +270,7 @@ export function App() {
 
   useEffect(() => {
     const tribute = room?.openingTribute;
-    if (loading || tribute?.status !== "pending" || tribute.activeSeat === 0) {
+    if (loading || tribute?.status !== "pending" || tribute.activeSeat === room?.humanSeat) {
       return;
     }
 
@@ -1151,7 +1151,7 @@ function statusForRoom(room: PublicRoom): string {
     return "本局结束。";
   }
 
-  if (room.currentTurn === 0) {
+  if (room.currentTurn === room.humanSeat) {
     return "轮到你行动。";
   }
 
@@ -1159,7 +1159,9 @@ function statusForRoom(room: PublicRoom): string {
     return `等待${PLAYER_NAMES[room.currentTurn]}首出牌`;
   }
 
-  return `等待${SEAT_NAMES[room.currentTurn]}位出牌，可停留观看或点下一步。`;
+  return room.players.find((player) => player.seat === room.currentTurn)?.isAI === true
+    ? `${PLAYER_NAMES[room.currentTurn]}正在行动。`
+    : `等待${SEAT_NAMES[room.currentTurn]}位出牌。`;
 }
 
 function aiPauseMs(): number {

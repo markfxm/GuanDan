@@ -1,4 +1,4 @@
-import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, selectSafeAiLeadFallback, type Seat } from "../../src/game/room";
+import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, runAiUntilNextHumanTurn, selectSafeAiLeadFallback, type Seat } from "../../src/game/room";
 import { createDeck, isHeartRankWild, rankStrength, type Card, type GameRank, type Rank, type Suit } from "../../src/engine/cards";
 import { measurePlanQuality } from "../../src/engine/planQuality";
 
@@ -747,6 +747,57 @@ it("runs AI seats until the human needs to act", () => {
 
   expect(room.currentTurn).toBe(0);
   expect(room.actionLog.length).toBeGreaterThan(0);
+});
+
+it("stops mixed-room AI processing when the next turn belongs to a human", () => {
+  const room = createRoom({ rank: "10", seed: 1 });
+  room.players[1].isAI = false;
+  room.players[1].name = "West";
+  room.currentTurn = 1;
+
+  const actionCount = room.actionLog.length;
+  runAiUntilNextHumanTurn(room);
+
+  expect(room.currentTurn).toBe(1);
+  expect(room.actionLog).toHaveLength(actionCount);
+});
+
+it("runs AI turns after a human action until the next human seat", () => {
+  const room = createRoom({ rank: "10", seed: 1 });
+  room.players[1].isAI = false;
+  room.players[1].name = "West";
+
+  playCards(room, 0, [room.hands[0][0].id]);
+  runAiUntilNextHumanTurn(room);
+
+  expect(room.currentTurn).toBe(1);
+  expect(room.playHistory.some((play) => play.seat === 3)).toBe(true);
+  expect(room.playHistory.some((play) => play.seat === 2)).toBe(true);
+  expect(room.playHistory.some((play) => play.seat === 1)).toBe(false);
+});
+
+it("never lets the AI step act for a human seat", () => {
+  const room = createRoom({ rank: "10", seed: 1 });
+  room.players[1].isAI = false;
+  room.currentTurn = 1;
+  const actionCount = room.actionLog.length;
+
+  runAiStep(room);
+
+  expect(room.currentTurn).toBe(1);
+  expect(room.actionLog).toHaveLength(actionCount);
+});
+
+it("continues AI processing when every remaining seat is AI", () => {
+  const room = createRoom({ rank: "10", seed: 1 });
+  room.players.forEach((player) => {
+    player.isAI = true;
+  });
+  room.currentTurn = 0;
+
+  runAiUntilNextHumanTurn(room);
+
+  expect(room.status).toBe("finished");
 });
 
 it("settles round when three players have finished and appends the remaining seat", () => {

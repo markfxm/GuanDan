@@ -1255,6 +1255,51 @@ export function runAiUntilHumanTurn(room: RoomState, humanSeat: Seat = 0): void 
   }
 }
 
+export function runAiUntilNextHumanTurn(room: RoomState): void {
+  let guard = 0;
+
+  while (room.status === "playing") {
+    const pendingTribute = room.openingTribute?.status === "pending";
+    const activeSeat = pendingTribute ? room.openingTribute?.activeSeat : room.currentTurn;
+    const activePlayer = room.players.find((player) => player.seat === activeSeat);
+
+    if (activePlayer?.isAI !== true) {
+      return;
+    }
+
+    const before = aiProgressSnapshot(room);
+    runAiStep(room);
+    guard += 1;
+
+    if (room.status === "playing" && before === aiProgressSnapshot(room)) {
+      throw new Error("AI_TURN_NO_PROGRESS");
+    }
+
+    if (guard >= 512 && room.status === "playing") {
+      throw new Error("AI_TURN_LIMIT_REACHED");
+    }
+  }
+}
+
+function aiProgressSnapshot(room: RoomState): string {
+  return JSON.stringify({
+    status: room.status,
+    currentTurn: room.currentTurn,
+    finishOrder: room.finishOrder,
+    openingTribute: room.openingTribute === undefined
+      ? undefined
+      : {
+          status: room.openingTribute.status,
+          phase: room.openingTribute.phase,
+          activeSeat: room.openingTribute.activeSeat,
+          activeItemIndex: room.openingTribute.activeItemIndex,
+          handCounts: room.players.map((player) => room.hands[player.seat].length),
+        },
+    handCounts: room.players.map((player) => room.hands[player.seat].length),
+    playHistoryLength: room.playHistory.length,
+  });
+}
+
 function shuffledDeck(seed: number): Card[] {
   const deck = createDeck();
   let state = seed >>> 0;

@@ -211,13 +211,39 @@ it("plays, passes, and advances AI through room APIs", async () => {
     });
     expect(played.statusCode).toBe(200);
     expect(played.json().room.humanHand.map((card: { id: string }) => card.id)).not.toContain(cardId);
-    expect(played.json().room.currentTurn).toBe(3);
-    expect(played.json().room.trick.plays).toHaveLength(1);
+    expect(played.json().room.currentTurn).toBe(0);
+    expect(played.json().room.trick.plays.length).toBeGreaterThanOrEqual(2);
 
     const ai = await app.inject({ method: "POST", url: `/api/rooms/${room.id}/ai-step`, payload: {} });
     expect(ai.statusCode).toBe(200);
     expect(ai.json().room.players).toHaveLength(4);
     expect(ai.json().room.trick.plays.length).toBeGreaterThanOrEqual(2);
+  });
+}, 15000);
+
+it("automatically advances AI seats after a human play until the next human turn", async () => {
+  await withApp(async (app) => {
+    const created = await app.inject({ method: "POST", url: "/api/rooms", payload: { rank: "10", seed: 1 } });
+    const roomId = created.json().room.id;
+    const joined = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${roomId}/join`,
+      payload: { name: "West", preferredSeat: 1 },
+    });
+    const cardId = created.json().room.humanHand[0].id;
+
+    const played = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${roomId}/play`,
+      payload: { playerId: created.json().playerId, cardIds: [cardId] },
+    });
+    const publicRoom = played.json().room;
+
+    expect(played.statusCode).toBe(200);
+    expect(publicRoom.currentTurn).toBe(1);
+    expect(publicRoom.playHistory.some((play: { seat: number }) => play.seat === 3)).toBe(true);
+    expect(publicRoom.playHistory.some((play: { seat: number }) => play.seat === 2)).toBe(true);
+    expect(publicRoom.playHistory.some((play: { seat: number }) => play.seat === joined.json().seat)).toBe(false);
   });
 }, 15000);
 

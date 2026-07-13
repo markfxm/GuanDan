@@ -41,7 +41,7 @@ export function LobbyScreen({
           value={playerName}
           onChange={(event) => onPlayerNameChange(event.target.value)}
           placeholder="例如：小王"
-          autoComplete="nickname"
+          autoComplete="off"
         />
       </div>
 
