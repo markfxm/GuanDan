@@ -1,13 +1,12 @@
 import fastifyWebsocket from "@fastify/websocket";
-import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { createDeck, RANKS, SUITS, type Card, type GameRank, type JokerRank, type Rank } from "../engine/cards";
 import { generatePlans } from "../engine/planner";
 import { scorePlans } from "../engine/scorer";
 import { dealHand, validateHand } from "../engine/validation";
-import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilNextHumanTurn, type RoomState, type Seat } from "../game/room";
+import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilNextHumanTurn, type Seat } from "../game/room";
+import { broadcastRoom, connectRoomSocket, OnlineRoomRegistry } from "./onlineRooms";
 import type { TributeItem } from "../game/settlement";
-import type { WebSocket } from "ws";
 
 type DealBody = {
   rank?: unknown;
@@ -64,28 +63,10 @@ const VALID_RANKS = new Set<Rank>(RANKS);
 const VALID_SUITS = new Set(SUITS);
 const CANONICAL_CARDS_BY_ID = new Map(createDeck().map((card) => [card.id, card]));
 
-export type PlayerSession = {
-  playerId: string;
-  name: string;
-  seat: Seat;
-  connected: boolean;
-};
-
-export type OnlineRoom = {
-  room: RoomState;
-  sessions: Map<string, PlayerSession>;
-  sockets: Set<RoomSocket>;
-};
-
-type RoomSocket = {
-  playerId: string;
-  socket: WebSocket;
-};
-
 export function buildApi() {
   const app = Fastify({ logger: false });
   app.register(fastifyWebsocket);
-  const onlineRooms = new Map<string, OnlineRoom>();
+  const onlineRooms = new OnlineRoomRegistry();
 
   app.addHook("onRequest", async (request, reply) => {
     const origin = request.headers.origin;
@@ -198,14 +179,13 @@ export function buildApi() {
     }
 
     const room = createRoom({ rank: rank as GameRank, seed, pendingTributeItems });
-    const session = createPlayerSession(typeof name === "string" ? name.trim() : room.players[0].name, 0);
+    const { onlineRoom, session } = onlineRooms.create(room, typeof name === "string" ? name.trim() : room.players[0].name, 0);
     room.players[0].name = session.name;
     room.players[0].isAI = false;
-    onlineRooms.set(room.id, { room, sessions: new Map([[session.playerId, session]]), sockets: new Set() });
     return {
       playerId: session.playerId,
       seat: session.seat,
-      room: getPublicRoom(room, session.seat, { ensurePlans: false }),
+      room: getPublicRoom(onlineRoom.room, session.seat, { ensurePlans: false }),
     };
   });
 
@@ -225,20 +205,14 @@ export function buildApi() {
       return reply.code(400).send({ error: "Preferred seat must be valid." });
     }
 
-    const seat = selectAvailableSeat(onlineRoom, preferredSeat);
-    if (seat === undefined) {
+    const joined = onlineRooms.join(onlineRoom, name.trim(), preferredSeat);
+    if (joined === undefined) {
       return reply.code(409).send({ error: "No available seats." });
     }
 
-    const player = onlineRoom.room.players.find((candidate) => candidate.seat === seat);
-    if (player === undefined) {
-      return reply.code(500).send({ error: "Room player is missing." });
-    }
-
-    const session = createPlayerSession(name.trim(), seat);
+    const { player, session } = joined;
     player.name = session.name;
     player.isAI = false;
-    onlineRoom.sessions.set(session.playerId, session);
     runAiUntilNextHumanTurn(onlineRoom.room);
     broadcastRoom(onlineRoom);
 
@@ -256,8 +230,8 @@ export function buildApi() {
     }
 
     const session = request.query.playerId === undefined
-      ? findSessionForSeat(onlineRoom, 0)
-      : onlineRoom.sessions.get(request.query.playerId);
+      ? onlineRooms.findSessionForSeat(onlineRoom, 0)
+      : onlineRooms.findSession(onlineRoom, request.query.playerId);
     if (session === undefined) {
       return reply.code(404).send({ error: "Player session not found." });
     }
@@ -269,7 +243,9 @@ export function buildApi() {
     instance.get<{ Params: { id: string }; Querystring: RoomQuery }>("/ws/rooms/:id", { websocket: true }, (socket, request) => {
       const onlineRoom = onlineRooms.get(request.params.id);
       const playerId = request.query.playerId;
-      const session = playerId === undefined ? undefined : onlineRoom?.sessions.get(playerId);
+      const session = playerId === undefined || onlineRoom === undefined
+        ? undefined
+        : onlineRooms.findSession(onlineRoom, playerId);
 
       if (onlineRoom === undefined) {
         socket.close(1008, "Room not found.");
@@ -281,15 +257,7 @@ export function buildApi() {
         return;
       }
 
-      const connection = { playerId: session.playerId, socket } satisfies RoomSocket;
-      onlineRoom.sockets.add(connection);
-      session.connected = true;
-      sendRoomUpdate(connection, onlineRoom);
-
-      socket.on("close", () => {
-        onlineRoom.sockets.delete(connection);
-        session.connected = [...onlineRoom.sockets].some((candidate) => candidate.playerId === session.playerId);
-      });
+      connectRoomSocket(onlineRoom, session, socket);
     });
   });
 
@@ -300,11 +268,11 @@ export function buildApi() {
     }
     const room = onlineRoom.room;
 
-    if (!isPlayerActionBody(request.body) || !Array.isArray(request.body.cardIds) || !request.body.cardIds.every((id) => typeof id === "string")) {
+    if (!isPlayerActionBody(request.body) || !isCardIdList(request.body.cardIds)) {
       return reply.code(400).send({ error: "playerId and cardIds are required." });
     }
 
-    const session = onlineRoom.sessions.get(request.body.playerId);
+    const session = onlineRooms.findSession(onlineRoom, request.body.playerId);
     if (session === undefined) {
       return reply.code(403).send({ error: "Invalid player session." });
     }
@@ -330,7 +298,7 @@ export function buildApi() {
       return reply.code(400).send({ error: "playerId and cardIds must be valid." });
     }
 
-    const session = onlineRoom.sessions.get(request.body.playerId);
+    const session = onlineRooms.findSession(onlineRoom, request.body.playerId);
     if (session === undefined) {
       return reply.code(403).send({ error: "Invalid player session." });
     }
@@ -356,7 +324,7 @@ export function buildApi() {
       return reply.code(400).send({ error: "playerId is required." });
     }
 
-    const session = onlineRoom.sessions.get(request.body.playerId);
+    const session = onlineRooms.findSession(onlineRoom, request.body.playerId);
     if (session === undefined) {
       return reply.code(403).send({ error: "Invalid player session." });
     }
@@ -381,7 +349,7 @@ export function buildApi() {
     try {
       runAiUntilNextHumanTurn(room);
       broadcastRoom(onlineRoom);
-      return { room: getPublicRoom(room, defaultPerspectiveSeat(onlineRoom), { ensurePlans: false }) };
+      return { room: getPublicRoom(room, onlineRooms.defaultPerspectiveSeat(onlineRoom), { ensurePlans: false }) };
     } catch (error) {
       request.log.error(error, "AI turn failed");
       return reply.code(409).send({ error: error instanceof Error ? error.message : "AI turn failed." });
@@ -398,7 +366,7 @@ export function buildApi() {
     try {
       runAiStep(room);
       broadcastRoom(onlineRoom);
-      return { room: getPublicRoom(room, defaultPerspectiveSeat(onlineRoom), { ensurePlans: false }) };
+      return { room: getPublicRoom(room, onlineRooms.defaultPerspectiveSeat(onlineRoom), { ensurePlans: false }) };
     } catch (error) {
       request.log.error(error, "AI step failed");
       return reply.code(409).send({ error: error instanceof Error ? error.message : "AI step failed." });
@@ -408,60 +376,12 @@ export function buildApi() {
   return app;
 }
 
-function createPlayerSession(name: string, seat: Seat): PlayerSession {
-  return {
-    playerId: randomUUID(),
-    name,
-    seat,
-    connected: false,
-  };
-}
-
-function selectAvailableSeat(onlineRoom: OnlineRoom, preferredSeat: Seat | undefined): Seat | undefined {
-  const claimedSeats = new Set([...onlineRoom.sessions.values()].map((session) => session.seat));
-  const candidates: Seat[] = preferredSeat === undefined
-    ? [0, 1, 2, 3]
-    : [preferredSeat, ...([0, 1, 2, 3] as Seat[]).filter((seat) => seat !== preferredSeat)];
-
-  return candidates.find((seat) => !claimedSeats.has(seat));
-}
-
-function findSessionForSeat(onlineRoom: OnlineRoom, seat: Seat): PlayerSession | undefined {
-  return [...onlineRoom.sessions.values()].find((session) => session.seat === seat);
-}
-
-function defaultPerspectiveSeat(onlineRoom: OnlineRoom): Seat {
-  return [...onlineRoom.sessions.values()][0]?.seat ?? 0;
-}
-
 function isPlayerActionBody<T extends ActionBody>(body: T | undefined): body is T & { playerId: string } {
   return typeof body?.playerId === "string" && body.playerId.length > 0 && body.seat === undefined;
 }
 
 function isCardIdList(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((id) => typeof id === "string");
-}
-
-export function broadcastRoom(onlineRoom: OnlineRoom): void {
-  for (const connection of onlineRoom.sockets) {
-    sendRoomUpdate(connection, onlineRoom);
-  }
-}
-
-function sendRoomUpdate(connection: RoomSocket, onlineRoom: OnlineRoom): void {
-  const session = onlineRoom.sessions.get(connection.playerId);
-  if (session === undefined || connection.socket.readyState !== 1) {
-    return;
-  }
-
-  try {
-    connection.socket.send(JSON.stringify({
-      type: "room:update",
-      room: getPublicRoom(onlineRoom.room, session.seat, { ensurePlans: false }),
-    }));
-  } catch {
-    connection.socket.close();
-  }
 }
 
 function isAllowedOrigin(origin: string): boolean {
