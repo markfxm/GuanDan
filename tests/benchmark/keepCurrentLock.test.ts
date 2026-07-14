@@ -28,6 +28,11 @@ function expectGeneratorFailure(args: string[], message: string): void {
   expect(() => execFileSync(process.execPath, [tsxCli, generatorPath, ...args], { cwd: process.cwd(), stdio: "pipe" })).toThrow(message);
 }
 
+function expectGeneratorFailureAt(worktree: string, args: string[], message: string): void {
+  const worktreeGenerator = path.join(worktree, "scripts", "generateD0KeepCurrentFixtures.ts");
+  expect(() => execFileSync(process.execPath, [tsxCli, worktreeGenerator, ...args], { cwd: worktree, stdio: "pipe" })).toThrow(message);
+}
+
 describe("D0 fixture and unified adapter lock", () => {
   it("has complete provenance and stable fixture hashes", () => {
     const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as D0KeepCurrentFixture;
@@ -147,6 +152,41 @@ describe("D0 fixture and unified adapter lock", () => {
       }
     } finally {
       rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects generator, canonicalizer, or type changes until the fixture is regenerated", () => {
+    const parent = mkdtempSync(path.join(os.tmpdir(), "d0-generator-code-dirty-"));
+    const dirtyWorktree = path.join(parent, "worktree");
+    const fixtureCopy = path.join(parent, "fixture.json");
+    const fixtureText = readFileSync(fixturePath, "utf8");
+    writeFileSync(fixtureCopy, fixtureText);
+    execFileSync("git", ["worktree", "add", "--detach", dirtyWorktree, "HEAD"], { cwd: process.cwd(), stdio: "pipe" });
+    const paths = [
+      "scripts/generateD0KeepCurrentFixtures.ts",
+      "tests/ai/d0FixtureCanonicalizer.ts",
+      "tests/ai/d0FixtureTypes.ts",
+    ];
+    try {
+      for (const relativePath of paths) {
+        const absolutePath = path.join(dirtyWorktree, relativePath);
+        writeFileSync(absolutePath, `${readFileSync(absolutePath, "utf8")}\n// provenance mutation\n`);
+        try {
+          expectGeneratorFailureAt(dirtyWorktree, [
+            "--source-worktree", sourceWorktree,
+            "--source-commit", sourceCommit,
+            "--output", fixtureCopy,
+            "--generator-version", "d0-fixture-v1",
+            "--check-only",
+          ], "D0_FIXTURE_PROVENANCE_INVALID");
+          expect(readFileSync(fixtureCopy, "utf8")).toBe(fixtureText);
+        } finally {
+          execFileSync("git", ["-C", dirtyWorktree, "checkout", "--", relativePath], { cwd: process.cwd(), stdio: "pipe" });
+        }
+      }
+    } finally {
+      execFileSync("git", ["worktree", "remove", "--force", dirtyWorktree], { cwd: process.cwd(), stdio: "pipe" });
+      rmSync(parent, { recursive: true, force: true });
     }
   });
 

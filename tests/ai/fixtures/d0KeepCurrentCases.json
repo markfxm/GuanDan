@@ -2,10 +2,11 @@
   "schemaVersion": "d0-keep-current-fixture-v1",
   "sourceCommit": "e2a20e18f8e5c0871db38ad69426262e43766ce1",
   "sourceTag": "ai-benchmark-d0-baseline",
-  "generatorCommit": "329934d731e7bbacdf2edc3fc68c31640c3a5ec6",
+  "generatorCommit": "1963d7fe9921996b6fba7cbd546346b3f6270cc8",
   "generatorVersion": "d0-fixture-v1",
+  "generatorCodeTreeSha256": "8e5bbe872c460a7cffc0be6b859e95bc23a4ff63c1ab34cd6622da24e3bae1c3",
   "inputSha256": "725358f1fc3e3907221128e91015e8f15eded68c5ea790c00bf843604c194906",
-  "outputSha256": "a969ca54b3cffd8e4a07018bac876fdb1d204c7246f59c7557decce02abe22a6",
+  "outputSha256": "87f62e6ba533a7b0d8d364298085fa8b050291ee450e9e6de160b6a66043e70e",
   "cases": [
     {
       "caseId": "lead-single",
