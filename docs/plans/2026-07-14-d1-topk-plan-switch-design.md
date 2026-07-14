@@ -1,6 +1,6 @@
 # D1 Top-K candidatePlans 动态计划切换设计
 
-状态：设计阶段，待评审；本轮不实施 production 代码。
+状态：设计修订版，决策已批准；本轮不实施 production 代码。
 
 基线：D0 `e2a20e18f8e5c0871db38ad69426262e43766ce1` / `ai-benchmark-d0-baseline`；D0.1 测试编排 `61d7765c31fff731500f613f92cced977bb9d5cf`。
 
@@ -31,7 +31,8 @@
 
 | 文件 | 未来职责 |
 | --- | --- |
-| `src/ai/contracts.ts` | 定义只读 `PlanSelectionContext`、切换状态和版本化 runtime 字段 |
+| `src/ai/planning/planSelectionContracts.ts` | 定义 planning 内部只读 `PlanSelectionContext`、评分 breakdown 和选择结果，避免顶层 contracts 反向依赖 analysis/policy |
+| `src/ai/contracts.ts` | 只定义版本化 runtime 字段，不承载 planning 内部上下文 |
 | `src/ai/planning/planManager.ts` | 保存候选计划和切换状态，执行强制有效性检查，调用纯选择器 |
 | `src/ai/planning/planEvaluator.ts` | 复用现有 `PlanMetrics`、`HandAnalysis`、`PowerGroupPolicyIndex`，计算动态计划分数 |
 | `src/ai/aiDecisionEngine.ts` | 构造公开上下文，先选计划，再生成和评价动作 |
@@ -47,7 +48,7 @@
 ### PlanManager
 
 - 持有 `candidatePlans`、`activePlanId` 和切换状态。
-- 在每次 decision 前验证当前计划覆盖、牌组合法性、硬 policy 和当前可继续性。
+- 在每次 decision 前验证当前计划覆盖、牌组合法性和硬 policy；当前 trick 下暂时没有可出 group 不属于结构失效，因为合法 pass 仍可继续。
 - 强制失效时立即选择可行候选；策略性切换时调用纯 `selectActivePlan`。
 - 不计算具体出牌动作分数，不调用完整 `HandPlanner`。
 
@@ -59,7 +60,7 @@
 
 ### aiDecisionEngine
 
-1. 从当前 `AiObservation` 构造公开 `PlanSelectionContext`。
+1. 从当前 `AiObservation` 构造 planning 内部的公开 `PlanSelectionContext`。
 2. 请求 `PlanManager` 选择 `activePlan`。
 3. 将选中计划传给现有 `actionGenerator`。
 4. 用现有 `actionEvaluator` 评价合法动作。
@@ -113,16 +114,16 @@ AiObservation + AiRuntimeState
         ├─ 一次 HandAnalysis / PowerGroupPolicyIndex
         │
         ▼
-PlanSelectionContext（只读公开上下文）
+planning/PlanSelectionContext（只读公开上下文）
         │
         ▼
 PlanManager.validateActivePlan
         │
-        ├─ 强制失效 → 立即选择合法候选
-        └─ 有效 → PlanEvaluator 评估最多 K 个候选
+        ├─ 结构失效 → 立即选择合法候选
+        └─ 结构有效 → active + K-1 challengers 全部评分
                          │
                          ▼
-                 hysteresis/cooldown/tie-break
+                 active score → challenger max → delta → hysteresis/cooldown/回切
                          │
                          ▼
                  activePlanId + switch state
@@ -146,23 +147,41 @@ dynamicPlanScore =
   + partnerContextFit       [0, 10]
   + opponentPressureFit     [0, 10]
   - powerGroupRisk          [0, 15]
-  - switchCost              [0, 10]
 ```
 
 每一项均在固定范围内 clamp；不使用候选集合的偶然 min/max 作为唯一归一化依据。
 
+切换惩罚不属于 `dynamicPlanScore`。候选分数先独立计算，再使用：
+
+```text
+requiredScoreDelta = minimumScoreDelta
+                    + cooldownPenalty
+                    + recentReturnPenalty
+```
+
+这样不会把 `switchCost` 与 `minimumScoreDelta` 重复扣除。
+
 | 项目 | 输入与定义 | 现成指标/新增计算 | 预算 |
 | --- | --- | --- | --- |
-| `staticPlanQuality` | `PlanMetrics` 的 hard violation、protection loss、estimated turns、low singles、retained control、wildcard flexibility、response/lead flexibility；硬违规直接为 0 | 复用 `PlanMetrics`，只做固定上限归一化 | O(1) |
-| `immediatePlayability` | 当前计划是否有能领牌或击败 `lastPlay` 的合法 group；有则 15，无合法 group 则 0，只有非首 group 可行动则 8 | 复用现有 group 分类和当前合法候选摘要 | O(groups) |
+| `staticPlanQuality` | `PlanMetrics` 的 estimated turns、low singles、retained control、wildcard flexibility、response/lead flexibility；hard violation 只作过滤，不再进入此分数；`protectionLoss` 也不进入此分数 | 复用 `PlanMetrics`，固定范围归一化，不使用纯 rank-based | O(1) |
+| `immediatePlayability` | 当前计划是否有能领牌或击败 `lastPlay` 的合法 group；有则 15，无可击 group 但合法 pass 可继续则按 5–10 的公开 trick 适配分连续给分；只有结构失效才为 0 | 复用现有 group 分类和当前合法候选摘要 | O(groups) |
 | `tempoFit` | 以固定上限 20 轮归一化 estimated turns，轮数越少越高；所有候选相同则 5 | 复用 `estimatedTurns` | O(1) |
-| `endgameFit` | 自己 ≤10 张、≤5 张时，按可立即结束、剩余组数和低单张风险给分；非残局为 5 | 复用手牌数量、计划 metrics | O(groups) |
+| `endgameFit` | 按自己的公开剩余牌数分段连续评分：`>10` 为 0–4，`5–10` 线性过渡到 4–10，`≤5` 线性过渡到 10；结合预计剩余组数和低单张风险 | 复用手牌数量、计划 metrics；不在 10/5 边界跳变 | O(groups) |
 | `partnerContextFit` | 队友已过牌且当前计划能主动争牌时加分；队友控制牌权时不奖励无谓抢牌 | 复用 `partnerPassedCurrentTrick`、公开 trick | O(1) |
-| `opponentPressureFit` | 任一对手 ≤3 张时，按当前计划的 response coverage、可阻断能力和立即 finish 能力加分 | 复用 `handCounts`、metrics；不看对手牌 | O(1) |
-| `powerGroupRisk` | `protectionLoss` 和 policy 风险归一化；硬违规候选先过滤，不进入排序 | 复用 `PowerGroupPolicyIndex`、`PlanMetrics` | O(1) |
-| `switchCost` | 当前 active 为 0；非 active 基础成本 3；最近使用或违反 cooldown 时增加 2–10 | 复用 runtime 历史 | O(1) |
+| `opponentPressureFit` | 按最小对手公开牌数分段连续评分：`>6` 为 0–3，`4–6` 过渡到 3–6，`1–3` 过渡到 6–10；结合 response coverage、阻断和 finish 能力 | 复用 `handCounts`、metrics；不看对手牌，不在 6/3 边界跳变 | O(1) |
+| `powerGroupRisk` | 单独使用 `protectionLoss` 和 policy index 计算 0–15；`protectionLoss` 不再出现在 `staticPlanQuality` | 复用 `PowerGroupPolicyIndex`、`PlanMetrics` | O(1) |
 
-计划排序只在 `K` 个候选内执行。建议 `K = min(5, candidatePlans.length)`；`K` 不改变 D0 的 `maxPlans`、Beam 或规划预算。
+计划候选集定义为：`active plan + 静态质量最高的 K-1 个 challenger`。建议 `K = 5`；当 candidate 少于 K 时使用全部候选。active 即使静态质量不在前 K，也必须始终参与评价；K 不改变 D0 的 `maxPlans`、Beam 或规划预算。
+
+### 选择算法
+
+1. 先验证 active 的结构完整性；若结构失效，执行 forced selection，不受 cooldown 限制。
+2. 从剩余候选中按固定静态质量和 stable plan ID 取最高的 `K-1` 个 challenger。
+3. 独立计算 `activeScore` 和每个 challenger score；不得在 dynamic score 之前无条件优先 active。
+4. 令 `bestChallenger` 为最高分 challenger，计算 `scoreDelta = bestChallengerScore - activeScore`。
+5. 若 `scoreDelta < requiredScoreDelta`、在 cooldown 内或命中 A→B→A 回切规则，保留 active；同分也保留 active。
+6. 只有 `scoreDelta >= requiredScoreDelta` 且未被迟滞、cooldown、回切规则抑制时，才执行 strategic switch。
+7. 选择结果再按 stable tie-break 确定，保证相同输入完全一致。
 
 ### 计算规则
 
@@ -175,35 +194,36 @@ dynamicPlanScore =
 
 ### A. 强制失效切换
 
-以下任一条件成立时立即切换，不受 cooldown 或普通阈值限制：
+以下任一结构性条件成立时立即切换，不受 cooldown 或普通阈值限制：
 
 - `activePlanId` 不存在或找不到计划；
 - 计划覆盖不完整、重复牌或包含不在当前手牌的牌；
 - 计划 group 不能通过当前牌型合法性校验；
 - 计划有 hard `PowerGroupPolicy` 违规；
-- 计划没有任何可合法继续的 group，且存在其他合法候选。
 
-如果没有合法候选，返回现有统一的 replan/failure 路径，由既有 planner 处理；Top-K selector 不自行增加新的规划算法。
+当前 trick 下没有可出 group 不属于强制失效：只要计划结构仍完整、合法 pass 可用，就继续保留 active，并由 `immediatePlayability` 和其他公开局面项进行策略性评分。
+
+如果没有结构合法候选，返回现有统一的 replan/failure 路径，由既有 planner 处理；Top-K selector 不自行增加新的规划算法。
 
 ### B. 策略性切换
 
 仅在 active 有效且满足迟滞规则时切换：
 
 - 候选动态分数比 active 高至少 `minimumScoreDelta`；
-- active 首个可用 group 与当前牌墩不适配；
-- 进入 ≤10 或 ≤5 张残局且候选的 endgameFit 明显更高；
+- active 首个可用 group 与当前牌墩不适配，或当前只能合法 pass；
+- 进入残局压力区且候选的连续 `endgameFit` 明显更高；
 - 队友已过牌且候选能更好地主动争夺牌权；
-- 任一对手公开剩余 1–3 张且候选的压力适配明显更高；
+- 对手公开剩余牌数进入连续 `opponentPressureFit` 区间且候选压力适配明显更高；
 - active 的预计剩余轮数比候选多至少 2 轮。
 
-### C. 建议初始防抖常量
+### C. 已批准的 D1 v1 防抖常量
 
 这些是待批准的 D1 v1 常量：
 
 - `minimumScoreDelta = 6`；
-- `minimumTurnsBetweenSwitches = 2` 个已完成 decision turn；
-- `switchPenalty = 3`；
-- `recentPlanHistory` 最多保存最近 4 个 plan ID；
+- `minimumDecisionIndicesBetweenSwitches = 2` 个当前 seat 的 decision index；
+- `cooldownPenalty = 3`；
+- `recentPlanHistory` 最多保存最近 4 个 plan family ID；
 - A→B→A 窗口为最近 3 次策略性选择；重复回切需要 `2 × minimumScoreDelta`，强制失效除外；
 - 同分或差值小于 1 的候选按稳定 tie-break 处理，不切换当前 active。
 
@@ -215,10 +235,28 @@ dynamicPlanScore =
 planSwitchVersion: "d1-topk-runtime-v1"
 activePlanId?: string
 previousPlanId?: string
-lastPlanSwitchTurn?: number
+lastPlanSwitchDecisionIndex?: number
 planSwitchCount: number
-recentPlanIds: string[]       // 最多 4 个
+recentPlanFamilyIds: string[] // 最多 4 个
+activePlanFamilyId?: string
+previousPlanFamilyId?: string
 lastSwitchReason?: PlanSwitchReason
+```
+
+每个 `HandPlan` 还必须带有：
+
+```text
+planFamilyId: string
+rootPlanId: string
+lineageId: string
+```
+
+增量继承和局部修复保持原 `planFamilyId`/`rootPlanId`，并以新 `lineageId` 表示派生版本；完整重规划生成全新的 `planFamilyId`、`rootPlanId` 和 `lineageId`。A→B→A 检测只比较 family ID，不比较每次增量变化的 plan ID。
+
+cooldown 使用当前 seat 独立的 decision index：
+
+```text
+decisionIndex[seat] - lastPlanSwitchDecisionIndex >= minimumDecisionIndicesBetweenSwitches
 ```
 
 `lastPlanScores`、score breakdown 和 turns-since-last-switch 不进入持久 runtime；它们只在 diagnostics 快照中存在，避免保存过期局面分数。旧 runtime 缺少新字段时由兼容层使用空历史、`planSwitchCount = 0` 和 `planSwitchVersion = d1-topk-runtime-v1`，不得恢复隐藏信息。
@@ -234,15 +272,15 @@ lastSwitchReason?: PlanSwitchReason
 
 ## 8. 稳定排序与确定性
 
-所有候选先按 stable plan ID 去重，再使用如下 comparator：
+active 与 challengers 先分别计算分数；不允许在 dynamic score 之前无条件优先 active。只有在 `scoreDelta` 未达到 required delta、同分、cooldown 或回切被抑制时才保留 active。
+
+在已经确定“保留 active”或“执行 switch”的集合内，再使用如下稳定 tie-break：
 
 1. 强制合法候选优先；
-2. 当前 `activePlanId` 优先；
-3. `dynamicPlanScore` 高者优先；
-4. `staticPlanQuality` 高者优先；
-5. 预计剩余组数少者优先；
-6. `powerGroupRisk` 低者优先；
-7. `stablePlanId` 字典序升序。
+2. `staticPlanQuality` 高者优先；
+3. 预计剩余组数少者优先；
+4. `powerGroupRisk` 低者优先；
+5. `stablePlanId` 字典序升序。
 
 不得依赖 `Map`/`Set` 插入顺序、对象引用、文件系统顺序或 worker 调度。相同 observation、runtime、candidatePlans 和 config 必须得到完全相同的 active plan、switch reason 和 runtime。
 
@@ -258,13 +296,15 @@ diagnostics 默认关闭，且不进入 `RoomState`、`PublicRoom`、replay 主�
 - `strategicSwitchCount`；
 - `switchSuppressedByHysteresis`；
 - `switchSuppressedByCooldown`；
-- `previousPlanId`；
-- `selectedPlanId`；
+- `previousPlanId` / `selectedPlanId`；
+- `previousPlanFamilyId` / `selectedPlanFamilyId`；
 - `previousScore`；
 - `selectedScore`；
 - `scoreDelta`；
+- `requiredScoreDelta`；
 - `switchReason`；
-- `turnsSinceLastSwitch`；
+- `decisionIndicesSinceLastSwitch`；
+- `decisionIndex`；
 - `planCandidateCount`；
 - `planScoreBreakdown`；
 - `AToBToAWindowCount`。
@@ -292,23 +332,25 @@ diagnostics 默认关闭，且不进入 `RoomState`、`PublicRoom`、replay 主�
 | 1 | active 明显最佳 | 不切换 |
 | 2 | 新 plan 优势超过阈值 | 策略性切换 |
 | 3 | 分数差不足 | 保留 active，记录 hysteresis |
-| 4 | cooldown 内 | 不切换，记录 cooldown |
+| 4 | cooldown 内 | 按 seat decision index 不切换，记录 cooldown |
 | 5 | active 缺失/不完整 | 立即 forced switch |
 | 6 | active 含缺失牌 | 立即 forced switch |
-| 7 | policy hard violation | 永不选择违规 plan |
-| 8 | 同分 | active 优先，结果稳定 |
-| 9 | A→B→A | 在窗口内被抑制，除非强制失效 |
-| 10 | ≤10/≤5 张残局 | 合理 endgame plan 可切换 |
-| 11 | 队友已过牌 | partner context 只使用公开字段 |
-| 12 | 对手剩 1–3 张 | opponent pressure 只使用 handCounts |
-| 13 | 隐藏牌替换 | 选择结果不变；无 hidden field 访问 |
-| 14 | 不触发完整 HandPlanner | planner/fullReplan 计数不增加 |
-| 15 | diagnostics on/off | action、runtime、hash 完全一致 |
-| 16 | 相同输入重复执行 | plan ID、reason、score、runtime 完全一致 |
-| 17 | runtime 版本升级 | 旧 runtime 可安全默认迁移，不读取隐藏信息 |
-| 18 | 动作后增量继承 | candidatePlans/activePlan 仍可验证 |
-| 19 | concurrency=1/N | action、switch sequence、hash 一致 |
-| 20 | shadow corpus | 错误分类仍为 0 |
+| 7 | 当前 trick 无可出 group但 pass 合法 | 不 forced invalidate，进入策略评分 |
+| 8 | policy hard violation | 永不选择违规 plan |
+| 9 | 同分 | active 优先，结果稳定 |
+| 10 | A→B→A | 按 family ID 在窗口内抑制，除非强制失效 |
+| 11 | family/lineage 增量继承 | 局部修复保持 family，完整重规划生成新 family |
+| 12 | ≤10/≤5 张残局 | 连续 endgameFit 允许合理切换 |
+| 13 | 队友已过牌 | partner context 只使用公开字段 |
+| 14 | 对手剩 1–3 张 | 连续 opponent pressure 只使用 handCounts |
+| 15 | 隐藏牌替换 | 选择结果不变；无 hidden field 访问 |
+| 16 | 不触发完整 HandPlanner | planner/fullReplan 计数不增加 |
+| 17 | diagnostics on/off | action、runtime、hash 完全一致 |
+| 18 | 相同输入重复执行 | plan ID、family ID、reason、score、runtime 完全一致 |
+| 19 | runtime 版本升级 | 旧 runtime 可安全默认迁移，不读取隐藏信息 |
+| 20 | 动作后增量继承 | candidatePlans/activePlan 仍可验证 |
+| 21 | concurrency=1/N | action、switch sequence、hash 一致 |
+| 22 | shadow corpus | 错误分类仍为 0 |
 
 额外要求：测试中不得通过 `partnerHand`、`opponentsHands`、`hands` 或 deck 注入策略；legacy adapter 必须保持 restricted observation。
 
@@ -316,22 +358,39 @@ diagnostics 默认关闭，且不进入 `RoomState`、`PublicRoom`、replay 主�
 
 ### 策略 ID
 
-- control：`unified-current`；
-- treatment：`unified-d1-topk-switch`。
+- control：`unified-current`；默认 production 继续保持 D0 keep-current 行为；
+- treatment：`unified-d1-topk-switch`；仅 benchmark 显式使用 `dynamic-topk-v1`。
 
-control 必须固定为 D0 当前 unified 策略版本；treatment 使用独立 `implementationVersion`、`configHash` 和 `sourceCommit`。D0 artifacts 不覆盖，D1 使用新文件名和新 manifest。
+control 必须固定为 D0 当前 unified 策略版本；treatment 使用独立 `implementationVersion`、`configHash` 和 `sourceCommit`。D1 正式验收前不得把 treatment 切换为 production 默认值。
 
-### 阶段
+四组正式 matchup 为：
 
-每个 opponent matchup 均使用 D0 的 2 placements × 4 rotations，每个 base seed 8 raw games：
+1. treatment vs control；
+2. treatment vs `simple-greedy`；
+3. treatment vs `deterministic-random`；
+4. treatment vs `legacy-reference`。
 
-1. 20 base seeds：160 raw games，用于冒烟和 switch diagnostics 可解释性；
-2. 50 base seeds：400 raw games，用于性能、切换率、A→B→A 率；
-3. 200 base seeds：1,600 raw games，用于正式 paired A/B。
+每组 200 base seeds、1,600 raw games、800 paired units；正式阶段合计 6,400 raw games、3,200 paired units。
 
-非退化对手为 `deterministic-random`、`simple-greedy`、`legacy-reference`。若三组均运行，阶段 3 总量为 4,800 raw games、2,400 paired units；每组独立 artifact。
+### 不重叠阶段与冻结
+
+每个 matchup 均使用 D0 的 2 placements × 4 rotations，每个 base seed 8 raw games：
+
+1. 冒烟：seed 1–20，20 base seeds、160 raw games；
+2. 校准：seed 21–70，50 base seeds、400 raw games；
+3. 正式：seed 71–270，200 base seeds、1,600 raw games/组。
+
+三阶段 seed 必须互不重叠。正式 seed 开始前冻结全部动态评分常量、K、cooldown、回切窗口、`implementationVersion`、strategy descriptors、room rules version 和四组 configHash；参数或 descriptor 变化必须生成新 batch，禁止与旧 batch 合并。
 
 统计仍以 base seed 为 bootstrap block：每次抽样一个 seed 时保留该 seed 的 8 局，paired score difference 中性值为 0，paired win-rate 中性值为 0.5。报告 raw games、paired units、base seeds、CI、错误计数和 switch diagnostics；分类结果 exploratory，Elo 仅 secondary descriptive。
+
+CI 包含中性值时结论为 `inconclusive`：不自动回滚，但 treatment 不得晋级 production；应扩大样本或保持实验状态。
+
+### Replay
+
+- 冒烟和校准默认 `replayMode = failures`；
+- 正式阶段显式使用 `replayMode = all`；
+- replay、batch、debug 目录独立于 D0 artifact，主报告不内嵌完整轨迹或隐藏状态。
 
 ### D1 artifact 约束
 
@@ -380,7 +439,7 @@ artifacts/ai-benchmark-replays-d1-topk-switch/<opponent>/...
 ### 智能效果
 
 - treatment vs control 的 paired score difference 不低于 0；
-- 95% CI 最好排除 0，但不得仅凭 raw win rate 声称提升；
+- 95% CI 排除 0 才能称为有方向性证据；若 CI 包含 0，结论为 `inconclusive`，不自动回滚但不得晋级 production，应扩大样本或保持实验状态；
 - 对 greedy 应有可复现改善证据；
 - 对 random 和 legacy 不得出现显著退化；
 - 所有结论以 paired statistics 和 CI 为主，Elo 不作为主要强度证据。
@@ -400,18 +459,27 @@ artifacts/ai-benchmark-replays-d1-topk-switch/<opponent>/...
 
 回滚只切换策略 descriptor/实验 artifact，不回退或修改 D0 tag、D0 artifacts、游戏规则或统一 AI 既有权重。
 
-## 15. 待确认问题与决策
+CI 包含 0 本身不是回滚条件；它只把结果标记为 `inconclusive`，保持 treatment 实验状态并禁止 production 晋级。
 
-以下内容在实现前必须明确批准：
+## 15. 已批准决策与问题—修订对照
 
-1. 是否接受 `K = 5`、`minimumScoreDelta = 6`、cooldown 2 turns、A→B→A 3-turn window？
-2. `staticPlanQuality` 是否按本文固定范围和现有 `PlanMetrics` 归一化，还是只允许 rank-based 质量分？
-3. `endgameFit` 与 `opponentPressureFit` 的公开阈值是否固定为 ≤10、≤5 和对手 ≤3 张？
-4. 是否同意不把 `lastPlanScores` 持久化，只放 diagnostics？
-5. 阶段 3 的 1,600 raw games 是“每个 opponent matchup”还是“三组 opponent 合计”？本文按每组 1,600、总计 4,800 设计。
-6. D1 treatment 的正式 `implementationVersion`、`configHash`、`sourceCommit` 和 artifact 文件名是否按本文命名？
-7. paired score CI 包含 0 时是否只报告“未观察到显著提升”，而不作为自动失败？
-8. D1 是否沿用 D0 的 replayMode 默认 `failures`，正式阶段显式使用 `all`？
+以下决策已批准，后续实现必须以本文为准；本轮仍不实施代码。
 
-在上述决策确认前，不进入 production 实施、不注册 treatment strategy、不运行正式 D1 benchmark。
+| 原问题 | 修订位置 | 最终决策 | 对实现的影响 |
+| --- | --- | --- | --- |
+| 当前 trick 没有可出 group 是否强制失效？ | 第 7 节 A/B、第 11 节 #7 | 否。合法 pass 时计划仍有效；仅结构不完整、缺牌、重复、group 非法、硬 policy 违规等强制失效。trick 不适配是策略评分项。 | `hasValidActivePlan` 不得以“无可出 group”直接触发 forced replan；`immediatePlayability` 需支持 pass 合法场景。 |
+| 是否先无条件保留 active？ | 第 6 节“选择算法”、第 8 节 | 否。独立算 active score，再从 challengers 取最高分，比较 delta，最后应用 threshold、cooldown、回切规则。active 只在同分或未达阈值时保留。 | selector 必须始终评价 active；不得在 dynamic score 前短路。 |
+| switchCost 是否作为 dynamic score 项？ | 第 6 节公式 | 否。移除 `switchCost`；统一使用 `requiredScoreDelta = minimumScoreDelta + cooldownPenalty + recentReturnPenalty`。 | 避免 switchCost 与 minimumScoreDelta 双重惩罚。 |
+| A→B→A 依据什么 ID？ | 第 7 节 D、第 8 节、第 11 节 #10/#11 | 使用 `planFamilyId`；增量继承/局部修复保持 family，完整重规划生成新 family；`rootPlanId` 和 `lineageId` 同步记录。 | `HandPlan` 增加 family/root/lineage 字段，回切窗口不比较每回合变化的具体 plan ID。 |
+| cooldown 使用什么时钟？ | 第 7 节 C/D | 使用当前 seat 独立 `decisionIndex`，字段为 `lastPlanSwitchDecisionIndex`；不使用模糊全局 turn。 | runtime 和 diagnostics 记录 seat-local index；cooldown 只比较同一 seat。 |
+| Top-K 是否可能排除 active？ | 第 6 节 | 不会。候选集固定为 active + 静态质量最高的 K-1 个 challenger；K=5 时 active 必须参与评价。 | 先构造 challenger 集，再强制加入 active；不改变 D0 planner 的 maxPlans/Beam。 |
+| `PlanSelectionContext` 放在哪里？ | 第 2、4、5 节 | 移至 `src/ai/planning/planSelectionContracts.ts` 等 planning 内部契约；顶层 `contracts.ts` 不反向依赖 analysis/policy。 | 未来只由 planning 模块消费，保持 contracts 依赖方向。 |
+| protectionLoss 是否双重计分？ | 第 6 节评分表 | 不双重计分。`staticPlanQuality` 不含 protectionLoss；`powerGroupRisk` 单独固定范围归一化。禁止纯 rank-based。 | 只在 risk 分支读取 protectionLoss，静态质量仍使用固定范围。 |
+| 10/5/3 张边界是否跳变？ | 第 6 节评分表、第 11 节 | 不跳变。endgame 和 opponent pressure 使用分段连续线性评分；10、5、3（及压力过渡区）只作为区间端点。 | 实现需测试边界左右连续性，不得使用 if/else 硬切分造成分数跳跃。 |
+| 正式矩阵如何配对？ | 第 12 节 | treatment vs control、greedy、random、legacy 四组；每组 200 seeds/1600 raw/800 paired，合计 6400 raw/3200 paired。 | 生成四组独立 artifact、manifest、replay 和统计摘要。 |
+| 冒烟、校准、正式 seed 是否重叠？ | 第 12 节“不重叠阶段与冻结” | 不重叠：1–20 冒烟、21–70 校准、71–270 正式。正式开始前冻结所有参数、version、descriptor、room rules 和 configHash。 | manifest 合并前验证 seed 集合不交叠和 configHash 一致；参数变化开启新 batch。 |
+| control 是否切换 production 默认？ | 第 12 节“策略 ID 与 control 实现” | 不切换。production 保持 D0 keep-current；benchmark treatment 显式使用 `dynamic-topk-v1`；D1 通过前不改默认值。 | treatment 仅在 benchmark adapter 注册，不能影响默认房间路径。 |
+| CI 包含 0 如何处理？ | 第 12、13、14 节 | 结论为 `inconclusive`；不自动回滚，但不得晋级 production；应扩大样本或保持实验状态。 | report 增加 inconclusive 状态，晋级门禁与回滚门禁分离。 |
+| replay mode 如何设置？ | 第 12 节 Replay | 冒烟/校准默认 `failures`；正式阶段显式 `all`。 | replay 文件与 D0 独立保存，正式验证必须覆盖 all 模式。 |
 
+在上述已批准决策基础上，仍只允许先写测试和 benchmark 设计；未获得新的实施授权前，不修改 production、不注册默认 treatment、不运行正式 D1 benchmark。
