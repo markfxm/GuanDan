@@ -14,6 +14,9 @@
     "simulate:ai": "tsx scripts/runUnifiedAiSimulation.ts",
     "benchmark:ai": "tsx scripts/runAiBenchmark.ts",
     "benchmark:replay": "tsx scripts/replayAiBenchmark.ts",
+    "benchmark:d1": "tsx scripts/runD1TopKBenchmark.ts",
+    "benchmark:d1:replay": "tsx scripts/replayD1TopKBenchmark.ts",
+    "benchmark:d1:freeze": "tsx scripts/freezeD1Calibration.ts",
     "test:ai-performance": "vitest run tests/performance/aiHotPath.test.ts"
   },
   "dependencies": {

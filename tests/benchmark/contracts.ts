@@ -51,6 +51,10 @@ export interface StrategyDescriptor {
   configHash: string;
   sourceCommit: string;
   candidatePolicy: CandidatePolicy;
+  mode?: "keep-current" | "dynamic-topk-v1";
+  behaviorBaselineCommit?: string;
+  behaviorBaselineTag?: string;
+  keepCurrentLockFixtureHash?: string;
 }
 
 export interface StrategyDecision<TRuntime> {

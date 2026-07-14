@@ -29,6 +29,10 @@ const unifiedCurrent: AiStrategy<AiRuntimeState> = {
   configHash: CONFIG_HASH,
   sourceCommit: SOURCE_COMMIT,
   candidatePolicy: "production-policy",
+  mode: "keep-current",
+  behaviorBaselineCommit: "e2a20e18f8e5c0871db38ad69426262e43766ce1",
+  behaviorBaselineTag: "ai-benchmark-d0-baseline",
+  keepCurrentLockFixtureHash: process.env.D1_KEEP_CURRENT_LOCK_FIXTURE_HASH ?? "fixture-not-loaded",
   createRuntime: () => ({
     candidatePlans: [],
     generatedTurn: -1,
@@ -39,13 +43,28 @@ const unifiedCurrent: AiStrategy<AiRuntimeState> = {
     const production = decideAiAction(toProductionObservation(observation), runtime, {
       ...DEFAULT_AI_PERFORMANCE_CONFIG,
       turn: observation.actionIndex,
-    });
+    }, { planSelectionMode: "keep-current", decisionIndex: observation.actionIndex });
     return {
       action: toStrategyAction(production.action),
       // Keep the production runtime private to this adapter and replace its
       // outer object on every turn so callers cannot share seat-local state.
       runtime: { ...production.runtime },
     };
+  },
+};
+
+const unifiedD1TopK: AiStrategy<AiRuntimeState> = {
+  ...unifiedCurrent,
+  id: "unified-d1-topk-switch",
+  implementationVersion: "dynamic-topk-v1",
+  configHash: "d1-topk-v1",
+  mode: "dynamic-topk-v1",
+  decide: (observation, runtime) => {
+    const production = decideAiAction(toProductionObservation(observation), runtime, {
+      ...DEFAULT_AI_PERFORMANCE_CONFIG,
+      turn: observation.actionIndex,
+    }, { planSelectionMode: "dynamic-topk-v1", decisionIndex: observation.actionIndex });
+    return { action: toStrategyAction(production.action), runtime: { ...production.runtime } };
   },
 };
 
@@ -114,6 +133,7 @@ const legalGreedy: AiStrategy<LegalGreedyRuntime> = {
 
 const strategies: Record<string, Strategy> = {
   "unified-current": unifiedCurrent,
+  "unified-d1-topk-switch": unifiedD1TopK,
   "legacy-reference": legacyReference,
   "legal-random": legalRandom,
   "legal-greedy": legalGreedy,
@@ -131,12 +151,16 @@ export function getStrategy(id: string): Strategy {
   return strategy;
 }
 
-export const strategyDescriptors = [unifiedCurrent, legacyReference, legalRandom, legalGreedy].map(({ id, implementationVersion, configHash, sourceCommit, candidatePolicy }) => ({
+export const strategyDescriptors = [unifiedCurrent, unifiedD1TopK, legacyReference, legalRandom, legalGreedy].map(({ id, implementationVersion, configHash, sourceCommit, candidatePolicy, mode, behaviorBaselineCommit, behaviorBaselineTag, keepCurrentLockFixtureHash }) => ({
   id,
   implementationVersion,
   configHash,
   sourceCommit,
   candidatePolicy,
+  ...(mode === undefined ? {} : { mode }),
+  ...(behaviorBaselineCommit === undefined ? {} : { behaviorBaselineCommit }),
+  ...(behaviorBaselineTag === undefined ? {} : { behaviorBaselineTag }),
+  ...(keepCurrentLockFixtureHash === undefined ? {} : { keepCurrentLockFixtureHash }),
 }));
 
 function toStrategyAction(action: { type: "pass" } | { type: "play"; group: { cards: { id: string }[] } }): StrategyAction {

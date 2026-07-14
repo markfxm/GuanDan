@@ -36,6 +36,7 @@ export interface PublicSimulationEvent extends GameAction {
 }
 
 export type SimulationSummary = GameSummary & {
+  allocation?: "AB" | "BA";
   completed: boolean;
   failed: boolean;
   errors: SimulationError[];
@@ -142,6 +143,7 @@ export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: b
     seed: task.seed,
     rank: task.config.rank,
     rotation: task.rotation,
+    allocation: task.allocation,
     strategiesBySeat,
     finishOrder: [...room.finishOrder],
     winnerTeam,
