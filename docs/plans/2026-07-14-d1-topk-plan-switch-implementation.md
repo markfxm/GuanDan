@@ -14,12 +14,13 @@
 - 本计划执行前只新增本计划文档；实施阶段每个 P 阶段单独提交，前一阶段验证通过后才可进入下一阶段。
 - P0 必须首先完成；P7 完成后必须暂停并等待人工批准；未批准不得执行 P8。
 - production 默认 `PlanSelectionMode` 为 `keep-current`；D1 正式验收前不得切换 production 默认值。
-- `PlanSelectionMode` 不得进入 `RoomState`、`PublicRoom`、网络协议或用户配置；benchmark control 显式传 `keep-current`，treatment 显式传 `dynamic-topk-v1`。
+- `PlanSelectionMode` 不得进入 `RoomState`、`PublicRoom`、网络协议或用户配置；P4 才验证显式 `keep-current`，P6 才注册 treatment adapter。
 - keep-current 不创建 `planSelectionState`，不生成/写入/序列化 `rootPlanId`、`planFamilyId`、`lineageId`，不得给旧字段补默认值。
 - D1 策略只能接收自身手牌、公开牌局信息和自身 runtime；不得接收 `partnerHand`、`opponentsHands`、全部 `hands`、deck 或隐藏初始状态。
 - cooldown 是 seat-local decision index 的硬门禁：cooldown 内禁止 strategic switch；cooldown 结束后不再加任何 `cooldownPenalty`。
 - 近期回切只使用软阈值：普通 `requiredDelta = minimumScoreDelta`；命中近期 strategic family 时 `requiredDelta = 2 × minimumScoreDelta`；达到阈值允许切换；forced switch 始终绕过阈值和 cooldown。
-- 只有 strategic switch 更新 `recentStrategicPlanFamilyIds`；forced switch 只记 diagnostics，不进入 A→B→A 窗口；suppression、同分和普通保留不更新历史。
+- 只有 strategic switch 更新 `recentStrategicPlanFamilyIds`；forced switch 更新 `lastAnyPlanSwitchDecisionIndex` 并记 diagnostics，但不进入 A→B→A 窗口；suppression、同分和普通保留不更新历史。
+- 行为 caps 中 `strategicSwitchRate`、`forcedSwitchRate`、`AToBToARate` 是上限；`switchSuppressionRate` 只作描述指标或批准区间，不能简单当作上限。
 - P8 正式 holdout 固定为 smoke `201–220`、calibration `221–270`、formal holdout `1001–1200`；formal 不得使用 D0 的 `1–200`。
 - 正式矩阵采用七组：treatment/control、treatment/greedy、control/greedy、treatment/random、control/random、treatment/legacy、control/legacy；每组 1600 raw games、800 paired units，总计 11200 raw games、5600 paired units。
 - replay 物理文件为每个 raw game 一个 JSON；formal `replayMode = all`，主报告不嵌入完整轨迹或隐藏状态。
@@ -46,7 +47,7 @@ type D1PlanSelectionState = {
   previousPlanId?: string;
   activePlanFamilyId?: string;
   previousPlanFamilyId?: string;
-  lastPlanSwitchDecisionIndex?: number;
+  lastAnyPlanSwitchDecisionIndex?: number;
   planSwitchCount: number;
   fullReplanCount: number;
   recentStrategicPlanFamilyIds: string[];
@@ -69,7 +70,8 @@ family/root/lineage 也不进入 `HandPlan`、D0 replay 或 D0 report。
 ```text
 if forcedInvalid(active):
     switch immediately
-else if decisionIndex[seat] - lastPlanSwitchDecisionIndex < cooldownDecisionIndices:
+else if lastAnyPlanSwitchDecisionIndex !== undefined
+     && decisionIndex[seat] - lastAnyPlanSwitchDecisionIndex < cooldownDecisionIndices:
     keep active; reason = cooldown-suppressed
 else:
     requiredDelta = recentStrategicPlanFamilyIds contains challengerFamily
@@ -78,8 +80,9 @@ else:
     switch only when bestChallengerScore - activeScore >= requiredDelta
 ```
 
-`cooldownPenalty` 从实现和报告中删除；cooldown 结束后不重复扣分。`lastPlanSwitchDecisionIndex`
-在 strategic switch 时更新；forced switch 不更新该 strategic cooldown 时钟，但要增加 forced diagnostics。
+`cooldownPenalty` 从实现和报告中删除；cooldown 结束后不重复扣分。任何实际 forced/strategic switch
+都更新 `lastAnyPlanSwitchDecisionIndex`，因此后续 strategic switch 受同一 seat-local cooldown 约束；
+forced switch 本身绕过此前 cooldown，但不进入 `recentStrategicPlanFamilyIds`，A→B→A 仍只读取 strategic history。
 
 ### 1.3 稳定 ID
 
@@ -94,7 +97,11 @@ planFamilyId = sha256("d1-family-v1|" + rootPlanId + "|" + fullReplanCount)
 lineageId    = sha256("d1-lineage-v1|" + parentLineageIdOrRoot + "|" + canonicalDeltaInput)
 ```
 
-初始计划 `fullReplanCount = 0`；每次完整重规划先递增，因此即使候选内容相同也生成新 family。
+`planIdentityById` 的 `maxPlanIdentityEntries = K + 2`。每次候选集更新时先保留当前 candidate set、active
+和必要 previous（active identity 永不删除），再按 `staticPlanQuality DESC, stablePlanId ASC` 保留候选，
+最后按 `stablePlanId DESC` 确定性清理剩余条目。清理不得依赖对象插入顺序；没有 identity 的 previous 不得伪造。
+初始计划 `fullReplanCount = 0`；完整重规划先在临时 state 计算新 identity，只有完整候选集、active 和 runtime
+成功提交后才递增并持久化 count，因此失败 replan 不消耗 ordinal；即使候选内容相同也生成新 family。
 增量继承/局部修复复用 root/family，仅生成新 lineage；只有实际 strategic switch 才追加
 `recentStrategicPlanFamilyIds`。旧 runtime 有可验证 active plan 时确定性迁移；缺少可验证 plan、ordinal
 或 identity 时标记 `migration-required`，沿既有结构性 replan 生成新 identity，不合成时间/随机默认值。
@@ -130,9 +137,10 @@ flowchart LR
   Gate --> P8["P8 formal holdout"]
 ```
 
-P0–P5 是 production/测试逐步实现，但每个阶段都必须保持 keep-current lock；P6 之后才允许在
-`tests/benchmark` 注册 treatment adapter。P7 是强制暂停点；P8 只有人工批准 artifact 与批准 commit
-存在时才能启动。
+P0–P5 是 production/测试逐步实现，但每个阶段都必须保持 keep-current lock；P6 必须一次性实现并测试
+formal gate、28-batch loop、atomic writer、resume/skip-existing 和 replay all，之后才允许在
+`tests/benchmark` 注册 treatment adapter。P7 只运行 smoke/calibration，是强制暂停点；P8 仅执行
+已批准且不可再修改的 formal 代码。
 
 ---
 
@@ -140,15 +148,15 @@ P0–P5 是 production/测试逐步实现，但每个阶段都必须保持 keep-
 
 | 工作包 | 修改文件 | 新增文件 | 责任边界 |
 |---|---|---|---|
-| P0 | 无 production 文件 | `tests/ai/keepCurrentCharacterization.test.ts`、`tests/ai/keepCurrentRuntimeShape.test.ts`、`tests/benchmark/keepCurrentLock.test.ts` | 锁定 D0 action/runtime/hash，证明可选字段不污染 D0 |
-| P1 | `src/ai/contracts.ts`（只增加可选 type）、必要时 `tests/ai/aiDecisionMigration.test.ts` | `src/ai/planning/planSelectionContracts.ts`、`src/ai/planning/planIdentity.ts`、`tests/ai/planSelectionContracts.test.ts`、`tests/ai/planIdentity.test.ts`、`tests/ai/strategicHistory.test.ts` | 内部上下文、sidecar state、canonical identity、migration、history |
+| P0 | 无 production 文件 | `tests/ai/keepCurrentCharacterization.test.ts`、`tests/ai/keepCurrentRuntimeShape.test.ts`、`tests/benchmark/keepCurrentLock.test.ts`、`tests/ai/fixtures/d0KeepCurrentCases.json`、`scripts/generateD0KeepCurrentFixtures.ts` | 只锁定 D0 默认调用和现有 unified benchmark adapter，不依赖 mode API |
+| P1 | `src/ai/contracts.ts`（只依赖低层 DTO）、必要时 `tests/ai/aiDecisionMigration.test.ts` | `src/ai/runtimeContracts.ts`、`src/ai/planning/planSelectionContracts.ts`、`src/ai/planning/planIdentity.ts`、`tests/ai/planSelectionContracts.test.ts`、`tests/ai/planIdentity.test.ts`、`tests/ai/strategicHistory.test.ts` | 低层 runtime DTO、planning 内部上下文、canonical identity、migration、history |
 | P2 | `src/ai/planning/planEvaluator.ts` | `tests/ai/planEvaluator.test.ts`、`tests/ai/planEvaluatorBoundaries.test.ts` | 纯评分，不调用 PlanManager、不写 runtime |
 | P3 | `src/ai/planning/planManager.ts` | `src/ai/planning/planSelector.ts`、`tests/ai/planSelector.test.ts`、`tests/ai/planManagerD1.test.ts` | 结构过滤、Top-K、threshold、cooldown、strategic history、stable tie-break |
 | P4 | `src/ai/aiDecisionEngine.ts`、必要时 `src/ai/contracts.ts` | `tests/ai/planSelectionMode.test.ts`、`tests/ai/keepCurrentByteLock.test.ts` | 内部 mode 注入，production/control keep-current 与 treatment dynamic 隔离 |
 | P5 | `src/ai/diagnostics/aiPlanningDiagnostics.ts` | `tests/ai/d1DiagnosticsAggregation.test.ts`、`tests/ai/d1DiagnosticsPrivacy.test.ts` | 聚合统计、debug-only decision detail、隐私边界 |
 | P6 | 仅 `tests/benchmark` / `scripts` | `tests/benchmark/d1Matrix.ts`、`tests/benchmark/d1Statistics.ts`、`tests/benchmark/d1ReplayValidation.ts`、`tests/benchmark/d1Calibration.ts`、`scripts/runD1TopKBenchmark.ts`、`scripts/replayD1TopKBenchmark.ts`、`scripts/freezeD1Calibration.ts`、对应 focused tests | 七组矩阵、联合 uplift、manifest、resume、replay all、approval artifact |
-| P7 | 仅 `tests/benchmark` / `scripts` | `artifacts/ai-benchmark-d1-calibration-*.json/.md`（默认外部归档）、`artifacts/ai-benchmark-d1-calibration-approval.json` | smoke/calibration，不运行 formal，生成待批准报告 |
-| P8 | 仅 `tests/benchmark` / `scripts` | `artifacts/ai-benchmark-d1-topk-switch-<matchup>.*`、batch/replay/debug 外部归档 | 28 个 formal batch、原子落盘、断点续跑、最终统计 |
+| P7 | 仅 `tests/benchmark` / `scripts` | `artifacts/ai-benchmark-d1-calibration-*.json/.md`（外部归档）、`docs/benchmark-approvals/d1-topk-calibration-approval.json`（Git 小文件） | smoke/calibration，不运行 formal，生成可追溯批准材料 |
+| P8 | 无代码修改；只读取已批准的 `tests/benchmark` / `scripts` | `artifacts/ai-benchmark-d1-topk-switch-<matchup>.*`、batch/replay/debug 外部归档 | execution-only：28 个 formal batch、原子落盘、断点续跑、最终统计 |
 
 P0–P5 不能修改 `src/game/room.ts`、D0 strategy descriptor、D0 artifact 或 D0 tag；P6–P8 不能把
 D1 artifact 写入 `ai-benchmark-baseline.*`。
@@ -163,20 +171,33 @@ D1 artifact 写入 `ai-benchmark-baseline.*`。
 
 - 新增 `tests/ai/keepCurrentCharacterization.test.ts`：固定 lead、follow、合法 pass、重规划和动作后 runtime 场景。
 - 新增 `tests/ai/keepCurrentRuntimeShape.test.ts`：断言 `planSelectionState`、family/root/lineage 不存在。
-- 新增 `tests/benchmark/keepCurrentLock.test.ts`：以 D0 tag 生成的固定 observation/seed fixture 验证 action、runtime canonical bytes、public trace hash。
-- 不修改 production 文件；D0 fixture 只读保存于 `tests/ai/fixtures/d0KeepCurrentCases.json`（如需要新增，必须纳入本阶段提交）。
+- 新增 `tests/benchmark/keepCurrentLock.test.ts`：只调用现有 unified benchmark adapter 的默认入口，不传 `PlanSelectionMode`，验证 action、runtime canonical bytes、public trace hash。
+- 新增 `scripts/generateD0KeepCurrentFixtures.ts`：只能在 D0 tag 独立 worktree 中运行；fixture 保存于 `tests/ai/fixtures/d0KeepCurrentCases.json`，记录 source commit、generator version、input hash 和 output hash。
+- 不修改 production 文件；D1 当前代码不得自动刷新 expected fixture，fixture 生成后只读。
 
 **先写的 characterization/保护测试：**（P0 以 D0 为基线，正常情况下应立即通过；任何新增 D1 代码导致它们失败即为回归。）
 
 1. 同一 observation/runtime/config 连续调用两次，`canonicalizeD0Runtime(result.runtime)`、action key 和 hash 完全相等。
 2. lead、follow、legal pass、incremental action 后四个 fixture 的结果与 D0 reference snapshot 完全相等。
 3. `Object.hasOwn(result.runtime, "planSelectionState") === false`，并断言 JSON 不含 `planFamilyId`、`rootPlanId`、`lineageId`。
-4. benchmark control 显式 keep-current 与 production 默认调用的 action/runtime/publicTraceHash 完全相等。
+4. 现有 unified benchmark adapter 默认调用与 D0 reference 的 action/runtime/publicTraceHash 完全相等；显式 `PlanSelectionMode.keep-current` 的等价测试留到 P4。
+5. byte lock 比较完整 runtime JSON；新增字段会导致测试失败，不能通过忽略字段伪造一致。
 
 **最小实现步骤：**
 
-- 先从 D0 tag 的既有 engine API 读取 reference 输出，不添加 mode 或 state。
-- 只实现测试 fixture canonicalizer；canonicalizer 排除耗时字段，但不得改变 runtime 内容。
+- 在独立 worktree 中 checkout `ai-benchmark-d0-baseline`，用固定 generator version 生成 reference；记录 generator/source/input/output hashes。示例：
+
+```powershell
+git worktree add ..\d0-fixture-ai-benchmark ai-benchmark-d0-baseline
+git -C ..\d0-fixture-ai-benchmark rev-parse HEAD
+Push-Location ..\d0-fixture-ai-benchmark
+npx tsx scripts/generateD0KeepCurrentFixtures.ts --output tests/ai/fixtures/d0KeepCurrentCases.json --generator-version d0-fixture-v1
+Pop-Location
+```
+
+- 将 fixture 拷贝回当前分支后只读提交；D1 当前代码不得自动刷新 expected。
+- fixture 顶层字段固定为 `sourceCommit`、`sourceTag`、`generatorVersion`、`inputSha256`、`outputSha256` 和 `cases`；expected action/runtime/hash 只来自该 source commit。
+- 只实现 fixture canonicalizer；runtime canonical bytes 必须包含所有属性，只有 decision elapsed/diagnostic timing 等非 runtime 字段可按既定 schema 排除。
 - 若现有测试发现不稳定，先修复 fixture 的排序/比较，不修改 AI 行为。
 
 **验证命令：**
@@ -189,7 +210,7 @@ git diff --check
 
 预期：新增测试全部 PASS，production source 无 diff，runtime 不出现 D1 字段。
 
-**完成条件：** D0 四类场景 action/runtime/hash 锁定通过；默认和 control keep-current 字节级一致；没有动态 selector、treatment adapter 或 benchmark 运行。
+**完成条件：** D0 四类场景 action/runtime/hash 锁定通过；现有 unified adapter 默认入口与 D0 字节级一致；没有 mode API 依赖、动态 selector、treatment 注册或 benchmark 运行。
 
 **可回滚提交点：** `d1-p0-keep-current-lock`，只包含测试与 fixture；回滚该提交不会触碰 D0 tag/artifacts。
 
@@ -206,7 +227,10 @@ git diff --check
 **接口：**
 
 ```ts
+// src/ai/runtimeContracts.ts: low-level DTOs only; no planning imports.
 export type PlanSelectionMode = "keep-current" | "dynamic-topk-v1";
+
+// src/ai/planning/planSelectionContracts.ts: planning-internal only.
 export type PlanSelectionContext = Readonly<{
   seat: number;
   partnerSeat: number;
@@ -222,6 +246,7 @@ export type PlanSelectionContext = Readonly<{
   handAnalysis: Readonly<HandAnalysis>;
   powerGroupPolicyIndex: Readonly<PowerGroupPolicyIndex>;
 }>;
+// src/ai/runtimeContracts.ts (re-exported only by low-level contracts).
 export type PlanIdentity = { rootPlanId: string; planFamilyId: string; lineageId: string };
 export function canonicalPlanInput(input: CanonicalPlanInput): string;
 export function createPlanIdentity(input: IdentityInput): PlanIdentity;
@@ -230,26 +255,30 @@ export function migrateD1State(runtime: AiRuntimeState, context: MigrationContex
 
 **文件：**
 
-- 修改 `src/ai/contracts.ts`：只增加可选 `planSelectionState?: D1PlanSelectionState` 和 type-only 引用，不给 runtime 构造器补默认对象。
-- 新增 `src/ai/planning/planSelectionContracts.ts`：定义 `PlanSelectionContext`、`PlanSelectionMode`、`PlanScore`、`PlanSelectionResult`、`D1PlanSelectionState`。
+- 新增 `src/ai/runtimeContracts.ts`：定义纯 D1 runtime DTO（`PlanIdentity`、`D1PlanSelectionState`、`PlanSelectionMode`），只依赖基础 serializable types。
+- 修改 `src/ai/contracts.ts`：只从 `runtimeContracts.ts` 引入可选 `planSelectionState?: D1PlanSelectionState`，不得 type-import `planning/planSelectionContracts`。
+- 新增 `src/ai/planning/planSelectionContracts.ts`：定义 `PlanSelectionContext`、`PlanScore`、`PlanSelectionResult`，只能依赖低层 runtime DTO、analysis/policy 输入类型，不被 `contracts.ts` 反向依赖。
 - 新增 `src/ai/planning/planIdentity.ts`：canonical JSON、stable group/card order、SHA-256 identity、migration。
 - 新增 `tests/ai/planSelectionContracts.test.ts`、`tests/ai/planIdentity.test.ts`、`tests/ai/strategicHistory.test.ts`。
 
 **先写的失败测试：**
 
-1. `PlanSelectionContext` 的运行时对象不含 hidden fields；静态扫描拒绝 `partnerHand`、`opponentsHands`、`hands`、deck。
-2. 同一 normalized input 生成相同三种 ID；groups/cards、Map/Set 输入顺序打乱后字符串和 ID 不变。
-3. 时间、随机数、diagnostics duration 和路径字段不存在于 canonical input。
-4. 增量/局部修复保持 root/family、只变 lineage；full replan increment 后生成新 root/family/lineage。
-5. 只有 strategic switch 追加 `recentStrategicPlanFamilyIds`；forced、suppression、tie 和 keep 不追加。
-6. 旧 D0 runtime 缺少 sidecar 时，keep-current 不补字段；dynamic migration 有可验证 active plan 时确定性生成 identity；不可验证时返回 `migration-required`。
+1. `src/ai/contracts.ts` 依赖图只能指向 `runtimeContracts.ts`；planning contracts 不得被 `contracts.ts` 导入，静态扫描拒绝循环边。
+2. `PlanSelectionContext` 的运行时对象不含 hidden fields；静态扫描拒绝 `partnerHand`、`opponentsHands`、`hands`、deck。
+3. 同一 normalized input 生成相同三种 ID；groups/cards、Map/Set 输入顺序打乱后字符串和 ID 不变。
+4. 时间、随机数、diagnostics duration 和路径字段不存在于 canonical input。
+5. 增量/局部修复保持 root/family、只变 lineage；full replan 仅在完整重规划成功提交后递增 `fullReplanCount` 并生成新 root/family/lineage。
+6. `planIdentityById` 最大 `K+2` 条；保留当前 candidate set、active 和必要 previous，active identity 不得删除；清理顺序固定且与对象顺序无关。
+7. 只有 strategic switch 追加 `recentStrategicPlanFamilyIds`；forced、suppression、tie 和 keep 不追加；forced/strategic 都更新 `lastAnyPlanSwitchDecisionIndex`。
+8. 旧 D0 runtime 缺少 sidecar 时，keep-current 不补字段；dynamic migration 有可验证 active plan 时确定性生成 identity；不可验证时返回 `migration-required`。
 
 **最小实现步骤：**
 
-- 先定义 type-only contracts，避免顶层 `contracts.ts` 反向依赖 analysis/policy。
+- 先建立 `runtimeContracts.ts → contracts.ts` 单向低层依赖，再建立 `planSelectionContracts.ts → runtimeContracts.ts`；禁止反向 planning import。
 - 用固定 key-sort canonicalizer；card/group 依 stable key 排序，数字固定六位小数。
-- 用 Node `createHash("sha256")` 生成 identity；`fullReplanCount` 由 seat-local runtime 递增。
-- 在 sidecar 中实现 strategic history 更新函数，forced path 只写 diagnostics。
+- 用 Node `createHash("sha256")` 生成 identity；`fullReplanCount` 由 seat-local runtime 在完整候选集/active/runtime 成功提交后递增，失败 replan 不递增。
+- 在 sidecar 中实现确定性 identity cleanup：保留 active、previous 和当前候选按 static quality/stablePlanId 排序的条目，移除其余 stablePlanId 降序条目；完整重规划成功提交后才递增 count。
+- 在 sidecar 中实现 history/update 函数：forced path 只写 diagnostics，但 forced/strategic 都更新 `lastAnyPlanSwitchDecisionIndex`。
 
 **验证命令：**
 
@@ -277,59 +306,87 @@ npx tsc --noEmit
 **精确公式：** 所有组件先 clamp，再 round 到 6 位小数；最终 score 以 `Math.round(score * 1_000_000)` 比较。
 
 ```text
-norm(value, max) = clamp(value / max, 0, 1), max = max(1, handSize)
-turnFit        = 1 - clamp(estimatedTurns / 20, 0, 1)
-singleFit      = 1 - norm(lowSingleCount, handSize)
-controlFit     = norm(retainedControl, handSize)
-wildcardFit    = norm(wildcardFlexibility, handSize)
-responseFit    = norm(responseCoverage, handSize)
-leadFit        = norm(leadFlexibility, handSize)
+round6(x) = round(x * 1_000_000) / 1_000_000
+norm(x, limit) = round6(clamp(x / max(1, limit), 0, 1))
+turnFit     = round6(1 - clamp(estimatedTurns / 20, 0, 1))
+singleFit   = 1 - norm(lowSingleCount, handSize)
+controlFit  = norm(retainedControl, handSize)
+wildcardFit = norm(wildcardFlexibility, handSize)
+leadFit     = norm(leadFlexibility, handSize)
 
-staticPlanQuality = 10*turnFit + 6*singleFit + 8*controlFit
-                  + 6*wildcardFit + 5*responseFit + 5*leadFit       // [0,40]
+// responseCoverage intentionally does not enter static quality; it is used once below in pressure quality.
+staticPlanQuality = round6(10*turnFit + 8*singleFit + 8*controlFit + 6*wildcardFit + 8*leadFit) // [0,40]
 
+trickFit = round6(
+  lastPlay is undefined ? 1
+  : 0.5 * bool(lastPlaySeat == partnerSeat)
+  + 0.5 * bool(partnerPassedCurrentTrick == true)
+)                                                        // [0,1]
 immediatePlayability =
   15, if a legal lead/beat group exists
-  5 + 5*trickFit, if no beat group but legal pass exists
+  round6(5 + 5*trickFit), if no beat group but legal pass exists // [5,10]
   0, only for structurally invalid plan
 
-tempoFit = 10 * turnFit
+tempoFit = round6(10 * turnFit)                           // [0,10]
+// estimatedTurns is intentionally weighted a second time: static quality measures plan efficiency,
+// while tempoFit measures current trick urgency. This is the only intentional duplicate weighting.
 
-endgameFit(n) =
+candidateSmallGroupFraction = count(plan.groups with cardCount <= 2) / max(1, plan.groups.length)
+candidateLeadCoverage = count(plan.groups legal as public lead) / max(1, plan.groups.length)
+candidateEndgameQuality = round6(0.6 * clamp(candidateSmallGroupFraction, 0, 1)
+  + 0.4 * clamp(candidateLeadCoverage, 0, 1))                // [0,1]
+endgameBand(n) =
   4 * clamp((20-n)/10, 0, 1), n > 10
   10 - (n-5)*6/5,            5 < n <= 10
   10,                         n <= 5
+endgameFit = round6(clamp(endgameBand(handCount)
+  * (0.5 + 0.5*candidateEndgameQuality), 0, 10))            // [0,10]
 
-opponentPressureFit(m) =
+unfinishedOpponents = opponents not in finishOrder
+minPositiveHandCount = min(count for unfinished opponent with count > 0), or 20 when none exists
+pressureBand(m) =
   3 * clamp((14-m)/8, 0, 1), m > 6
   3 + (6-m)*3/2,             4 <= m <= 6
   6 + (3-m)*2,               1 <= m <= 3
   10,                         m <= 0
+responseFit = norm(responseCoverage, handSize)              // [0,1], used only here
+candidateBeatCoverage = count(plan.groups that beat public lastPlay) / max(1, plan.groups.length)
+candidatePressureQuality = round6(0.5*responseFit
+  + 0.3*clamp(candidateBeatCoverage, 0, 1)
+  + 0.2*clamp(candidateLeadCoverage, 0, 1))                  // [0,1]
+opponentPressureFit = round6(clamp(pressureBand(minPositiveHandCount)
+  * (0.5 + 0.5*candidatePressureQuality), 0, 10))            // [0,10]
 
-partnerContextFit = clamp(publicPartnerFit, 0, 10)
-powerGroupRisk = 15 * clamp(
-  0.6 * norm(protectionLoss, handSize)
-  + 0.4 * norm(policyRiskUnits, handSize), 0, 1)
+publicPartnerFit = 5*bool(partnerPassedCurrentTrick == true)
+  + 5*bool(lastPlaySeat == partnerSeat)                       // [0,10]
+partnerContextFit = round6(clamp(publicPartnerFit, 0, 10))
+policyRiskUnits = policyIndex.softRiskUnits(plan.groups)       // integer [0, handSize]; hard violations filtered earlier
+powerGroupRisk = round6(15 * clamp(
+  0.6 * norm(protectionLoss, handSize) + 0.4 * norm(policyRiskUnits, handSize), 0, 1
+))                                                        // [0,15]
 
-dynamicPlanScore = staticPlanQuality + immediatePlayability + tempoFit
-                 + endgameFit + partnerContextFit + opponentPressureFit
-                 - powerGroupRisk
+dynamicPlanScore = round6(staticPlanQuality + immediatePlayability + tempoFit
+  + endgameFit + partnerContextFit + opponentPressureFit - powerGroupRisk)
 ```
 
-`policyRiskUnits` 必须来自 policy index 的固定范围风险摘要；hard policy violation 在 evaluator 前过滤。
-`protectionLoss` 只在 `powerGroupRisk` 读取，不能进入 static quality。无可跟牌但 pass 合法时不被过滤，
-`immediatePlayability` 使用 5–10 的 trickFit。
+`bool` 返回 0/1；所有牌数输入均为整数，`minPositiveHandCount` 排除已进入 `finishOrder` 的对手，
+不会把 0 张已完成对手当成最高压力。`responseCoverage` 只在 `candidatePressureQuality` 使用一次；
+`lowSingleCount` 只在 static quality 使用一次；`estimatedTurns` 的 static+tempo 二次加权是上述明确批准的
+有意权重。`policyRiskUnits` 必须由 policy index 提供固定范围的 soft risk 摘要；hard policy violation 在
+evaluator 前过滤。`protectionLoss` 只在 `powerGroupRisk` 读取。无可跟牌但 pass 合法时不被过滤。
 
 **文件：** 修改 `src/ai/planning/planEvaluator.ts`；新增 `tests/ai/planEvaluator.test.ts`、`tests/ai/planEvaluatorBoundaries.test.ts`。
 
 **先写的失败测试：**
 
-1. 每一项输出在规定范围内，NaN/Infinity 变为明确失败而不是静默排序。
-2. `n=10`、`n=5` 和 `m=6`、`m=4`、`m=3` 左右两侧 score 差小于 `1e-6`，无跳变。
-3. pass 合法但没有 beat group 的计划仍有 5–10 分且未被 evaluator 过滤。
-4. 同一 `protectionLoss` 不会在 static quality 和 powerGroupRisk 中出现两次。
-5. evaluator 不读取 runtime、不调用 PlanManager/HandPlanner、不输出 `requiredScoreDelta` 或 cooldown penalty。
-6. 固定浮点格式和候选输入顺序变化产生相同 breakdown/total。
+1. 每一项输出在规定范围内，NaN/Infinity 变为明确失败而不是静默排序；每项 clamp 后 `round6`。
+2. `n=10`、`n=5` 和整数 `m=6`、`m=4`、`m=3` 与相邻整数值连续、单调；不使用实数左右极限测试。
+3. 已进入 `finishOrder` 的 0 张对手不参与 `minPositiveHandCount`；unfinished opponent 的正牌数才参与最小值。
+4. candidate-specific endgame quality 改变只影响 endgameFit；candidate-specific pressure/response quality 改变只影响 opponentPressureFit。
+5. pass 合法但没有 beat group 的计划仍有 5–10 分且未被 evaluator 过滤。
+6. `protectionLoss`、`responseCoverage`、`lowSingleCount` 的使用点分别符合公式；estimatedTurns 的二次加权必须标注为 intentional。
+7. evaluator 不读取 runtime、不调用 PlanManager/HandPlanner、不输出 `requiredScoreDelta` 或 cooldown penalty。
+8. 固定浮点格式和候选输入顺序变化产生相同 breakdown/total。
 
 **最小实现步骤：**
 
@@ -376,10 +433,10 @@ export function selectActivePlan(input: {
 2. 取静态质量最高的 K-1 个 challenger，再强制加入 active；K=5 时 active 始终参与。
 3. 独立求 active score 和最高 challenger score；不得在评分前优先 active。
 4. active 结构 invalid 时 forced switch，绕过 cooldown、threshold 和 return threshold。
-5. 结构有效时先检查 `lastPlanSwitchDecisionIndex !== undefined && decisionIndex[seat] - lastPlanSwitchDecisionIndex < cooldownDecisionIndices`；是则禁止 strategic switch，不添加 penalty。undefined 表示该 seat 尚无 strategic switch，不在 cooldown 内。
+5. 结构有效时先检查 `lastAnyPlanSwitchDecisionIndex !== undefined && decisionIndex[seat] - lastAnyPlanSwitchDecisionIndex < cooldownDecisionIndices`；是则禁止 strategic switch，不添加 penalty。undefined 表示该 seat 尚无实际 switch，不在 cooldown 内。
 6. cooldown 结束后，近期 strategic family 回切使用 `2 × minimumScoreDelta`，否则使用 `minimumScoreDelta`；达到阈值即允许 switch。
 7. 同分、未达阈值或 suppression 保留 active；stable tie-break 只用于已确定的保留/切换集合。
-8. strategic switch 更新 `lastPlanSwitchDecisionIndex`、`recentStrategicPlanFamilyIds` 和计数；forced 只记录 diagnostics。
+8. 任何实际 forced/strategic switch 都更新 `lastAnyPlanSwitchDecisionIndex` 和总 switch 计数；只有 strategic switch 更新 `recentStrategicPlanFamilyIds`，forced 只记录 diagnostics。
 
 **文件：** 修改 `src/ai/planning/planManager.ts`；新增 `src/ai/planning/planSelector.ts`、`tests/ai/planSelector.test.ts`、`tests/ai/planManagerD1.test.ts`。
 
@@ -388,7 +445,7 @@ export function selectActivePlan(input: {
 1. K=5 时 active 不在静态前四仍被评分；challengers 按 static quality/stable ID 选出。
 2. active 缺失、覆盖不完整、重复牌、非法 group、hard policy violation 立即 forced；pass 合法不 forced。
 3. active/challenger 分数独立计算，challenger delta 未达阈值不切换。
-4. cooldown 内 strategic switch 被硬禁止且没有 `cooldownPenalty`；cooldown 结束后不重复惩罚。
+4. cooldown 内 strategic switch 被硬禁止且没有 `cooldownPenalty`；cooldown 结束后不重复惩罚；forced switch 绕过此前 cooldown 但更新 `lastAnyPlanSwitchDecisionIndex`。
 5. 近期 strategic A→B→A 使用 `2 × minimumScoreDelta`，达到阈值允许切换；普通候选使用 `minimumScoreDelta`。
 6. forced switch 不受 cooldown/return threshold，不进入 `recentStrategicPlanFamilyIds`。
 7. suppression、tie、普通保留不更新 strategic history。
@@ -422,11 +479,11 @@ npx tsc --noEmit
 
 **目标：** 只为内部 benchmark adapter 注入 mode；默认 production 与 benchmark control 完全保持 D0。
 
-**文件：** 修改 `src/ai/aiDecisionEngine.ts`，必要时只增加 `src/ai/contracts.ts` 的 type-only `PlanSelectionMode`；新增 `tests/ai/planSelectionMode.test.ts`、`tests/ai/keepCurrentByteLock.test.ts`。
+**文件：** 修改 `src/ai/aiDecisionEngine.ts`，只从低层 `src/ai/runtimeContracts.ts` 引入 `PlanSelectionMode`；新增 `tests/ai/planSelectionMode.test.ts`、`tests/ai/keepCurrentByteLock.test.ts`。
 
 **先写的失败测试：**
 
-1. 不传 mode 的 production 调用等价于 `keep-current`，runtime 不含 `planSelectionState`。
+1. 不传 mode 的 production 调用等价于 D0 默认路径，runtime 不含 `planSelectionState`。
 2. benchmark control 显式 `keep-current` 仍不创建 sidecar，action/runtime/publicTraceHash 与默认调用一致。
 3. treatment 显式 `dynamic-topk-v1` 才创建 D1 sidecar，并产生 identity/history。
 4. mode 不出现在 `RoomState`、`PublicRoom`、网络序列化、用户配置或 replay public payload。
@@ -436,7 +493,7 @@ npx tsc --noEmit
 
 - 使用内部 invocation option 传 `PlanSelectionMode`；不把 mode 加入 RoomState/PublicRoom/AiObservation。
 - 默认未提供 mode 时走 D0 keep-current 分支，不创建任何 D1 object。
-- benchmark control 仅通过 adapter 显式传 keep-current；treatment adapter 暂不在 P4 注册，留到 P6。
+- benchmark control 在 P4 显式传 keep-current，并逐字节比较 action/runtime/publicTraceHash；treatment adapter 暂不在 P4 注册，留到 P6。
 
 **验证命令：**
 
@@ -444,9 +501,15 @@ npx tsc --noEmit
 npx vitest run tests/ai/planSelectionMode.test.ts tests/ai/keepCurrentByteLock.test.ts tests/ai/aiDecisionEngine.test.ts --testTimeout=120000
 npx vitest run tests/ai/aiDecisionMigration.test.ts --testTimeout=120000
 npx tsc --noEmit
+npm test
+npm run test:simulation
+npm run build
+rg -n "tests/benchmark|legacyAiReference|benchmark|replay" src --glob "*.ts" --glob "*.tsx"
 ```
 
-**完成条件：** 三种 mode 的边界行为锁定；keep-current 字节级行为不变；没有 treatment registration、benchmark 执行或 RoomState 字段。
+静态扫描预期：production `src` 不导入 benchmark/legacy reference，不出现 benchmark switch 或 replay implementation；普通测试、simulation、build 全部 PASS。
+
+**完成条件：** 三种 mode 的边界行为锁定；显式 keep-current 与默认路径 action/runtime/publicTraceHash 字节级一致；没有 treatment registration、benchmark 执行或 RoomState 字段；P4 完整回归检查点通过。
 
 **可回滚提交点：** `d1-p4-mode-isolation`。
 
@@ -464,8 +527,8 @@ npx tsc --noEmit
 
 **先写的失败测试：**
 
-1. 普通 diagnostics 只输出 `forcedSwitchCount`、`strategicSwitchCount`、`switchSuppressedByCooldown`、`switchSuppressedByHysteresis`、`AToBToARate`、switch rate、p50/p95 等聚合字段。
-2. `planScoreBreakdown`、逐 decision 序列、候选详细牌组只在 `debug-full-state = true` 且独立 debug 目录中输出；默认关闭。
+1. 普通 diagnostics 只输出 `forcedSwitchCount`、`strategicSwitchCount`、`switchSuppressedByCooldown`、`switchSuppressedByHysteresis`、`AToBToARate`、switch rate、p50/p95 等聚合字段，并同时输出每项 numerator/denominator；分母遵循第 10 节。
+2. `planScoreBreakdown`、逐 decision 序列、候选详细牌组只在 `debug-plan-selection = true` 且独立 debug 目录中输出；默认关闭。
 3. 主报告不含 partnerHand/opponentsHands/hands/deck/hidden initial hand，递归扫描 `hiddenStateLeakCount = 0`。
 4. forced switch 计入 diagnostics 但不计入 `recentStrategicPlanFamilyIds` 或 A→B→A rate。
 5. diagnostics on/off、debug on/off 不改变动作、runtime public shape 或 publicTraceHash。
@@ -473,7 +536,7 @@ npx tsc --noEmit
 **最小实现步骤：**
 
 - 以 ephemeral decision record 累计聚合；普通 report serializer 只接收 aggregate model。
-- debug writer 使用独立 `artifacts/ai-benchmark-debug-d1/`，显式开启才创建，并在 teardown flush/close。
+- debug writer 使用独立 `artifacts/ai-benchmark-debug-d1/`，显式开启 `debug-plan-selection` 才创建，并在 teardown flush/close。
 - 增加递归 forbidden-key scanner；错误栈、路径、duration 不进入 public hash。
 
 **验证命令：**
@@ -493,11 +556,35 @@ npx tsc --noEmit
 
 ---
 
-## 10. P6：benchmark、联合统计、manifest 与 replay all
+## 10. 行为指标分母
+
+所有报告同时保存 numerator 和 denominator，比例只由下列定义计算：
+
+```text
+dynamicDecisionDenominator = count(decisions run in dynamic-topk-v1 with an active/candidate validation attempt)
+forcedSwitchRate = forcedSwitchCount / dynamicDecisionDenominator
+strategicSwitchRate = strategicSwitchCount / dynamicDecisionDenominator
+
+strategicConsiderationDenominator = count(dynamic decisions that are not forced-invalid
+  and have at least one valid challenger)
+switchSuppressionRate = suppressedStrategicDecisionCount / strategicConsiderationDenominator
+
+strategicSwitchDenominator = strategicSwitchCount
+AToBToARate = recentStrategicReturnSwitchCount / strategicSwitchDenominator
+```
+
+当 denominator 为 0 时报告 `{ numerator: 0, denominator: 0, rate: null }`，不得写成 0% 或省略。
+`forcedSwitchCount`、`strategicSwitchCount`、`suppressedStrategicDecisionCount` 和
+`recentStrategicReturnSwitchCount` 互相分离；forced switch 不进入 strategic history，但仍计入
+`dynamicDecisionDenominator`。主报告和 calibration report 都保存这四组 numerator/denominator/rate。
+
+---
+
+## 11. P6：benchmark、联合统计、manifest 与 replay all
 
 **目标：** 在 tests/scripts 内建立七组 D1 runner、联合 paired uplift、校准 approval artifact、resume/skip-existing 和 replay 完整性验证；本阶段不运行 formal holdout。
 
-### 10.1 七组与 seed 配置
+### 11.1 七组与 seed 配置
 
 ```text
 matchups = [
@@ -518,13 +605,25 @@ formal      = 1001..1200 // 200 base seeds, 1600 raw/group
 paired units。config canonical hash 必须覆盖 mode、strategy descriptor/version、constants、caps、seed set、
 room rules、replay/schema/benchmark version；配置不一致的 batch 拒绝合并。
 
-### 10.2 replay all 语义
+每个 matchup/control provenance 必须同时记录：
+
+```text
+behaviorBaselineCommit = commit resolved by ai-benchmark-d0-baseline tag
+behaviorBaselineTag    = "ai-benchmark-d0-baseline"
+executionSourceCommit  = commit actually running the D1 code
+keepCurrentLockFixtureHash = SHA-256 of P0 D0 fixture file
+```
+
+`behaviorBaselineCommit` 只描述 D0 行为基线，不得冒充 `executionSourceCommit`；report、descriptor、manifest
+和 approval 均保存四项 provenance。
+
+### 11.2 replay all 语义
 
 - 逻辑记录单位：一个 raw game `matchId`；paired unit 和 base-seed block 只在统计层聚合，不生成替代 replay 记录。
 - 物理文件单位：`artifacts/ai-benchmark-replays-d1-topk-switch/<matchup>/<matchId>.json`，每个 raw game 一个文件。
 - formal 每组预期 1600 个 replay 文件、七组合计 11200；formal `replayMode = all`。smoke/calibration 默认 `failures`，只有失败/不完整 raw game 写 replay，除非显式 calibration debug all。
 - replay 必须包含 `schemaVersion`、`benchmarkVersion`、`roomRulesVersion`、strategyDescriptors、configHash、seed、rotation、placement、strategiesBySeat、public action sequence、handCount/trick/贡还公开事件、finishOrder、team result、deterministic random provenance、`finalPublicStateHash`。
-- replay 不得含 partnerHand、opponentsHands、全部 hands、deck、隐藏初始手牌；debug-full-state 另目录且不进入 report。
+- replay 不得含 partnerHand、opponentsHands、全部 hands、deck、隐藏初始手牌；debug-plan-selection 另目录且不进入 report，即使开启也不得保存任何隐藏状态。
 
 manifest 至少包含：`phase`、`matchup`、`replayMode`、`configHash`、`expectedMatchIds`、`completedMatchIds`、
 `replayFilesExpected`、`replayFilesFound`、`replayFilesVerified`、`hashVerified`、`versionVerified`、
@@ -544,40 +643,46 @@ provenanceOk = every seed/rotation/placement/strategy/config/random provenance p
 replayIntegrityOk = replayCountOk && hashOk && finalStateOk && versionOk && privacyOk && provenanceOk
 ```
 
-### 10.3 文件与测试
+### 11.3 文件与测试
 
 **文件：**
 
 - 修改仅限 `tests/benchmark/strategies.ts`（注册 treatment descriptor）、必要时 `tests/benchmark/contracts.ts`。
 - 新增 `tests/benchmark/d1Matrix.ts`、`tests/benchmark/d1Statistics.ts`、`tests/benchmark/d1ReplayValidation.ts`、`tests/benchmark/d1Calibration.ts`。
 - 新增 `scripts/runD1TopKBenchmark.ts`、`scripts/replayD1TopKBenchmark.ts`、`scripts/freezeD1Calibration.ts`。
-- 新增 `tests/benchmark/d1Matrix.test.ts`、`tests/benchmark/d1Statistics.test.ts`、`tests/benchmark/d1ReplayValidation.test.ts`、`tests/benchmark/d1Resume.test.ts`、`tests/benchmark/d1Calibration.test.ts`。
+- 新增 `tests/benchmark/d1Matrix.test.ts`、`tests/benchmark/d1Statistics.test.ts`、`tests/benchmark/d1ReplayValidation.test.ts`、`tests/benchmark/d1Resume.test.ts`、`tests/benchmark/d1Calibration.test.ts`、`tests/benchmark/d1FormalGate.test.ts`、`tests/benchmark/d1FormalBatchLoop.test.ts`。
 
 **先写的失败测试：**
 
-1. 七组名称、seed ranges、raw/paired counts 和 configHash 字段完整且无 D0 overlap。
+1. 七组名称、seed ranges、raw/paired counts 和 configHash 字段完整且无 D0 overlap；control provenance 四字段齐全且 baseline/source commit 不混淆。
 2. 同一 base seed 的 8 局 block 产生一个 paired unit block；joint uplift 使用相同 block，不允许两个独立 CI 相减。
 3. 固定 bootstrap `iterations=10000`、`seed=20260714` 的结果重复运行字节稳定；bootstrap 元数据写入 report。
 4. replay all 预期每组 1600/总计 11200；manifest counts、hash、version、privacy、provenance 全通过。
 5. 缺失/重复/未知 matchId、configHash、version、publicTraceHash、duration 或 provenance 时验证失败，不跳过或替换。
-6. batch 原子落盘后 `resume`/`skip-existing` 恢复；错误 configHash batch 拒绝合并。
+6. formal gate、28-batch dry-run、atomic writer、`resume`/`skip-existing` 在 P6 已实现并测试；错误 configHash batch 拒绝合并。
 7. worker_threads concurrency=1 与 N 的候选、action、hash、runtime（排除耗时）一致；worker 不共享 runtime、diagnostics、RNG 或 mutable cache。
 
 **最小实现步骤：**
 
 - 复用真实 `createRoom`、`playCards`、`passTurn` simulator，不复制规则。
-- 先实现 manifest/config canonical hash 和原子 batch writer，再接七组 descriptor。
+- 先实现 manifest/config canonical hash、formal gate、28-batch loop 和原子 batch writer，再接七组 descriptor；P7/P8 不再修改这些 formal 代码。
 - 实现 block-level statistics 与 joint uplift bootstrap；独立 matchup CI 仍保留，但 uplift 不相减独立 CI。
 - 实现 replay validator 和 privacy scanner；最后接 CLI 参数 `--phase smoke|calibration|formal`、`--resume`、`--skip-existing`、`--concurrency`。
 
 **验证命令：**
 
 ```powershell
-npx vitest run tests/benchmark/d1Matrix.test.ts tests/benchmark/d1Statistics.test.ts tests/benchmark/d1ReplayValidation.test.ts tests/benchmark/d1Resume.test.ts tests/benchmark/d1Calibration.test.ts --testTimeout=120000 --reporter=verbose
+npx vitest run tests/benchmark/d1Matrix.test.ts tests/benchmark/d1Statistics.test.ts tests/benchmark/d1ReplayValidation.test.ts tests/benchmark/d1Resume.test.ts tests/benchmark/d1Calibration.test.ts tests/benchmark/d1FormalGate.test.ts tests/benchmark/d1FormalBatchLoop.test.ts --testTimeout=120000 --reporter=verbose
 npx tsc --noEmit
+npm test
+npm run test:benchmark
+npm run test:simulation
+npm run test:ai-performance
+npm run build
+git diff --check
 ```
 
-预期：focused tests PASS；不执行 `scripts/runD1TopKBenchmark.ts --phase formal`。
+预期：focused tests、普通、benchmark、simulation、performance、build 和 diff-check 全部 PASS；formal runner 仅执行 dry-run gate/manifest tests，不执行 formal simulation。
 
 **完成条件：** 七组和联合 uplift 统计契约固定；replay all/manifest/resume 验证可用；treatment descriptor 仅存在 benchmark adapter；尚未生成 formal artifact。
 
@@ -589,15 +694,16 @@ npx tsc --noEmit
 
 ---
 
-## 11. P7：冒烟与 50-seed 校准（强制暂停）
+## 12. P7：冒烟与 50-seed 校准（强制暂停）
 
 **目标：** 运行 smoke 201–220 与 calibration 221–270，生成校准记录和待批准冻结 artifact；严禁运行 formal 1001–1200。
 
 **文件：**
 
-- 修改 `scripts/runD1TopKBenchmark.ts` 的 phase gate 和 `scripts/freezeD1Calibration.ts` 的 approval validation。
-- 新增 `tests/benchmark/d1CalibrationFlow.test.ts`、`tests/benchmark/d1FormalGate.test.ts`。
-- 新增/归档 `artifacts/ai-benchmark-d1-calibration-<configHash>.json/.md` 和 approval template；不写入 D0 artifact。
+- 不修改 formal runner、formal gate、28-batch loop、atomic writer、resume 或 replay validator；这些必须已在 P6 提交并测试。
+- 只调用 P6 已实现的 `scripts/runD1TopKBenchmark.ts --phase smoke|calibration` 和 `scripts/freezeD1Calibration.ts --validate-only`。
+- 新增 `tests/benchmark/d1CalibrationFlow.test.ts`（只验证 phase/approval material，不改 formal gate）。
+- calibration raw/batch/replay/debug 报告外部归档；Git 只新增 `docs/benchmark-approvals/d1-topk-calibration-approval.json` 小文件。
 
 **先写的失败测试：**
 
@@ -619,15 +725,17 @@ npx tsc --noEmit
 
 **校准记录文件：**
 
-`artifacts/ai-benchmark-d1-calibration-<configHash>.json` 和 `.md` 必须包含：
+外部归档的 `artifacts/ai-benchmark-d1-calibration-<configHash>.json` 和 `.md` 必须包含：
 
 - 实际 seed ranges、七组 counts、raw/paired results、joint uplift preview；
 - `minimumScoreDelta`、K、cooldown decision indices、A→B→A multiplier；
 - `forcedSwitchRate`、`strategicSwitchRate`、`switchSuppressionRate`、`AToBToARate`；
+- 四项行为指标的 numerator/denominator；
 - 候选 `approvedBehaviorCaps`、`greedyImprovementMargin`、`randomNonInferiorityMargin`、`legacyNonInferiorityMargin`；
 - bootstrap iterations/seed（初始 `10000`/`20260714`）、implementationVersion、strategy descriptors、roomRulesVersion、configHash；
 - replay/hash/version/privacy/provenance summary；
-- `formalExecutionAllowed: false`。
+- control provenance：`behaviorBaselineCommit`/tag、`executionSourceCommit`、`keepCurrentLockFixtureHash`；
+- `formalExecutionAllowed: false`；raw 报告的 SHA-256 和外部归档位置必须记录到 Git approval 小文件。
 
 **人工批准点：**
 
@@ -651,53 +759,80 @@ npx tsc --noEmit
 [ ] formalExecutionAllowed 仍为 false，等待明确批准
 ```
 
-冻结文件 `artifacts/ai-benchmark-d1-calibration-approval.json` 必须记录 `approvedAt`、reviewer、
-approval commit、所有冻结常量、`approvedBehaviorCaps`、三个 non-inferiority/improvement margins、
-bootstrap metadata 和最终 configHash。批准前不得创建 formal manifest 或 formal replay batch。
+Git 可追溯的小文件 `docs/benchmark-approvals/d1-topk-calibration-approval.json` 必须记录：
+
+```json
+{
+  "approvedCodeCommit": "P6/P7 formal code commit",
+  "approvalCommit": "reviewer decision commit immediately before approval file commit",
+  "approvalFileCommit": "commit adding this small JSON file",
+  "configHash": "frozen config hash",
+  "behaviorBaselineCommit": "commit resolved from ai-benchmark-d0-baseline",
+  "behaviorBaselineTag": "ai-benchmark-d0-baseline",
+  "executionSourceCommit": "approved D1 code commit",
+  "keepCurrentLockFixtureHash": "P0 fixture SHA-256",
+  "calibrationReportSha256": "external report hash",
+  "calibrationReportLocation": "external archive location",
+  "formalExecutionAllowed": false
+}
+```
+
+为避免 Git 自引用 hash，先创建 reviewer decision commit 作为 `approvalCommit`，再提交 JSON 作为
+`approvalFileCommit`；runner 验证两者的 parent/child 关系。批准记录还要包含 `approvedAt`、reviewer、全部冻结常量、`approvedBehaviorCaps`、三个
+non-inferiority/improvement margins、bootstrap metadata、control provenance 和最终 configHash。
+raw calibration/batch/replay/debug 不提交 Git；批准前不得创建 formal manifest 或 formal replay batch。
 
 **验证命令：**
 
 ```powershell
 npx tsx scripts/runD1TopKBenchmark.ts --phase smoke --replay-mode failures --concurrency 1
+npm test
+npm run test:simulation
+npm run build
+rg -n "tests/benchmark|legacyAiReference|benchmark|replay" src --glob "*.ts" --glob "*.tsx"
 npx tsx scripts/runD1TopKBenchmark.ts --phase calibration --replay-mode failures --concurrency 1
 npx tsx scripts/freezeD1Calibration.ts --validate-only
 npx vitest run tests/benchmark/d1Calibration.test.ts tests/benchmark/d1ReplayValidation.test.ts --testTimeout=120000 --reporter=verbose
 ```
 
-**完成条件：** smoke/calibration 全部 batch 原子落盘；校准报告和 approval template 生成；formal 未运行；流程暂停等待人工批准。
+校准执行前必须再次通过完整门禁；静态扫描预期 production src 不导入 benchmark/legacy reference，不含 benchmark/replay code；普通测试、simulation、build 全部 PASS。
+
+**完成条件：** smoke/calibration 全部 batch 原子落盘；外部校准报告和 Git approval template 生成；formal 未运行；P6 formal code/runner 未被修改；流程暂停等待人工批准。
 
 **可回滚提交点：** `d1-p7-smoke-calibration-ready`。校准 artifact 外部归档，不覆盖 D0。
 
 **keep-current 风险：** 低；control 显式 keep-current，P7 不改变 production 默认 mode。
 
-**预估运行时间：** smoke 约 5–20 分钟；calibration 约 15–60 分钟，取决于当前 simulator 的单局实测；不包含人工审批等待时间。
+**预估运行时间：** 按 D0 实测约 3.87 秒/raw game：smoke 约 1–1.5 小时；calibration 约 3–4 小时；不包含人工审批等待时间。每 50-seed batch 完成后立即检查点落盘。
 
 ---
 
-## 12. P8：正式 holdout（仅批准后）
+## 13. P8：正式 holdout（仅批准后）
 
 **文件：**
 
-- 修改 `scripts/runD1TopKBenchmark.ts` 的 formal gate、batch loop 和 atomic writer；修改 `scripts/replayD1TopKBenchmark.ts` 的 all-mode validator。
-- 修改 `tests/benchmark/d1Matrix.ts`、`tests/benchmark/d1ReplayValidation.ts`、`tests/benchmark/d1Statistics.ts` 以读取 frozen approval。
-- 新增 `tests/benchmark/d1FormalExecution.test.ts`、`tests/benchmark/d1FormalManifest.test.ts`、`tests/benchmark/d1FormalResume.test.ts`。
+- 不修改任何 formal runner、gate、28-batch loop、atomic writer、resume、skip-existing 或 replay all 代码；这些必须在 P6/P7 批准前完成并测试。
+- P8 只读取 P6/P7 已提交的 runner 和 `docs/benchmark-approvals/d1-topk-calibration-approval.json`，执行既有命令。
+- formal gate、28-batch、atomic writer、resume/skip-existing、replay all 的测试必须已在 P6/P7 完成；P8 不新增或修改测试代码。
 - 新增 formal batch/replay/report 外部归档文件；不得覆盖 D0 `ai-benchmark-baseline.*`。
 
-**先写的失败测试：**
+**P8 execution-only 验收：**
 
-1. 没有 `formalExecutionAllowed=true`、approval commit/HEAD/configHash 不一致时，formal CLI 拒绝启动。
-2. 任一 50-seed batch 不是 400 raw/200 paired/all replay，或 expected/completed matchId 集合不相等时，batch 失败且不合并。
-3. 断点续跑只跳过通过 provenance/hash/version/privacy/duration 校验的结果；失败/超时/非法动作不能替换。
-4. 28 batches 完成后七组总数为 11200 raw/5600 paired，三组 uplift 使用联合 block bootstrap。
+1. P6/P7 已有测试证明没有 `formalExecutionAllowed=true`、approval commit/HEAD/configHash 不一致时 formal CLI 拒绝启动。
+2. P6/P7 已有测试证明任一 50-seed batch 不是 400 raw/200 paired/all replay，或 expected/completed matchId 集合不相等时，batch 失败且不合并。
+3. P6/P7 已有测试证明断点续跑只跳过通过 provenance/hash/version/privacy/duration 校验的结果；失败/超时/非法动作不能替换。
+4. P8 只执行 28 batches；完成后七组总数为 11200 raw/5600 paired，三组 uplift 使用联合 block bootstrap。
 
-**最小实现步骤：**
+**执行步骤：**
 
-- 先实现 approval gate 和 frozen config verifier，再实现单个 matchup 的 50-seed atomic batch。
-- 通过 resume/skip-existing 演练后扩展到七组 28 batches。
-- 最后运行 all replay validator、聚合 ordinary paired statistics 和 joint uplift；不在运行中修改参数。
+- 读取 approval JSON，并验证 `formalExecutionAllowed=true`、`approvalCommit` 与 `approvalFileCommit` 存在且为 reviewer decision commit 的直接 parent/child、`configHash` 一致。
+- 验证执行代码 commit：runner 当前 `executionSourceCommit` 必须等于 `approvedCodeCommit`；若 approval commit 在其上，使用 `git show approvalCommit:path` 读取 approval，并要求 approved code 与当前 worktree code tree（除 approval 文件）字节一致。
+- 逐 50-seed batch 调用已测试 runner；通过 resume/skip-existing 检查后扩展到七组 28 batches。
+- 最后运行 all replay validator、聚合 ordinary paired statistics 和 joint uplift；运行期间禁止修改参数或代码。
 
-**前置门禁：** 必须存在 `artifacts/ai-benchmark-d1-calibration-approval.json`，其 `formalExecutionAllowed = true`、
-approval commit 等于待执行 HEAD、configHash 与 runner 一致，且 P7 全部测试 PASS。缺任何一项，CLI 必须拒绝启动。
+**前置门禁：** 必须存在 Git 文件 `docs/benchmark-approvals/d1-topk-calibration-approval.json`，其
+`formalExecutionAllowed = true`、`approvalCommit`/`approvalFileCommit` 可追溯、`approvedCodeCommit` 与执行代码一致、
+`configHash` 与 runner 一致，且 P7 全部测试 PASS。缺任何一项，CLI 必须拒绝启动；P8 不再修改 formal 代码。
 
 **正式配置：**
 
@@ -721,7 +856,7 @@ approval commit 等于待执行 HEAD、configHash 与 runner 一致，且 P7 全
 
 ```powershell
 npx tsx scripts/runD1TopKBenchmark.ts --phase formal --matchup treatment-control --seed-start 1001 --seed-end 1050 --replay-mode all --resume --skip-existing --concurrency 1
-npx tsx scripts/replayD1TopKBenchmark.ts --manifest <batch-manifest> --verify all
+npx tsx scripts/replayD1TopKBenchmark.ts --manifest artifacts/ai-benchmark-d1-topk-switch-batches/treatment-control-1001-1050-manifest.json --verify all
 npx vitest run tests/benchmark/d1Resume.test.ts tests/benchmark/d1ReplayValidation.test.ts --testTimeout=120000 --reporter=verbose
 ```
 
@@ -733,24 +868,29 @@ npx vitest run tests/benchmark/d1Resume.test.ts tests/benchmark/d1ReplayValidati
 
 **keep-current 风险：** 中；正式 runner 同时执行 control/treatment。若 control action/runtime/hash 与 P0 lock 不同，立即停止，不继续其他 matchup。
 
-**预估运行时间：** 28 批 × 当前单组 50-seed 实测时间；预计 2–8 小时（`concurrency=1`），若启用 worker_threads 并行需重新验证 hash/资源清理后再估算，不得用 Promise 并发冒充 CPU 并行。
+**预估运行时间：** 按 D0 实测约 3.87 秒/raw game，formal 串行约 12–18 小时；28 批每个 50-seed 检查点完成后立即原子落盘。若启用 worker_threads 并行需另行验证 hash/资源清理，不得用 Promise 并发冒充 CPU 并行。
 
 ---
 
-## 13. 测试矩阵映射
+## 14. 测试矩阵映射
 
 | 设计/验收要求 | P0 | P1 | P2 | P3 | P4 | P5 | P6 | P7 | P8 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | D0 keep-current action/runtime/hash 字节锁定 | ✓ | ✓ |  |  | ✓ | ✓ | ✓ | ✓ | ✓ |
+| P0 不依赖 mode API、P4 显式 keep-current 等价 | ✓ |  |  |  | ✓ |  |  |  |  |
 | optional sidecar、无旧字段默认污染 | ✓ | ✓ |  |  | ✓ |  |  |  |  |
+| runtimeContracts → contracts → planning 单向依赖 |  | ✓ |  |  |  |  |  |  |  |
 | canonical root/family/lineage 与 migration |  | ✓ |  | ✓ |  |  |  |  |  |
 | 评分公式/clamp/连续边界/protectionLoss |  |  | ✓ |  |  |  |  |  |  |
+| candidate-specific endgame/pressure 与整数压力端点 |  |  | ✓ |  |  |  |  |  |  |
 | active + K-1、forced validity、stable tie-break |  |  |  | ✓ |  |  |  |  |  |
-| cooldown 唯一硬门禁、回切软阈值 |  |  |  | ✓ | ✓ |  |  | ✓ | ✓ |
+| cooldown、lastAny index、strategic-only history |  | ✓ |  | ✓ | ✓ |  | ✓ | ✓ | ✓ |
 | mode 不进入 RoomState/PublicRoom |  |  |  |  | ✓ | ✓ | ✓ | ✓ | ✓ |
 | diagnostics 聚合/debug/privacy |  |  |  |  |  | ✓ | ✓ | ✓ | ✓ |
+| 行为指标 numerator/denominator |  |  |  |  |  | ✓ | ✓ | ✓ | ✓ |
 | 七组矩阵、seed disjoint、联合 uplift |  |  |  |  |  |  | ✓ | ✓ | ✓ |
 | replay all、manifest、resume、skip-existing |  |  |  |  |  |  | ✓ | ✓ | ✓ |
+| formal gate/28-batch/atomic writer 在批准前完成 |  |  |  |  |  |  | ✓ | ✓ |  |
 | formal 11200 raw / 5600 paired |  |  |  |  |  |  |  |  | ✓ |
 
 每个阶段结束必须运行该阶段 focused tests 和 `npx tsc --noEmit`；P4/P6/P8 额外运行 `git diff --check`。
@@ -758,7 +898,7 @@ npx vitest run tests/benchmark/d1Resume.test.ts tests/benchmark/d1ReplayValidati
 
 ---
 
-## 14. 风险清单与缓解
+## 15. 风险清单与缓解
 
 | 风险 | 触发信号 | 缓解/停止条件 |
 |---|---|---|
@@ -776,7 +916,7 @@ npx vitest run tests/benchmark/d1Resume.test.ts tests/benchmark/d1ReplayValidati
 
 ---
 
-## 15. 校准后的人工批准检查点
+## 16. 校准后的人工批准检查点
 
 P7 的唯一出口是人工批准，不接受隐式批准或“先跑 formal 再补记录”。批准人必须在同一 review 中检查：
 
@@ -792,11 +932,30 @@ P7 的唯一出口是人工批准，不接受隐式批准或“先跑 formal 再
 
 ---
 
-## 16. 完成定义与阶段提交约定
+## 17. 问题—修订位置—最终决定
+
+| 问题 | 修订位置 | 最终决定 |
+|---|---|---|
+| P0 是否依赖尚未存在的 mode API？ | P0、P4、依赖图 | P0 只锁 D0 默认调用和现有 unified adapter；显式 `keep-current` 等价测试移到 P4。 |
+| contracts 依赖方向如何保持单向？ | P1 文件清单、接口与测试 | `runtimeContracts.ts`/`contracts.ts` 只提供低层 DTO；planning contracts 只能向下依赖，不被顶层 contracts 导入。 |
+| P2 公式是否遗漏 candidate quality 或重复计分？ | P2 精确公式与边界测试 | endgame/pressure 都包含 candidate-specific quality；responseCoverage 只用于 pressure，lowSingles 只用于 static，estimatedTurns 二次权重明确为 intentional。 |
+| opponent pressure 如何处理完成对手？ | P2 公式与测试 | 只对未进入 finishOrder 的对手取 `minPositiveHandCount`；0 张已完成对手不参与压力最小值；整数端点和单调性测试。 |
+| forced switch 是否影响 cooldown？ | 全局约束、P3 选择器 | forced 绕过此前 cooldown，但任何实际 forced/strategic switch 更新 `lastAnyPlanSwitchDecisionIndex`；forced 不进入 strategic history。 |
+| formal runner 何时实现？ | 依赖图、P6/P7/P8 | formal gate、28 批循环、atomic writer、resume、replay all 全部在 P6/P7 批准前实现并测试；P8 仅 execution-only。 |
+| approval 文件如何 Git 可追溯？ | P6/P7 approval | 小文件提交 `docs/benchmark-approvals/d1-topk-calibration-approval.json`；raw/batch/replay/debug 外部归档，记录 hash/location、approvedCodeCommit、approvalCommit、configHash。 |
+| D0 fixture 如何生成与锁定？ | P0 文件、步骤与测试 | 从 D0 tag 独立 worktree 生成，记录 source/generator/input/output hashes；D1 不自动刷新，byte lock 不忽略新增 runtime 字段。 |
+| planIdentityById 如何清理？ | 稳定 ID、P1 测试 | 上限 `K+2`；保留当前 candidates、active、必要 previous；active 不删；按固定 quality/ID 顺序清理；fullReplanCount 仅成功提交后递增。 |
+| 行为指标分母是什么？ | 第 10 节、P5 diagnostics | 四项 rate 均报告 numerator/denominator；forced/strategic 用 dynamic decision denominator，suppression 用 eligible strategic consideration denominator，A→B→A 用 strategic switch denominator。 |
+| control provenance 如何避免误写 D0 commit？ | P6/P7 provenance | 同时记录 baseline commit/tag、实际 executionSourceCommit、P0 fixture hash；baseline 只代表行为基线，不代表 formal 执行代码。 |
+| debug 模式是否允许隐藏状态？ | P5、replay 约束 | 统一命名 `debug-plan-selection`；即使开启也禁止 hidden hands、全部 hands、deck 和隐藏初始手牌。 |
+| 时间预算是否按 D0 实测？ | P7/P8 运行时间 | 按 3.87 秒/raw game：smoke 1–1.5 小时、calibration 3–4 小时、formal 串行 12–18 小时；每 50-seed 原子检查点。 |
+| 完整回归在哪些门点执行？ | P4、P6、P7 验证命令 | P4 跑 npm test/simulation/build/static scan；P6 再跑普通/benchmark/simulation/performance/build/diff；P7 calibration 前重跑完整门禁。 |
+
+## 18. 完成定义与阶段提交约定
 
 - 每个 P 阶段都有独立 commit、focused tests、`npx tsc --noEmit` 和完成条件记录。
 - P0 是第一提交；P1–P6 任何失败不得进入后续阶段；P7 完成后强制暂停。
-- P8 只有人工批准 artifact、冻结 configHash 和对应 HEAD 同时存在时才允许运行。
+- P8 只有 Git approval file、冻结 configHash、可追溯 approvalCommit/approvalFileCommit 和执行代码等于 approvedCodeCommit 时才允许运行。
 - D1 正式验收前 production 默认仍为 keep-current；不修改 D0 tag、D0 artifacts、D0 manifest。
 - P8 完成后另行运行 focused benchmark/replay tests、`npm test`、`npm run test:ai-performance`、`npx tsc --noEmit`、`npm run build`、`git diff --check` 和 production static scan；这些不是本轮文档提交的执行内容。
 
