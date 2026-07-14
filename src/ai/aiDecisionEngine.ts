@@ -11,7 +11,7 @@ import type { PlanValidation, SelectorConstants, SelectorScore } from "./plannin
 import { evaluateActionCandidate } from "./tactics/actionEvaluator";
 import { generateActionCandidates, type ActionGenerationInput } from "./tactics/actionGenerator";
 import { evaluateAiRole } from "./tactics/roleEvaluator";
-import { measureGroupDetection, recordTiming } from "./diagnostics/aiPlanningDiagnostics";
+import { measureGroupDetection, recordD1PlanSelection, recordTiming } from "./diagnostics/aiPlanningDiagnostics";
 
 const analysisCache = new HandAnalysisCache(64);
 const D1_DYNAMIC_CONSTANTS: SelectorConstants = Object.freeze({
@@ -126,14 +126,42 @@ function applyDynamicSelection(
   const context = buildDynamicContext(dynamicRuntime, observation);
   const input = dynamicManagerInput(dynamicRuntime, context, observation, analysis, policyIndex, config, invocation);
   const first = applyDynamicPlanSelection(input);
-  if (first.result.reason !== "replan-required" && first.result.reason !== "no-valid-plan") return first.runtime;
+  if (first.result.reason !== "replan-required" && first.result.reason !== "no-valid-plan") {
+    recordDynamicDiagnostics(diagnostics, dynamicRuntime, first.result, observation.seat, invocation.decisionIndex ?? config.turn);
+    return first.runtime;
+  }
   const replanned = ensurePlans({ ...dynamicRuntime, needsReplan: true }, observation.hand, observation.gameRank, config.turn, config.planning, config.version, diagnostics);
   const retryMigration = migrateD1State(replanned, migrationContext);
   if (retryMigration.kind !== "migrated") throw new Error("AI_ENGINE_D1_REPLAN_FAILED");
   const retryRuntime = { ...replanned, planSelectionState: retryMigration.state };
   const retry = applyDynamicPlanSelection(dynamicManagerInput(retryRuntime, buildDynamicContext(retryRuntime, observation), observation, analysis, policyIndex, config, invocation));
   if (retry.result.reason === "replan-required" || retry.result.reason === "no-valid-plan") throw new Error("AI_ENGINE_D1_REPLAN_FAILED");
+  recordDynamicDiagnostics(diagnostics, retryRuntime, retry.result, observation.seat, invocation.decisionIndex ?? config.turn);
   return retry.runtime;
+}
+
+function recordDynamicDiagnostics(
+  diagnostics: AiDecisionConfig["diagnostics"],
+  runtime: AiRuntimeState,
+  result: import("./planning/planSelectionContracts").PlanSelectionResult,
+  seat: number,
+  decisionIndex: number,
+): void {
+  const reason = result.reason;
+  const selectedFamily = result.state?.activePlanFamilyId;
+  const recentFamilies = runtime.planSelectionState?.recentStrategicPlanFamilyIds ?? [];
+  recordD1PlanSelection(diagnostics, {
+    decisionIndex,
+    seat,
+    candidateCount: runtime.candidatePlans.length,
+    activeValid: !reason.startsWith("forced-") && reason !== "forced-missing",
+    challengerCount: Math.max(0, runtime.candidatePlans.length - 1),
+    reason,
+    recentStrategicReturnSwitch: reason === "strategic-switch" && selectedFamily !== undefined && recentFamilies.includes(selectedFamily),
+    decisionIndicesSinceLastSwitch: runtime.planSelectionState?.lastAnyPlanSwitchDecisionIndex === undefined
+      ? undefined
+      : Math.max(0, decisionIndex - runtime.planSelectionState.lastAnyPlanSwitchDecisionIndex),
+  });
 }
 
 function dynamicManagerInput(
