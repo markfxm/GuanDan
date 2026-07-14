@@ -1,10 +1,9 @@
 import type { Card, GameRank } from "../../engine/cards";
 import type { CardGroup } from "../../engine/groups";
 import type { AiRuntimeState, HandPlan } from "../contracts";
-import type { PlanSelectionMode, D1PlanSelectionState } from "../runtimeContracts";
+import type { D1PlanSelectionState } from "../runtimeContracts";
 
 export type PlanSelectionContext = Readonly<{
-  mode?: PlanSelectionMode;
   seat: number;
   partnerSeat: number;
   gameRank: GameRank;

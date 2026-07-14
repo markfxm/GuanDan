@@ -1,16 +1,32 @@
 import { classifyPlay, canBeatPlay } from "../game/playRules";
 import { HandAnalysisCache } from "./analysis/handAnalysisCache";
 import type { AiDecision, AiDecisionConfig, AiObservation, AiRuntimeState, ActionCandidate, ActionScore } from "./contracts";
+import type { PlanSelectionMode } from "./runtimeContracts";
 import { createPowerGroupPolicyIndex, evaluatePowerGroupUse, type PowerGroupPolicyIndex } from "./policy/powerGroupPolicy";
-import { ensurePlans } from "./planning/planManager";
+import { applyDynamicPlanSelection, ensurePlans, type DynamicPlanManagerInput } from "./planning/planManager";
+import { evaluateDynamicPlan } from "./planning/planEvaluator";
+import { migrateD1State } from "./planning/planIdentity";
+import type { PlanSelectionContext } from "./planning/planSelectionContracts";
+import type { PlanValidation, SelectorConstants, SelectorScore } from "./planning/planSelector";
 import { evaluateActionCandidate } from "./tactics/actionEvaluator";
 import { generateActionCandidates, type ActionGenerationInput } from "./tactics/actionGenerator";
 import { evaluateAiRole } from "./tactics/roleEvaluator";
 import { measureGroupDetection, recordTiming } from "./diagnostics/aiPlanningDiagnostics";
 
 const analysisCache = new HandAnalysisCache(64);
+const D1_DYNAMIC_CONSTANTS: SelectorConstants = Object.freeze({
+  k: 5,
+  minimumScoreDelta: 6,
+  cooldownDecisionIndices: 2,
+  recentFamilyWindow: 3,
+});
 
-export function decideAiAction(observation: AiObservation, runtime: AiRuntimeState, config: AiDecisionConfig): AiDecision {
+export type AiDecisionInvocationOptions = Readonly<{
+  planSelectionMode?: PlanSelectionMode;
+  decisionIndex?: number;
+}>;
+
+export function decideAiAction(observation: AiObservation, runtime: AiRuntimeState, config: AiDecisionConfig, invocation: AiDecisionInvocationOptions = {}): AiDecision {
   const diagnostics = config.diagnostics;
   const startedAt = performance.now();
   if (diagnostics !== undefined) diagnostics.decisionCount += 1;
@@ -22,8 +38,11 @@ export function decideAiAction(observation: AiObservation, runtime: AiRuntimeSta
   if (diagnostics !== undefined && cachedAnalysis.created) diagnostics.handAnalysisBuildCount += 1;
   recordTiming(diagnostics, "handAnalysis", analysisStartedAt);
   const updatedRuntime = ensurePlans(runtime, observation.hand, observation.gameRank, config.turn, config.planning, config.version, diagnostics);
-  const selectedPlan = updatedRuntime.candidatePlans.find((plan) => plan.id === updatedRuntime.activePlanId) ?? updatedRuntime.candidatePlans[0];
   const policyIndex = createPowerGroupPolicyIndex(analysis.groups, observation.gameRank);
+  const selectedRuntime = (invocation.planSelectionMode ?? "keep-current") === "dynamic-topk-v1"
+    ? applyDynamicSelection(updatedRuntime, observation, config, analysis, policyIndex, invocation, diagnostics)
+    : updatedRuntime;
+  const selectedPlan = selectedRuntime.candidatePlans.find((plan) => plan.id === selectedRuntime.activePlanId) ?? selectedRuntime.candidatePlans[0];
   const generationInput: ActionGenerationInput = {
     hand: observation.hand,
     gameRank: observation.gameRank,
@@ -60,7 +79,7 @@ export function decideAiAction(observation: AiObservation, runtime: AiRuntimeSta
   recordTiming(diagnostics, "totalDecision", startedAt);
   return {
     action: selected.candidate.action,
-    runtime: updatedRuntime,
+    runtime: selectedRuntime,
     selectedPlan,
     selectedPlanId: selectedPlan?.id,
     score: selected.score,
@@ -70,6 +89,125 @@ export function decideAiAction(observation: AiObservation, runtime: AiRuntimeSta
     elapsedMs,
     reasonCodes: reasonCodes.filter((code): code is AiDecision["reasonCodes"][number] => isBreakReason(code)),
   };
+}
+
+function applyDynamicSelection(
+  runtime: AiRuntimeState,
+  observation: AiObservation,
+  config: AiDecisionConfig,
+  analysis: ReturnType<HandAnalysisCache["getOrCreate"]>,
+  policyIndex: PowerGroupPolicyIndex,
+  invocation: AiDecisionInvocationOptions,
+  diagnostics: AiDecisionConfig["diagnostics"],
+): AiRuntimeState {
+  const migrationContext = {
+    schemaVersion: "d1-topk-runtime-v1",
+    roomRulesVersion: "d0-room-rules-v1",
+    strategyId: "unified",
+    strategyVersion: config.version,
+    configHash: config.version,
+    seat: observation.seat,
+    configVersion: config.version,
+    hand: observation.hand,
+    gameRank: observation.gameRank,
+  } as const;
+  let dynamicRuntime = runtime;
+  if (dynamicRuntime.planSelectionState === undefined) {
+    const migration = migrateD1State(dynamicRuntime, migrationContext);
+    if (migration.kind === "migrated") {
+      dynamicRuntime = { ...dynamicRuntime, planSelectionState: migration.state };
+    } else {
+      const replanned = ensurePlans({ ...dynamicRuntime, needsReplan: true }, observation.hand, observation.gameRank, config.turn, config.planning, config.version, diagnostics);
+      const retryMigration = migrateD1State(replanned, migrationContext);
+      if (retryMigration.kind !== "migrated") throw new Error("AI_ENGINE_D1_MIGRATION_REQUIRED");
+      dynamicRuntime = { ...replanned, planSelectionState: retryMigration.state };
+    }
+  }
+  const context = buildDynamicContext(dynamicRuntime, observation);
+  const input = dynamicManagerInput(dynamicRuntime, context, observation, analysis, policyIndex, config, invocation);
+  const first = applyDynamicPlanSelection(input);
+  if (first.result.reason !== "replan-required" && first.result.reason !== "no-valid-plan") return first.runtime;
+  const replanned = ensurePlans({ ...dynamicRuntime, needsReplan: true }, observation.hand, observation.gameRank, config.turn, config.planning, config.version, diagnostics);
+  const retryMigration = migrateD1State(replanned, migrationContext);
+  if (retryMigration.kind !== "migrated") throw new Error("AI_ENGINE_D1_REPLAN_FAILED");
+  const retryRuntime = { ...replanned, planSelectionState: retryMigration.state };
+  const retry = applyDynamicPlanSelection(dynamicManagerInput(retryRuntime, buildDynamicContext(retryRuntime, observation), observation, analysis, policyIndex, config, invocation));
+  if (retry.result.reason === "replan-required" || retry.result.reason === "no-valid-plan") throw new Error("AI_ENGINE_D1_REPLAN_FAILED");
+  return retry.runtime;
+}
+
+function dynamicManagerInput(
+  runtime: AiRuntimeState,
+  context: PlanSelectionContext,
+  observation: AiObservation,
+  analysis: ReturnType<HandAnalysisCache["getOrCreate"]>,
+  policyIndex: PowerGroupPolicyIndex,
+  config: AiDecisionConfig,
+  invocation: AiDecisionInvocationOptions,
+): DynamicPlanManagerInput {
+  return {
+    runtime,
+    context,
+    candidates: runtime.candidatePlans,
+    activePlanId: runtime.activePlanId,
+    decisionIndex: invocation.decisionIndex ?? config.turn,
+    constants: D1_DYNAMIC_CONSTANTS,
+    validatePlan: (plan, value) => validateDynamicPlan(plan, value, analysis.groups, policyIndex),
+    evaluatePlan: (plan) => {
+      const evaluated = evaluateDynamicPlan({
+        plan,
+        hand: observation.hand,
+        gameRank: observation.gameRank,
+        seat: observation.seat,
+        partnerSeat: observation.partnerSeat,
+        handCounts: observation.handCounts,
+        finishOrder: observation.finishOrder,
+        lastPlay: observation.lastPlay,
+        lastPlaySeat: observation.lastPlaySeat,
+        partnerPassedCurrentTrick: observation.partnerPassedCurrentTrick,
+        powerGroupPolicyIndex: policyIndex,
+        analysis,
+      });
+      return {
+        planId: evaluated.planId,
+        total: evaluated.total,
+        staticPlanQuality: evaluated.staticPlanQuality,
+        remainingGroupCount: plan.groups.length,
+        powerGroupRisk: evaluated.components.powerGroupRisk,
+      } satisfies SelectorScore;
+    },
+  };
+}
+
+function buildDynamicContext(runtime: AiRuntimeState, observation: AiObservation): PlanSelectionContext {
+  return {
+    seat: observation.seat,
+    partnerSeat: observation.partnerSeat,
+    gameRank: observation.gameRank,
+    hand: observation.hand,
+    handCount: observation.hand.length,
+    playedCards: observation.playedCards,
+    handCounts: observation.handCounts,
+    lastPlay: observation.lastPlay,
+    lastPlaySeat: observation.lastPlaySeat,
+    finishOrder: observation.finishOrder,
+    partnerPassedCurrentTrick: observation.partnerPassedCurrentTrick,
+    candidatePlans: runtime.candidatePlans,
+    runtime,
+  };
+}
+
+function validateDynamicPlan(plan: import("./contracts").HandPlan, context: PlanSelectionContext, allGroups: ReturnType<HandAnalysisCache["getOrCreate"]>["groups"], policyIndex: PowerGroupPolicyIndex): PlanValidation {
+  const handIds = context.hand.map((card) => card.id);
+  const groupIds = plan.groups.flatMap((group) => group.cards.map((card) => card.id));
+  if (new Set(groupIds).size !== groupIds.length || new Set(handIds).size !== handIds.length) return { valid: false, reason: "forced-structural-invalid" };
+  if (groupIds.length !== handIds.length || groupIds.some((id) => !handIds.includes(id))) return { valid: false, reason: "forced-incomplete" };
+  for (const group of plan.groups) {
+    if (classifyPlay(group.cards, context.gameRank)?.id !== group.id) return { valid: false, reason: "forced-illegal-group" };
+    const verdict = evaluatePowerGroupUse(group, [...context.hand], allGroups, context.gameRank, {}, policyIndex);
+    if (!verdict.allowed && verdict.hardViolation) return { valid: false, reason: "forced-policy" };
+  }
+  return { valid: plan.metrics.hardViolations === 0 };
 }
 
 function compareScoredCandidates(left: { candidate: ActionCandidate; score: ActionScore }, right: { candidate: ActionCandidate; score: ActionScore }): number {
