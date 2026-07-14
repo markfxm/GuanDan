@@ -27,7 +27,21 @@ export type PlanScore = Readonly<{
 }>;
 
 export type PlanSelectionResult = Readonly<{
-  reason: "keep-current" | "strategic-switch" | "forced-switch" | "migration-required";
+  reason:
+    | "keep-current"
+    | "strategic-switch"
+    | "forced-switch"
+    | "migration-required"
+    | "replan-required"
+    | "no-valid-plan"
+    | "forced-missing"
+    | "forced-incomplete"
+    | "forced-policy"
+    | "forced-illegal-group"
+    | "forced-structural-invalid"
+    | "cooldown-suppressed"
+    | "hysteresis-suppressed"
+    | "tie-kept-active";
   selectedPlanId?: string;
   state?: D1PlanSelectionState;
 }>;
