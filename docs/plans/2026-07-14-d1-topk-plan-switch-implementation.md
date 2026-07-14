@@ -694,7 +694,7 @@ replayIntegrityOk = replayCountOk && hashOk && finalStateOk && versionOk && priv
 - 修改仅限 `tests/benchmark/strategies.ts`（注册 treatment descriptor）、必要时 `tests/benchmark/contracts.ts`。
 - 新增 `tests/benchmark/d1Matrix.ts`、`tests/benchmark/d1Statistics.ts`、`tests/benchmark/d1ReplayValidation.ts`、`tests/benchmark/d1Calibration.ts`。
 - 新增 `scripts/runD1TopKBenchmark.ts`、`scripts/replayD1TopKBenchmark.ts`、`scripts/freezeD1Calibration.ts`。
-- 新增 `tests/benchmark/d1Matrix.test.ts`、`tests/benchmark/d1Statistics.test.ts`、`tests/benchmark/d1ReplayValidation.test.ts`、`tests/benchmark/d1Resume.test.ts`、`tests/benchmark/d1Calibration.test.ts`、`tests/benchmark/d1FormalGate.test.ts`、`tests/benchmark/d1FormalBatchLoop.test.ts`。
+- 新增 `tests/benchmark/d1Matrix.test.ts`、`tests/benchmark/d1Statistics.test.ts`、`tests/benchmark/d1ReplayValidation.test.ts`、`tests/benchmark/d1Resume.test.ts`、`tests/benchmark/d1Calibration.test.ts`、`tests/benchmark/d1FormalGate.test.ts`、`tests/benchmark/d1FormalBatchLoop.test.ts`、`tests/benchmark/d1DryRun.test.ts`。
 
 **先写的失败测试：**
 
@@ -705,6 +705,15 @@ replayIntegrityOk = replayCountOk && hashOk && finalStateOk && versionOk && priv
 5. 缺失/重复/未知 matchId、configHash、version、publicTraceHash、duration 或 provenance 时验证失败，不跳过或替换。
 6. formal gate、28-batch dry-run、atomic writer、`resume`/`skip-existing` 在 P6 已实现并测试；错误 configHash batch 拒绝合并。
 7. worker_threads concurrency=1 与 N 的候选、action、hash、runtime（排除耗时）一致；worker 不共享 runtime、diagnostics、RNG 或 mutable cache。
+
+### P6.3 dry-run 输出契约
+
+`runD1TopKBenchmark.ts --dry-run` 使用与 runner 相同的 normalized options 构造
+`schemaVersion = "d1-benchmark-dry-run-v1"` 的单一 JSON stdout。输出包含
+`normalizedArgs`、`seedSummary`、按稳定七组顺序排列的 `matchups`、`totals`、`configHash`
+和排序后 `expectedMatchIds` 的 SHA-256；不输出完整 ID 列表。`outputDir` 为仓库相对、正斜杠规范化路径，
+dry-run 不创建 writer、manifest、result、replay、debug 或 approval 文件。`--output-dir`/`--output`
+与 `--replay-mode`/`--replay` 只允许产生同一 normalized JSON；formal dry-run 仍不绕过 approval gate。
 
 **最小实现步骤：**
 

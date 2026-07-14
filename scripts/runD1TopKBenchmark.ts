@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { buildGamesForSeed } from "../tests/benchmark/rotations";
 import { buildD1Manifest } from "../tests/benchmark/d1Manifest";
 import { buildD1Matrix, expectedMatchId, formalBatchPlan, phasePlan, type D1Allocation, type D1Phase } from "../tests/benchmark/d1Matrix";
@@ -11,6 +12,17 @@ import { validateFormalApproval, computeApprovedCodeTreeHash, type FormalApprova
 import { AtomicD1Writer } from "../tests/benchmark/d1AtomicWriter";
 
 export interface D1RunnerOptions { phase: D1Phase; matchup?: string; seedStart?: number; seedEnd?: number; replayMode?: "none" | "failures" | "all"; resume: boolean; skipExisting: boolean; concurrency: number; dryRun: boolean; outputDir: string; configHash: string; help?: boolean; approval?: FormalApproval; }
+export interface D1DryRunMatchupSummary { matchup: string; seedStart: number; seedEnd: number; baseSeeds: number; rawGames: number; pairedUnits: number; batchCount: number; replayMode: "failures" | "all"; }
+export interface D1DryRunOutput {
+  schemaVersion: "d1-benchmark-dry-run-v1";
+  dryRun: true;
+  normalizedArgs: { matchup: string | null; seedStart: number; seedEnd: number; replayMode: "failures" | "all"; outputDir: string; concurrency: number; resume: boolean; skipExisting: boolean; dryRun: true };
+  seedSummary: { start: number; end: number; baseSeedCount: number; placementsPerSeed: 2; rotationsPerPlacement: 4; rawGamesPerSeed: 8; pairedUnitsPerSeed: 4 };
+  matchups: D1DryRunMatchupSummary[];
+  totals: { matchups: number; baseSeedMatchupBlocks: number; rawGames: number; pairedUnits: number; batches: number; expectedMatchIds: number };
+  configHash: string;
+  expectedMatchIdsHash: string;
+}
 
 type D1ValueKey = "phase" | "matchup" | "seed-start" | "seed-end" | "replay-mode" | "replay" | "concurrency" | "output-dir" | "output" | "config-hash";
 const D1_BOOLEAN_FLAGS = new Set(["resume", "skip-existing", "dry-run", "help"]);
@@ -55,26 +67,29 @@ export function parseD1Args(args: string[]): D1RunnerOptions {
   const replayMode = (values.get("replay-mode")?.value ?? plan.replayMode) as "failures" | "all";
   if (!["failures", "all"].includes(replayMode)) throw new Error("REPLAY_MODE_INVALID");
   if (phase === "formal" && replayMode !== "all") throw new Error("FORMAL_REPLAY_MODE_MUST_BE_ALL");
-  const outputDir = values.get("output-dir")?.value ?? "artifacts/d1-topk";
-  validateD1OutputDir(outputDir);
+  const outputDir = normalizeD1OutputDir(values.get("output-dir")?.value ?? "artifacts/d1-topk");
   const configHash = values.get("config-hash")?.value ?? "d1-config-unfrozen";
   if (configHash.length === 0) throw new Error("CONFIG_HASH_INVALID");
   return { phase, matchup: values.get("matchup")?.value, seedStart: start, seedEnd: end, replayMode, resume: flags.has("resume"), skipExisting: flags.has("skip-existing"), concurrency, dryRun: flags.has("dry-run"), outputDir, configHash, help: flags.has("help"), approval: undefined };
 }
 
-function validateD1OutputDir(outputDir: string): void {
+function normalizeD1OutputDir(outputDir: string): string {
   if (outputDir.length === 0 || outputDir.includes("\0")) throw new Error("OUTPUT_DIR_INVALID");
-  const resolved = path.resolve(process.cwd(), outputDir);
+  const root = path.resolve(process.cwd());
+  const resolved = path.resolve(root, outputDir);
   const forbidden = [
-    path.resolve(process.cwd(), "artifacts/ai-benchmark-baseline"),
-    path.resolve(process.cwd(), "artifacts/ai-benchmark-baseline.json"),
-    path.resolve(process.cwd(), "artifacts/ai-benchmark-baseline.md"),
-    path.resolve(process.cwd(), "artifacts/ai-benchmark-manifest.json"),
+    path.resolve(root, "artifacts/ai-benchmark-baseline"),
+    path.resolve(root, "artifacts/ai-benchmark-baseline.json"),
+    path.resolve(root, "artifacts/ai-benchmark-baseline.md"),
+    path.resolve(root, "artifacts/ai-benchmark-manifest.json"),
   ];
   if (forbidden.some((root) => {
     const relative = path.relative(root, resolved);
     return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
   })) throw new Error("OUTPUT_DIR_UNSAFE");
+  const relative = path.relative(root, resolved);
+  if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("OUTPUT_DIR_INVALID");
+  return relative.replaceAll("\\", "/");
 }
 
 export const D1_CLI_USAGE = "Usage: runD1TopKBenchmark --phase smoke|calibration|formal --replay-mode failures|all --output-dir <path> --concurrency 1 [--resume] [--skip-existing] [--dry-run]";
@@ -86,8 +101,41 @@ export function planD1Run(options: D1RunnerOptions): { phase: D1Phase; expectedM
   return { phase: options.phase, expectedMatchIds: expectedMatchIds.sort(), rawGames: expectedMatchIds.length, pairedUnits: expectedMatchIds.length / 2, batches: options.phase === "formal" ? formalBatchPlan(options.configHash).filter((batch) => options.matchup === undefined || batch.matchup === options.matchup) : [] };
 }
 
-export async function runD1(options: D1RunnerOptions): Promise<{ dryRun: boolean; plan: ReturnType<typeof planD1Run>; manifest?: unknown }> {
-  const plan = planD1Run(options); if (options.dryRun) return { dryRun: true, plan };
+export function buildD1DryRunOutput(options: D1RunnerOptions): D1DryRunOutput {
+  const plan = planD1Run(options);
+  const matrix = buildD1Matrix({ benchmarkVersion: "d1-topk-v1", rank: "2", configHash: options.configHash });
+  const matchups = options.matchup === undefined ? matrix.matchups : matrix.matchups.filter((matchup) => matchup.name === options.matchup);
+  const seedStart = options.seedStart!;
+  const seedEnd = options.seedEnd!;
+  const baseSeeds = seedEnd - seedStart + 1;
+  const replayMode = options.replayMode ?? phasePlan(options.phase).replayMode;
+  if (replayMode !== "failures" && replayMode !== "all") throw new Error("REPLAY_MODE_INVALID");
+  const summaries = matchups.map((matchup) => ({
+    matchup: matchup.name,
+    seedStart,
+    seedEnd,
+    baseSeeds,
+    rawGames: baseSeeds * 8,
+    pairedUnits: baseSeeds * 4,
+    batchCount: options.phase === "formal"
+      ? formalBatchPlan(options.configHash).filter((batch) => batch.matchup === matchup.name && batch.seedEnd >= seedStart && batch.seedStart <= seedEnd).length
+      : 1,
+    replayMode,
+  }));
+  return {
+    schemaVersion: "d1-benchmark-dry-run-v1",
+    dryRun: true,
+    normalizedArgs: { matchup: options.matchup ?? null, seedStart, seedEnd, replayMode, outputDir: options.outputDir, concurrency: options.concurrency, resume: options.resume, skipExisting: options.skipExisting, dryRun: true },
+    seedSummary: { start: seedStart, end: seedEnd, baseSeedCount: baseSeeds, placementsPerSeed: 2, rotationsPerPlacement: 4, rawGamesPerSeed: 8, pairedUnitsPerSeed: 4 },
+    matchups: summaries,
+    totals: { matchups: summaries.length, baseSeedMatchupBlocks: baseSeeds * summaries.length, rawGames: plan.rawGames, pairedUnits: plan.pairedUnits, batches: summaries.reduce((total, matchup) => total + matchup.batchCount, 0), expectedMatchIds: plan.expectedMatchIds.length },
+    configHash: options.configHash,
+    expectedMatchIdsHash: createHash("sha256").update(`${plan.expectedMatchIds.join("\n")}\n`).digest("hex"),
+  };
+}
+
+export async function runD1(options: D1RunnerOptions): Promise<{ dryRun: boolean; plan: ReturnType<typeof planD1Run>; dryRunOutput?: D1DryRunOutput; manifest?: unknown }> {
+  const plan = planD1Run(options); if (options.dryRun) return { dryRun: true, plan, dryRunOutput: buildD1DryRunOutput(options) };
   if (options.phase === "formal" && options.configHash === "d1-config-unfrozen") throw new Error("FORMAL_CONFIG_NOT_FROZEN");
   if (options.phase === "formal") { const approval = validateFormalApproval(options.approval, { expectedConfigHash: options.configHash, currentCommit: process.env.GIT_COMMIT ?? "unknown", currentTreeHash: computeApprovedCodeTreeHash(), }); if (approval.formalExecutionAllowed !== true) throw new Error("FORMAL_EXECUTION_NOT_ALLOWED"); }
   await fs.mkdir(options.outputDir, { recursive: true });
@@ -106,7 +154,7 @@ if (process.argv[1]?.endsWith("runD1TopKBenchmark.ts")) {
   try {
     const options = parseD1Args(process.argv.slice(2));
     if (options.help) console.log(D1_CLI_USAGE);
-    else runD1(options).then((result) => { if (result.dryRun) console.log(JSON.stringify(result.plan, null, 2)); }).catch((error) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
+    else runD1(options).then((result) => { if (result.dryRun) console.log(JSON.stringify(result.dryRunOutput, null, 2)); }).catch((error) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
