@@ -834,12 +834,12 @@ raw calibration/batch/replay/debug 不提交 Git；批准前不得创建 formal 
 **验证命令：**
 
 ```powershell
-npx tsx scripts/runD1TopKBenchmark.ts --phase smoke --replay-mode failures --concurrency 1
+npx tsx scripts/runD1TopKBenchmark.ts --phase smoke --replay-mode failures --concurrency 1 --output-dir artifacts/ai-benchmark-d1-smoke
 npm test
 npm run test:simulation
 npm run build
 rg -n "tests/benchmark|legacyAiReference|benchmark|replay" src --glob "*.ts" --glob "*.tsx"
-npx tsx scripts/runD1TopKBenchmark.ts --phase calibration --replay-mode failures --concurrency 1
+npx tsx scripts/runD1TopKBenchmark.ts --phase calibration --replay-mode failures --concurrency 1 --output-dir artifacts/ai-benchmark-d1-calibration
 npx tsx scripts/freezeD1Calibration.ts --validate-only
 npx vitest run tests/benchmark/d1Calibration.test.ts tests/benchmark/d1ReplayValidation.test.ts --testTimeout=120000 --reporter=verbose
 ```
@@ -904,7 +904,7 @@ npx vitest run tests/benchmark/d1Calibration.test.ts tests/benchmark/d1ReplayVal
 **逐批验证命令：**
 
 ```powershell
-npx tsx scripts/runD1TopKBenchmark.ts --phase formal --matchup treatment-control --seed-start 1001 --seed-end 1050 --replay-mode all --resume --skip-existing --concurrency 1
+npx tsx scripts/runD1TopKBenchmark.ts --phase formal --matchup treatment-control --seed-start 1001 --seed-end 1050 --replay-mode all --resume --skip-existing --concurrency 1 --output-dir artifacts/ai-benchmark-d1-formal
 npx tsx scripts/replayD1TopKBenchmark.ts --manifest artifacts/ai-benchmark-d1-topk-switch-batches/treatment-control-1001-1050-manifest.json --verify all
 npx vitest run tests/benchmark/d1Resume.test.ts tests/benchmark/d1ReplayValidation.test.ts --testTimeout=120000 --reporter=verbose
 ```

@@ -10,17 +10,74 @@ import { strategyDescriptors } from "../tests/benchmark/strategies";
 import { validateFormalApproval, computeApprovedCodeTreeHash, type FormalApproval } from "../tests/benchmark/d1Calibration";
 import { AtomicD1Writer } from "../tests/benchmark/d1AtomicWriter";
 
-export interface D1RunnerOptions { phase: D1Phase; matchup?: string; seedStart?: number; seedEnd?: number; replayMode?: "none" | "failures" | "all"; resume: boolean; skipExisting: boolean; concurrency: number; dryRun: boolean; outputDir: string; configHash: string; approval?: FormalApproval; }
+export interface D1RunnerOptions { phase: D1Phase; matchup?: string; seedStart?: number; seedEnd?: number; replayMode?: "none" | "failures" | "all"; resume: boolean; skipExisting: boolean; concurrency: number; dryRun: boolean; outputDir: string; configHash: string; help?: boolean; approval?: FormalApproval; }
+
+type D1ValueKey = "phase" | "matchup" | "seed-start" | "seed-end" | "replay-mode" | "replay" | "concurrency" | "output-dir" | "output" | "config-hash";
+const D1_BOOLEAN_FLAGS = new Set(["resume", "skip-existing", "dry-run", "help"]);
+const D1_VALUE_KEYS = new Set<D1ValueKey>(["phase", "matchup", "seed-start", "seed-end", "replay-mode", "replay", "concurrency", "output-dir", "output", "config-hash"]);
+
 export function parseD1Args(args: string[]): D1RunnerOptions {
-  const values = new Map<string, string>(); const flags = new Set<string>();
-  for (let i = 0; i < args.length; i += 1) { const token = args[i]!; if (!token.startsWith("--")) throw new Error("ARGUMENT_INVALID"); const key = token.slice(2); if (key === "resume" || key === "skip-existing" || key === "dry-run") flags.add(key); else { const value = args[++i]; if (value === undefined || value.startsWith("--")) throw new Error(`ARGUMENT_MISSING:${key}`); values.set(key, value); } }
-  const phase = (values.get("phase") ?? "smoke") as D1Phase; if (!["smoke", "calibration", "formal"].includes(phase)) throw new Error("PHASE_INVALID");
-  const concurrency = Number(values.get("concurrency") ?? 1); if (concurrency !== 1) throw new Error("CONCURRENCY_UNSUPPORTED_UNTIL_WORKER_IMPLEMENTED");
-  const plan = phasePlan(phase); const start = values.has("seed-start") ? Number(values.get("seed-start")) : plan.start; const end = values.has("seed-end") ? Number(values.get("seed-end")) : plan.end;
+  const values = new Map<string, { value: string; source: string }>();
+  const flags = new Set<string>();
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i]!;
+    if (!token.startsWith("--") || token === "--") throw new Error("ARGUMENT_INVALID");
+    const raw = token.slice(2);
+    const equalsIndex = raw.indexOf("=");
+    const key = equalsIndex === -1 ? raw : raw.slice(0, equalsIndex);
+    const inlineValue = equalsIndex === -1 ? undefined : raw.slice(equalsIndex + 1);
+    if (D1_BOOLEAN_FLAGS.has(key)) {
+      if (inlineValue !== undefined) throw new Error(`ARGUMENT_VALUE_NOT_ALLOWED:${key}`);
+      flags.add(key);
+      continue;
+    }
+    if (!D1_VALUE_KEYS.has(key as D1ValueKey)) throw new Error(`UNKNOWN_ARGUMENT:${key}`);
+    const value = inlineValue ?? args[++i];
+    if (value === undefined || (inlineValue === undefined && value.startsWith("--"))) throw new Error(`ARGUMENT_MISSING:${key}`);
+    const canonical = key === "replay" ? "replay-mode" : key === "output" ? "output-dir" : key;
+    const previous = values.get(canonical);
+    if (previous !== undefined && previous.value !== value) throw new Error(`ARGUMENT_CONFLICT:${previous.source},${key}`);
+    if (previous === undefined) values.set(canonical, { value, source: key });
+  }
+
+  const phase = (values.get("phase")?.value ?? "smoke") as D1Phase;
+  if (!["smoke", "calibration", "formal"].includes(phase)) throw new Error("PHASE_INVALID");
+  const concurrencyText = values.get("concurrency")?.value ?? "1";
+  const concurrency = Number(concurrencyText);
+  if (!Number.isInteger(concurrency) || concurrency <= 0) throw new Error("CONCURRENCY_INVALID");
+  if (concurrency !== 1) throw new Error("CONCURRENCY_UNSUPPORTED_UNTIL_WORKER_IMPLEMENTED");
+  const plan = phasePlan(phase);
+  const startText = values.get("seed-start")?.value;
+  const endText = values.get("seed-end")?.value;
+  const start = startText === undefined ? plan.start : Number(startText);
+  const end = endText === undefined ? plan.end : Number(endText);
   if (!Number.isInteger(start) || !Number.isInteger(end) || start < plan.start || end > plan.end || start > end) throw new Error("SEED_RANGE_INVALID");
-  const replayMode = (values.get("replay") ?? plan.replayMode) as "none" | "failures" | "all"; if (!["none", "failures", "all"].includes(replayMode)) throw new Error("REPLAY_MODE_INVALID");
-  return { phase, matchup: values.get("matchup"), seedStart: start, seedEnd: end, replayMode, resume: flags.has("resume"), skipExisting: flags.has("skip-existing"), concurrency, dryRun: flags.has("dry-run"), outputDir: values.get("output") ?? "artifacts/d1-topk", configHash: values.get("config-hash") ?? "d1-config-unfrozen" , approval: undefined };
+  const replayMode = (values.get("replay-mode")?.value ?? plan.replayMode) as "failures" | "all";
+  if (!["failures", "all"].includes(replayMode)) throw new Error("REPLAY_MODE_INVALID");
+  if (phase === "formal" && replayMode !== "all") throw new Error("FORMAL_REPLAY_MODE_MUST_BE_ALL");
+  const outputDir = values.get("output-dir")?.value ?? "artifacts/d1-topk";
+  validateD1OutputDir(outputDir);
+  const configHash = values.get("config-hash")?.value ?? "d1-config-unfrozen";
+  if (configHash.length === 0) throw new Error("CONFIG_HASH_INVALID");
+  return { phase, matchup: values.get("matchup")?.value, seedStart: start, seedEnd: end, replayMode, resume: flags.has("resume"), skipExisting: flags.has("skip-existing"), concurrency, dryRun: flags.has("dry-run"), outputDir, configHash, help: flags.has("help"), approval: undefined };
 }
+
+function validateD1OutputDir(outputDir: string): void {
+  if (outputDir.length === 0 || outputDir.includes("\0")) throw new Error("OUTPUT_DIR_INVALID");
+  const resolved = path.resolve(process.cwd(), outputDir);
+  const forbidden = [
+    path.resolve(process.cwd(), "artifacts/ai-benchmark-baseline"),
+    path.resolve(process.cwd(), "artifacts/ai-benchmark-baseline.json"),
+    path.resolve(process.cwd(), "artifacts/ai-benchmark-baseline.md"),
+    path.resolve(process.cwd(), "artifacts/ai-benchmark-manifest.json"),
+  ];
+  if (forbidden.some((root) => {
+    const relative = path.relative(root, resolved);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  })) throw new Error("OUTPUT_DIR_UNSAFE");
+}
+
+export const D1_CLI_USAGE = "Usage: runD1TopKBenchmark --phase smoke|calibration|formal --replay-mode failures|all --output-dir <path> --concurrency 1 [--resume] [--skip-existing] [--dry-run]";
 
 export function planD1Run(options: D1RunnerOptions): { phase: D1Phase; expectedMatchIds: string[]; rawGames: number; pairedUnits: number; batches: ReturnType<typeof formalBatchPlan> } {
   const matrix = buildD1Matrix({ benchmarkVersion: "d1-topk-v1", rank: "2", configHash: options.configHash }); const matchups = options.matchup === undefined ? matrix.matchups : matrix.matchups.filter((matchup) => matchup.name === options.matchup);
@@ -45,4 +102,13 @@ async function runBatch(matchup: { name: string; strategyA: string; strategyB: s
 function safeName(value: string): string { return value.replace(/[\\/:*?"<>|]/g, "_"); }
 function expectedIdsForRange(matchup: string, start: number, end: number, configHash: string): string[] { const ids: string[] = []; for (let seed = start; seed <= end; seed += 1) for (const allocation of ["AB", "BA"] as const) for (const rotation of [0, 1, 2, 3] as const) ids.push(expectedMatchId({ matchup, seed, allocation, rotation, configHash })); return ids.sort(); }
 
-if (process.argv[1]?.endsWith("runD1TopKBenchmark.ts")) runD1(parseD1Args(process.argv.slice(2))).then((result) => { if (result.dryRun) console.log(JSON.stringify(result.plan, null, 2)); }).catch((error) => { console.error(error instanceof Error ? error.message : String(error)); });
+if (process.argv[1]?.endsWith("runD1TopKBenchmark.ts")) {
+  try {
+    const options = parseD1Args(process.argv.slice(2));
+    if (options.help) console.log(D1_CLI_USAGE);
+    else runD1(options).then((result) => { if (result.dryRun) console.log(JSON.stringify(result.plan, null, 2)); }).catch((error) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
+}
