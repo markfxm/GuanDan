@@ -21,6 +21,7 @@ export type D0KeepCurrentFixture = {
   sourceTag: string;
   generatorCommit: string;
   generatorVersion: string;
+  generatorCodeTreeSha256: string;
   inputSha256: string;
   outputSha256: string;
   cases: D0KeepCurrentCase[];

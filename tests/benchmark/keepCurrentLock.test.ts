@@ -35,6 +35,7 @@ describe("D0 fixture and unified adapter lock", () => {
     expect(fixture.sourceTag).toBe("ai-benchmark-d0-baseline");
     expect(fixture.generatorCommit).toMatch(/^[0-9a-f]{40}$/);
     expect(fixture.generatorVersion).toBe("d0-fixture-v1");
+    expect(fixture.generatorCodeTreeSha256).toMatch(/^[0-9a-f]{64}$/);
     expect(fixture.inputSha256).toBe(fixtureInputHash(fixture.cases));
     expect(fixture.outputSha256).toBe(fixtureOutputHash(fixture));
     expect(fixture.cases).toHaveLength(5);
@@ -115,6 +116,36 @@ describe("D0 fixture and unified adapter lock", () => {
         "--check-only",
       ], "D0_FIXTURE_DRIFT");
       expect(JSON.parse(readFileSync(tamperedPath, "utf8"))).toEqual(copy);
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects missing or mismatched generator provenance without changing the fixture", () => {
+    const fixtureText = readFileSync(fixturePath, "utf8");
+    const temp = mkdtempSync(path.join(os.tmpdir(), "d0-generator-provenance-"));
+    const cases: Array<{ name: string; mutate: (copy: D0KeepCurrentFixture) => void }> = [
+      { name: "missing-tree-hash", mutate: (copy) => { delete (copy as unknown as Record<string, unknown>).generatorCodeTreeSha256; } },
+      { name: "wrong-generator-commit", mutate: (copy) => { copy.generatorCommit = "329934d731e7bbacdf2edc3fc68c31640c3a5ec6"; } },
+      { name: "wrong-tree-hash", mutate: (copy) => { copy.generatorCodeTreeSha256 = "0".repeat(64); } },
+      { name: "wrong-version", mutate: (copy) => { copy.generatorVersion = "d0-fixture-v0"; } },
+    ];
+    try {
+      for (const testCase of cases) {
+        const output = path.join(temp, `${testCase.name}.json`);
+        const copy = JSON.parse(fixtureText) as D0KeepCurrentFixture;
+        testCase.mutate(copy);
+        const serialized = JSON.stringify(copy, null, 2);
+        writeFileSync(output, serialized);
+        expectGeneratorFailure([
+          "--source-worktree", sourceWorktree,
+          "--source-commit", sourceCommit,
+          "--output", output,
+          "--generator-version", "d0-fixture-v1",
+          "--check-only",
+        ], "D0_FIXTURE_PROVENANCE_INVALID");
+        expect(readFileSync(output, "utf8")).toBe(serialized);
+      }
+    } finally {
       rmSync(temp, { recursive: true, force: true });
     }
   });

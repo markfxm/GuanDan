@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import {
@@ -17,6 +18,11 @@ import type { D0KeepCurrentCase, D0KeepCurrentFixture } from "../tests/ai/d0Fixt
 const EXPECTED_SOURCE_COMMIT = "e2a20e18f8e5c0871db38ad69426262e43766ce1";
 const SOURCE_TAG = "ai-benchmark-d0-baseline";
 const SCHEMA_VERSION = "d0-keep-current-fixture-v1";
+const GENERATOR_CODE_PATHS = [
+  "scripts/generateD0KeepCurrentFixtures.ts",
+  "tests/ai/d0FixtureCanonicalizer.ts",
+  "tests/ai/d0FixtureTypes.ts",
+] as const;
 
 type SourceEngine = {
   decideAiAction: (observation: unknown, runtime: unknown, config: unknown) => {
@@ -83,6 +89,88 @@ function parseArgs(argv: string[]): { sourceWorktree: string; sourceCommit: stri
 
 function git(sourceWorktree: string, ...args: string[]): string {
   return execFileSync("git", ["-C", sourceWorktree, ...args], { encoding: "utf8" }).trim();
+}
+
+function gitBytes(repoRoot: string, ...args: string[]): Buffer {
+  return execFileSync("git", ["-C", repoRoot, ...args]);
+}
+
+function generatorRepoRoot(): string {
+  return git(process.cwd(), "rev-parse", "--show-toplevel");
+}
+
+function ensureGeneratorFilesTracked(repoRoot: string): void {
+  try {
+    git(repoRoot, "ls-files", "--error-unmatch", ...GENERATOR_CODE_PATHS);
+  } catch {
+    throw new Error("D0_GENERATOR_CODE_UNTRACKED");
+  }
+}
+
+function ensureGeneratorFilesClean(repoRoot: string): void {
+  if (git(repoRoot, "status", "--porcelain", "--", ...GENERATOR_CODE_PATHS) !== "") {
+    throw new Error("D0_GENERATOR_CODE_DIRTY");
+  }
+}
+
+function hashCodeFiles(files: Array<{ relativePath: string; bytes: Buffer }>): string {
+  const hash = crypto.createHash("sha256");
+  for (const file of files.sort((left, right) => left.relativePath.localeCompare(right.relativePath))) {
+    hash.update(file.relativePath, "utf8");
+    hash.update(Buffer.from([0]));
+    hash.update(file.bytes);
+  }
+  return hash.digest("hex");
+}
+
+function workingGeneratorCodeTreeSha256(repoRoot: string): string {
+  ensureGeneratorFilesTracked(repoRoot);
+  return hashCodeFiles(GENERATOR_CODE_PATHS.map((relativePath) => ({
+    relativePath,
+    bytes: fs.readFileSync(path.join(repoRoot, relativePath)),
+  })));
+}
+
+function committedGeneratorCodeTreeSha256(repoRoot: string, commit: string): string {
+  if (!/^[0-9a-f]{40}$/.test(commit) || git(repoRoot, "cat-file", "-t", commit) !== "commit") {
+    throw new Error("D0_GENERATOR_COMMIT_INVALID");
+  }
+  try {
+    return hashCodeFiles(GENERATOR_CODE_PATHS.map((relativePath) => ({
+      relativePath,
+      bytes: gitBytes(repoRoot, "show", `${commit}:${relativePath}`),
+    })));
+  } catch {
+    throw new Error("D0_GENERATOR_CODE_TREE_MISSING");
+  }
+}
+
+type GeneratorProvenance = { generatorCommit: string; generatorCodeTreeSha256: string };
+
+function resolveGeneratorProvenance(existing: D0KeepCurrentFixture | undefined, requestedVersion: string): GeneratorProvenance {
+  const repoRoot = generatorRepoRoot();
+  const currentTreeHash = workingGeneratorCodeTreeSha256(repoRoot);
+  if (existing !== undefined) {
+    if (typeof existing.generatorCommit !== "string"
+      || typeof existing.generatorVersion !== "string"
+      || typeof existing.generatorCodeTreeSha256 !== "string"
+      || existing.generatorVersion !== requestedVersion) {
+      throw new Error("D0_FIXTURE_PROVENANCE_INVALID");
+    }
+    let committedTreeHash: string;
+    try {
+      committedTreeHash = committedGeneratorCodeTreeSha256(repoRoot, existing.generatorCommit);
+    } catch {
+      throw new Error("D0_FIXTURE_PROVENANCE_INVALID");
+    }
+    if (existing.generatorCodeTreeSha256 !== committedTreeHash || existing.generatorCodeTreeSha256 !== currentTreeHash) {
+      throw new Error("D0_FIXTURE_PROVENANCE_INVALID");
+    }
+    return { generatorCommit: existing.generatorCommit, generatorCodeTreeSha256: currentTreeHash };
+  }
+  ensureGeneratorFilesClean(repoRoot);
+  const commit = git(repoRoot, "rev-parse", "HEAD");
+  return { generatorCommit: commit, generatorCodeTreeSha256: currentTreeHash };
 }
 
 function validateSource(sourceWorktree: string, sourceCommit: string): void {
@@ -178,11 +266,7 @@ function makeIncrementalCase(spec: CaseSpec, source: Awaited<ReturnType<typeof l
   };
 }
 
-function generatorCommit(): string {
-  return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-}
-
-async function generateFixture(options: ReturnType<typeof parseArgs>, recordedGeneratorCommit?: string): Promise<D0KeepCurrentFixture> {
+async function generateFixture(options: ReturnType<typeof parseArgs>, provenance: GeneratorProvenance): Promise<D0KeepCurrentFixture> {
   validateSource(options.sourceWorktree, options.sourceCommit);
   const source = await loadSource(options.sourceWorktree);
   const lead = makeCase(CASE_SPECS[0]!, source);
@@ -197,8 +281,9 @@ async function generateFixture(options: ReturnType<typeof parseArgs>, recordedGe
     schemaVersion: SCHEMA_VERSION,
     sourceCommit: EXPECTED_SOURCE_COMMIT,
     sourceTag: SOURCE_TAG,
-    generatorCommit: recordedGeneratorCommit ?? generatorCommit(),
+    generatorCommit: provenance.generatorCommit,
     generatorVersion: options.generatorVersion,
+    generatorCodeTreeSha256: provenance.generatorCodeTreeSha256,
     inputSha256: fixtureInputHash(cases),
     outputSha256: "",
     cases,
@@ -212,9 +297,11 @@ async function main(): Promise<void> {
   const existing = options.checkOnly && fs.existsSync(options.output)
     ? JSON.parse(fs.readFileSync(options.output, "utf8")) as D0KeepCurrentFixture
     : undefined;
-  const fixture = await generateFixture(options, existing?.generatorCommit);
+  if (options.checkOnly && existing === undefined) throw new Error("D0_FIXTURE_MISSING");
+  validateSource(options.sourceWorktree, options.sourceCommit);
+  const provenance = resolveGeneratorProvenance(existing, options.generatorVersion);
+  const fixture = await generateFixture(options, provenance);
   if (options.checkOnly) {
-    if (!fs.existsSync(options.output)) throw new Error("D0_FIXTURE_MISSING");
     const existing = fs.readFileSync(options.output, "utf8");
     if (canonicalJson(JSON.parse(existing)) !== canonicalJson(fixture)) throw new Error("D0_FIXTURE_DRIFT");
     return;
