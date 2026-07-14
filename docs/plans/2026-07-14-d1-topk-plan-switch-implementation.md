@@ -384,9 +384,8 @@ publicPartnerFit =
   10*candidateTakeoverQuality, if partnerPassedCurrentTrick == true and lastPlaySeat != partnerSeat
   5*candidateYieldQuality + 5*candidateTakeoverQuality, otherwise // [0,10]
 partnerContextFit = round6(clamp(publicPartnerFit, 0, 10))
-policyRiskUnits = policyIndex.softRiskUnits(plan.groups)       // integer [0, handSize]; hard violations filtered earlier
 powerGroupRisk = round6(15 * clamp(
-  0.6 * norm(protectionLoss, handSize) + 0.4 * norm(policyRiskUnits, handSize), 0, 1
+  protectionLoss / max(1, protectionLossLimit), 0, 1
 ))                                                        // [0,15]
 
 dynamicPlanScore = round6(staticPlanQuality + immediatePlayability + tempoFit
@@ -401,8 +400,8 @@ dynamicPlanScore = round6(staticPlanQuality + immediatePlayability + tempoFit
 两步残余推导，不复用 `PlanMetrics.lowSingleCount`。`candidateEndgameLeadCoverage` 只看 distinct public
 lead types 和不消耗 protected power group 的 lead，不是“所有合法 group 中可领牌比例”。
 `candidateTakeoverQuality`、`candidateYieldQuality` 是候选特征；队友当前领牌时只使用 yield quality，
-不得无条件奖励抢牌。`policyRiskUnits` 必须由 policy index 提供固定范围的 soft risk 摘要；hard policy violation
-在 evaluator 前过滤。`protectionLoss` 只在 `powerGroupRisk` 读取。无可跟牌但 pass 合法时不被过滤。
+不得无条件奖励抢牌。D1 v1 不使用 `policyRiskUnits` 或任何未批准的 policy-native soft risk；hard policy violation
+在 evaluator 前由未来 selector 过滤。`protectionLoss` 只在 `powerGroupRisk` 读取一次。无可跟牌但 pass 合法时不被过滤。
 
 辅助函数必须是公开信息上的纯计算：`candidateCanFinishWithinPublicSafeTurns(plan, 2)` 只模拟候选自身
 groups 与当前 public lead/pass 合法性，确认最多两次公开出牌后是否消耗全部 groups；`candidateFinishTurns(plan)`
@@ -1015,3 +1014,54 @@ P7 的唯一出口是人工批准，不接受隐式批准或“先跑 formal 再
 | P2 的残局、牌权和队友项可能退化为常数或奖励碎片化/无谓抢牌。 | 所有相关项必须 candidate-specific：endgame quality 由 remainingGroupFit、finishWithinOneOrTwoTurnsFit、lowSingleRiskFit 和 candidate lead coverage 组成；lead coverage 使用 lead type diversity/control-preserving/finishability 等可区分特征，不使用所有合法 group 比例；partnerContextFit 使用 candidate takeover/yield quality，队友领牌时 yield/pass 不低于无谓 takeover；small-group fraction 不直接正向奖励残局质量。 | P2 反例测试要求仅改变各 candidate 特征时分数改变；碎片化计划不因小 group 比例自动获益；队友控制牌权时适合 yield/pass 的候选不低于无谓抢牌候选；同时执行端点、单调性、clamp、固定小数和重复计分审查。 |
 | approval JSON 如何避免保存自引用 commit，同时保持 Git 可追溯？ | JSON 只保存 `approvedCodeCommit`、`approvedCodeTreeHash`、`configHash`、calibration report hash/location、`formalExecutionAllowed` 及 provenance；不保存 `approvalFileCommit` 或其他自引用字段。runner 在 Git 中运行时用 `git log` 确定 approval 文件所在 commit，并验证 approval 可追溯性、代码树 hash、configHash 和 execution source；tree hash 覆盖 `src/ai/**`、`tests/benchmark/**`、正式 runner/replay/freeze 脚本及依赖配置。 | P6/P7 测试验证批准提交顺序、无自引用字段、approval 文件 commit 可由 Git 重建、tree hash 覆盖范围完整；P8 gate 拒绝 tree/config/traceability 不匹配。 |
 | P8 是否因本补丁重新承担 formal 实现？ | 否。formal gate、28 批 runner、atomic writer、resume/skip-existing、replay all 在 P6/P7 批准前已实现并测试；P7 仅运行 smoke/calibration 并生成批准材料，P8 仅执行已批准代码，不再修改 formal 实现。 | P7 完成后强制暂停并记录 `approvedCodeCommit`/tree hash/configHash；P8 只允许 execution-only 校验和运行，任何代码漂移都必须拒绝。 |
+
+## 20. P2a：PowerGroup 风险评分契约修订（仅设计）
+
+本节是 P2 前置契约修订；本轮不实施 P2 evaluator、selector 或 production 代码。
+
+### 决策
+
+- P1 的 `PowerGroupPolicyIndex` 只有只读 `protectedGroups`，没有经过批准的 `softRiskUnits`、风险等级或软 policy 摘要。
+- D1 v1 删除 `policyRiskUnits` 及其 `0.4 * norm(policyRiskUnits, handSize)` 分量；不得在 PlanEvaluator 中重建第二套 PowerGroup policy，也不得把 `protectionLoss` 改名后重复计分。
+- D1 v1 的唯一 PowerGroup 软风险为：
+
+  ```text
+  powerGroupRisk = round6(
+    15 * clamp(protectionLoss / max(1, protectionLossLimit), 0, 1)
+  )
+  ```
+
+- `protectionLoss` 只在 `powerGroupRisk` 读取一次，不进入 `staticPlanQuality`、`endgameFit`、`opponentPressureFit` 或 `partnerContextFit`。
+- hard `PowerGroupPolicy` violation 仍由 P3 selector 在评分前过滤；P2 evaluator 不判定或降低 hard violation。
+- `PowerGroupPolicyIndex` 在 P2 中可继续作为只读输入，仅用于已有保护结果和 candidate helper 的 control-preserving 判断；不得从 `protectedGroups` 推导新的 soft risk 单位。
+- policy-native soft risk（risk level、soft violation、protection severity 等）延后为 D1.1 独立设计。
+
+### protectionLossLimit 证据与当前门禁
+
+现有 `measureProtectionLoss` 返回“被丢失的 protected group 数量”。`protectedPowerGroups` 选择互不重叠的 protected groups，且当前实现中的受保护 group 至少包含四张牌；因此代码只证明它是 group-count，而不是 `handSize` 的精确理论最大值。现有 `PlanMetrics`、plan evaluator 和测试也没有声明固定上限。
+
+因此本轮不得猜测 `protectionLossLimit`：P2 仍 blocked，直到设计/代码审查明确以下二选一并记录证据：
+
+1. 批准 `handSize` 作为明确的 D1 v1 归一化上限；或
+2. 批准并复用现有 plan-quality 固定上限。
+
+在该上限获批准前，不得写 P2 evaluator 实现、不得添加 P2 生产接口、不得运行 P2 benchmark。上限确认后，必须重新补齐端点、单调性、clamp 和固定小数测试。
+
+### P2 测试计划更新
+
+P2 测试必须覆盖：
+
+- `protectionLoss = 0` 时 `powerGroupRisk = 0`；
+- `protectionLoss` 增加时风险单调不减；
+- 达到批准上限时 clamp 为 15；
+- `protectionLoss` 不影响 `staticPlanQuality`；
+- 相同 `protectionLoss` 的计划不会因 `protectedGroups` 数量被额外惩罚；
+- hard policy violation 不由 P2 evaluator 处理；
+- evaluator 不访问不存在的 `softRiskUnits`，也不调用 PowerGroupPolicy 之外的风险规则。
+
+### 决策记录
+
+| 问题 | 修订位置 | 最终决定 | 对实施/测试的影响 |
+|---|---|---|---|
+| P1 `PowerGroupPolicyIndex` 没有 `softRiskUnits`，如何避免 P2 发明第二套 policy？ | P2 公式、P2 完成条件、本节 | D1 v1 仅使用现有 `protectionLoss` 作为软风险；hard policy 由 P3 selector 过滤；policy-native soft risk 延后 D1.1。 | 删除 `policyRiskUnits` 测试和实现要求；增加“不访问 softRiskUnits/不重复计分”测试。 |
+| `protectionLossLimit` 的量纲和上限是否已由现有代码确认？ | 本节 protectionLossLimit 证据与门禁 | 尚未确认；当前 P2 blocked，不猜测 `handSize` 或其他上限。 | 需先完成人工设计批准，之后才能开始 P2 RED 测试和实现。 |
