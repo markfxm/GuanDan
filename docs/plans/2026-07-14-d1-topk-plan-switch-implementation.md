@@ -384,9 +384,15 @@ publicPartnerFit =
   10*candidateTakeoverQuality, if partnerPassedCurrentTrick == true and lastPlaySeat != partnerSeat
   5*candidateYieldQuality + 5*candidateTakeoverQuality, otherwise // [0,10]
 partnerContextFit = round6(clamp(publicPartnerFit, 0, 10))
-powerGroupRisk = round6(15 * clamp(
-  protectionLoss / max(1, protectionLossLimit), 0, 1
-))                                                        // [0,15]
+protectedGroupCount = powerGroupPolicyIndex.protectedGroups.length
+if protectedGroupCount == 0:
+  assert protectionLoss == 0
+  powerGroupRisk = 0
+else:
+  assert finiteInteger(protectionLoss) and 0 <= protectionLoss <= protectedGroupCount
+  powerGroupRisk = round6(15 * clamp(
+    protectionLoss / protectedGroupCount, 0, 1
+  ))                                                        // [0,15]
 
 dynamicPlanScore = round6(staticPlanQuality + immediatePlayability + tempoFit
   + endgameFit + partnerContextFit + opponentPressureFit - powerGroupRisk)
@@ -1015,53 +1021,57 @@ P7 的唯一出口是人工批准，不接受隐式批准或“先跑 formal 再
 | approval JSON 如何避免保存自引用 commit，同时保持 Git 可追溯？ | JSON 只保存 `approvedCodeCommit`、`approvedCodeTreeHash`、`configHash`、calibration report hash/location、`formalExecutionAllowed` 及 provenance；不保存 `approvalFileCommit` 或其他自引用字段。runner 在 Git 中运行时用 `git log` 确定 approval 文件所在 commit，并验证 approval 可追溯性、代码树 hash、configHash 和 execution source；tree hash 覆盖 `src/ai/**`、`tests/benchmark/**`、正式 runner/replay/freeze 脚本及依赖配置。 | P6/P7 测试验证批准提交顺序、无自引用字段、approval 文件 commit 可由 Git 重建、tree hash 覆盖范围完整；P8 gate 拒绝 tree/config/traceability 不匹配。 |
 | P8 是否因本补丁重新承担 formal 实现？ | 否。formal gate、28 批 runner、atomic writer、resume/skip-existing、replay all 在 P6/P7 批准前已实现并测试；P7 仅运行 smoke/calibration 并生成批准材料，P8 仅执行已批准代码，不再修改 formal 实现。 | P7 完成后强制暂停并记录 `approvedCodeCommit`/tree hash/configHash；P8 只允许 execution-only 校验和运行，任何代码漂移都必须拒绝。 |
 
-## 20. P2a：PowerGroup 风险评分契约修订（仅设计）
+## 20. P2a/P2b：PowerGroup 风险评分契约（仅设计）
 
-本节是 P2 前置契约修订；本轮不实施 P2 evaluator、selector 或 production 代码。
+本节是已批准的 P2 前置契约；本轮仍不实施 P2 evaluator、selector 或 production 代码。
 
-### 决策
+### 已批准决策
 
-- P1 的 `PowerGroupPolicyIndex` 只有只读 `protectedGroups`，没有经过批准的 `softRiskUnits`、风险等级或软 policy 摘要。
-- D1 v1 删除 `policyRiskUnits` 及其 `0.4 * norm(policyRiskUnits, handSize)` 分量；不得在 PlanEvaluator 中重建第二套 PowerGroup policy，也不得把 `protectionLoss` 改名后重复计分。
-- D1 v1 的唯一 PowerGroup 软风险为：
+- P1 的 `PowerGroupPolicyIndex` 只有只读 `protectedGroups`，没有 `softRiskUnits`、风险等级或软 policy 摘要。
+- D1 v1 不使用 `handSize`、`floor(handSize / 4)` 或任意固定常量作为归一化上限。
+- 归一化分母为当前 decision 共享的 `protectedGroupCount = powerGroupPolicyIndex.protectedGroups.length`。分子和分母都是 protected group 数量，量纲一致；同一 decision 中所有候选共享同一分母。
+- 当 `protectedGroupCount === 0` 时，必须断言 `protectionLoss === 0`，并令 `powerGroupRisk = 0`。
+- 当 `protectedGroupCount > 0` 时，必须先验证 `protectionLoss` 为有限整数且 `0 <= protectionLoss <= protectedGroupCount`；验证通过后计算：
 
   ```text
   powerGroupRisk = round6(
-    15 * clamp(protectionLoss / max(1, protectionLossLimit), 0, 1)
+    15 * protectionLoss / protectedGroupCount
   )
   ```
 
+- 验证通过后可以增加防御性 clamp，但不得用 clamp 静默掩盖非法数据；非法输入必须明确失败。
 - `protectionLoss` 只在 `powerGroupRisk` 读取一次，不进入 `staticPlanQuality`、`endgameFit`、`opponentPressureFit` 或 `partnerContextFit`。
+- 不创建 `softRiskUnits`，不按 protected group 内牌数再次加权，不在 PlanEvaluator 内重新判断 protection severity。
 - hard `PowerGroupPolicy` violation 仍由 P3 selector 在评分前过滤；P2 evaluator 不判定或降低 hard violation。
-- `PowerGroupPolicyIndex` 在 P2 中可继续作为只读输入，仅用于已有保护结果和 candidate helper 的 control-preserving 判断；不得从 `protectedGroups` 推导新的 soft risk 单位。
+- `PowerGroupPolicyIndex` 在 P2 中只作为只读输入，供既有保护结果和 candidate helper 的 control-preserving 判断使用。
 - policy-native soft risk（risk level、soft violation、protection severity 等）延后为 D1.1 独立设计。
 
-### protectionLossLimit 证据与当前门禁
+### protectionLossLimit 来源与门禁
 
-现有 `measureProtectionLoss` 返回“被丢失的 protected group 数量”。`protectedPowerGroups` 选择互不重叠的 protected groups，且当前实现中的受保护 group 至少包含四张牌；因此代码只证明它是 group-count，而不是 `handSize` 的精确理论最大值。现有 `PlanMetrics`、plan evaluator 和测试也没有声明固定上限。
+`protectionLossLimit` 不再是 hand-size 或固定常量；其运行时来源是同一 decision 的 `powerGroupPolicyIndex.protectedGroups.length`。`protectedGroups` 由现有 PowerGroupPolicy 提供，P2 不重新解释或生成该集合。
 
-因此本轮不得猜测 `protectionLossLimit`：P2 仍 blocked，直到设计/代码审查明确以下二选一并记录证据：
-
-1. 批准 `handSize` 作为明确的 D1 v1 归一化上限；或
-2. 批准并复用现有 plan-quality 固定上限。
-
-在该上限获批准前，不得写 P2 evaluator 实现、不得添加 P2 生产接口、不得运行 P2 benchmark。上限确认后，必须重新补齐端点、单调性、clamp 和固定小数测试。
+P2 阻塞已解除，可以开始 P2 的 RED 测试；但本轮仍不得开始 P2 编码。P2 实施必须先验证上述不变量，再计算风险；不得通过静默 clamp 继续执行非法数据。
 
 ### P2 测试计划更新
 
 P2 测试必须覆盖：
 
-- `protectionLoss = 0` 时 `powerGroupRisk = 0`；
-- `protectionLoss` 增加时风险单调不减；
-- 达到批准上限时 clamp 为 15；
-- `protectionLoss` 不影响 `staticPlanQuality`；
-- 相同 `protectionLoss` 的计划不会因 `protectedGroups` 数量被额外惩罚；
-- hard policy violation 不由 P2 evaluator 处理；
-- evaluator 不访问不存在的 `softRiskUnits`，也不调用 PowerGroupPolicy 之外的风险规则。
+1. `protectedGroups=0, loss=0` 得到 risk `0`；
+2. `protectedGroups=1, loss=1` 得到 risk `15`；
+3. `protectedGroups=4, loss=1` 得到 risk `3.75`；
+4. `protectedGroups=4, loss=2` 得到 risk `7.5`；
+5. `protectedGroups=4, loss=4` 得到 risk `15`；
+6. loss 单调增加时 risk 单调不减；
+7. `loss > protectedGroups.length` 明确失败；
+8. `protectedGroups=0` 但 loss 大于 0 明确失败；
+9. loss 为负数、非整数、NaN 或 Infinity 明确失败；
+10. 相同 protected group count 和 loss、但组内牌数不同，risk 相同；
+11. `protectionLoss` 不影响 static/endgame/pressure/partner 分项；
+12. evaluator 不调用或声明 `softRiskUnits`。
 
-### 决策记录
+### P2a/P2b 决策记录
 
 | 问题 | 修订位置 | 最终决定 | 对实施/测试的影响 |
 |---|---|---|---|
-| P1 `PowerGroupPolicyIndex` 没有 `softRiskUnits`，如何避免 P2 发明第二套 policy？ | P2 公式、P2 完成条件、本节 | D1 v1 仅使用现有 `protectionLoss` 作为软风险；hard policy 由 P3 selector 过滤；policy-native soft risk 延后 D1.1。 | 删除 `policyRiskUnits` 测试和实现要求；增加“不访问 softRiskUnits/不重复计分”测试。 |
-| `protectionLossLimit` 的量纲和上限是否已由现有代码确认？ | 本节 protectionLossLimit 证据与门禁 | 尚未确认；当前 P2 blocked，不猜测 `handSize` 或其他上限。 | 需先完成人工设计批准，之后才能开始 P2 RED 测试和实现。 |
+| P1 `PowerGroupPolicyIndex` 没有 `softRiskUnits`，如何避免 P2 发明第二套 policy？ | P2 公式、P2 完成条件、本节 | D1 v1 仅使用现有 `protectionLoss`；hard policy 由 P3 selector 过滤；policy-native soft risk 延后 D1.1。 | 删除 `policyRiskUnits` 测试和实现要求；增加“不访问 softRiskUnits/不重复计分”测试。 |
+| protectionLoss 的归一化上限如何确定？ | 本节 protectionLossLimit 来源与公式 | 已批准使用同一 decision 的 `protectedGroups.length`；不使用 handSize、floor(handSize/4) 或固定常量。 | 增加零分母、不变量、整数/有限性、单调性、固定小数和同分母候选测试；非法数据必须失败。 |
