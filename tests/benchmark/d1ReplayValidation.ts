@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { finalPublicStateHash as reportingFinalPublicStateHash, publicTraceHash as reportingPublicTraceHash } from "./reporting";
+import { D1_DIAGNOSTICS_SCHEMA, D1_RESULT_SCHEMA, validateD1ProvenanceHash } from "./d1ProvenanceV2";
 
 export interface D1ReplayValidationOptions { expectedConfigHash?: string; expectedBenchmarkVersion?: string; expectedReplayVersion?: string; expectedEngineVersion?: string; expectedRoomRulesVersion?: string; }
 export function validateD1Replay(replay: Record<string, unknown>, options: D1ReplayValidationOptions = {}): true {
@@ -12,6 +13,18 @@ export function validateD1Replay(replay: Record<string, unknown>, options: D1Rep
   if (!Array.isArray(replay.strategyDescriptors)) throw new Error("PROVENANCE_MISSING:strategyDescriptors");
   if (replay.deterministicRandom === undefined || typeof replay.deterministicRandom !== "object") throw new Error("PROVENANCE_MISSING:deterministicRandom");
   if (typeof replay.publicTraceHash !== "string" || typeof replay.finalPublicStateHash !== "string") throw new Error("HASH_MISSING");
+  return true;
+}
+
+export function validateD1RawResultV2(result: Record<string, unknown>, expected: { configHash: string; executionSourceCommit: string; provenanceHash: string; phase?: string }): true {
+  if (result.rawResultSchemaVersion !== D1_RESULT_SCHEMA) throw new Error("RAW_RESULT_SCHEMA_MISMATCH");
+  for (const key of ["matchId", "phase", "matchup", "seed", "placement", "rotation", "strategiesBySeat", "configHash", "executionSourceCommit", "provenanceHash", "executionProvenance", "publicTraceHash", "finalPublicStateHash", "d1Diagnostics", "durationMs"]) if (!(key in result)) throw new Error(`RAW_RESULT_PROVENANCE_MISSING:${key}`);
+  if (result.configHash !== expected.configHash || result.executionSourceCommit !== expected.executionSourceCommit || (expected.phase !== undefined && result.phase !== expected.phase)) throw new Error("RAW_RESULT_PROVENANCE_MISMATCH");
+  validateD1ProvenanceHash(result.executionProvenance, result.provenanceHash);
+  const diagnostics = result.d1Diagnostics;
+  if (diagnostics === null || typeof diagnostics !== "object" || (diagnostics as Record<string, unknown>).schemaVersion !== D1_DIAGNOSTICS_SCHEMA) throw new Error("RAW_RESULT_DIAGNOSTICS_MISSING");
+  if (typeof result.durationMs !== "number" || !Number.isFinite(result.durationMs) || result.durationMs <= 0) throw new Error("RAW_RESULT_DURATION_INVALID");
+  if (containsPrivate(result)) throw new Error("PRIVACY_HIDDEN_STATE");
   return true;
 }
 
@@ -56,4 +69,5 @@ export function writeD1Replay(summary: { matchId: string; seed: number; rotation
   const destination = path.join(outputDir, `${summary.matchId.replace(/[\\/:*?"<>|]/g, "_")}.json`); fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.writeFileSync(destination, `${JSON.stringify(replay, null, 2)}\n`, "utf8"); return destination;
 }
 function containsPrivateKey(value: unknown): boolean { if (Array.isArray(value)) return value.some(containsPrivateKey); if (value === null || typeof value !== "object") return false; return Object.entries(value).some(([key, child]) => /^(partnerHand|opponentsHands|hands|initialHands|deck|hiddenInitialHand|hiddenState|fullState)$/i.test(key) || containsPrivateKey(child)); }
+function containsPrivate(value: unknown): boolean { if (Array.isArray(value)) return value.some(containsPrivate); if (value === null || typeof value !== "object") return false; return Object.entries(value).some(([key, child]) => /^(partnerHand|opponentsHands|hands|initialHands|deck|hiddenInitialHand|hiddenState|fullState)$/i.test(key) || containsPrivate(child)); }
 function orderedSeats<T>(record: Record<number, T>): Record<number, T> { return Object.fromEntries([0, 1, 2, 3].map((seat) => [seat, record[seat]]).filter(([, value]) => value !== undefined)) as Record<number, T>; }

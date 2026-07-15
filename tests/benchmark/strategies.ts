@@ -11,6 +11,7 @@ import type {
 } from "./contracts";
 import { cardFromPublicId, toLegacyObservation, toProductionObservation } from "./observation";
 import { resolveGitExecutionProvenance } from "./d1Provenance";
+import type { AiPlanningDiagnostics } from "../../src/ai/diagnostics/aiPlanningDiagnostics";
 
 const SOURCE_COMMIT = resolveGitExecutionProvenance({ cwd: process.cwd() }).executionSourceCommit;
 const CONFIG_HASH = "d0-v1";
@@ -23,6 +24,19 @@ export type LegacyRuntime = { calls: number };
 // concrete runtime type at this boundary. Concrete adapters above remain
 // strongly typed.
 export type Strategy = AiStrategy<any>;
+
+const boundDiagnostics = new WeakMap<object, AiPlanningDiagnostics>();
+
+export function bindStrategyDiagnostics(runtime: unknown, diagnostics: AiPlanningDiagnostics | undefined): void {
+  if (runtime !== null && typeof runtime === "object") {
+    if (diagnostics === undefined) boundDiagnostics.delete(runtime);
+    else boundDiagnostics.set(runtime, diagnostics);
+  }
+}
+
+function diagnosticsForRuntime(runtime: unknown): AiPlanningDiagnostics | undefined {
+  return runtime !== null && typeof runtime === "object" ? boundDiagnostics.get(runtime) : undefined;
+}
 
 const unifiedCurrent: AiStrategy<AiRuntimeState> = {
   id: "unified-current",
@@ -41,9 +55,11 @@ const unifiedCurrent: AiStrategy<AiRuntimeState> = {
     needsReplan: true,
   }),
   decide: (observation, runtime) => {
+    const diagnostics = diagnosticsForRuntime(runtime);
     const production = decideAiAction(toProductionObservation(observation), runtime, {
       ...DEFAULT_AI_PERFORMANCE_CONFIG,
       turn: observation.actionIndex,
+      diagnostics,
     }, { planSelectionMode: "keep-current", decisionIndex: observation.actionIndex });
     return {
       action: toStrategyAction(production.action),
@@ -61,9 +77,11 @@ const unifiedD1TopK: AiStrategy<AiRuntimeState> = {
   configHash: "d1-topk-v1",
   mode: "dynamic-topk-v1",
   decide: (observation, runtime) => {
+    const diagnostics = diagnosticsForRuntime(runtime);
     const production = decideAiAction(toProductionObservation(observation), runtime, {
       ...DEFAULT_AI_PERFORMANCE_CONFIG,
       turn: observation.actionIndex,
+      diagnostics,
     }, { planSelectionMode: "dynamic-topk-v1", decisionIndex: observation.actionIndex });
     return { action: toStrategyAction(production.action), runtime: { ...production.runtime } };
   },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canSkipExisting, validateResumeManifest } from "./d1Manifest";
+import { canSkipExisting, canSkipExistingV2, validateResumeManifest } from "./d1Manifest";
 
 describe("D1 resume and skip-existing", () => {
   it("only skips a complete safety-valid result with matching provenance", () => {
@@ -14,5 +14,10 @@ describe("D1 resume and skip-existing", () => {
     const base = { schemaVersion: "d1-manifest-v1" as const, phase: "formal", matchup: "treatment-vs-control", configHash: "a", executionSourceCommit: "a".repeat(40), expectedMatchIds: ["m1"], completedMatchIds: ["m1"], resumeSupported: true as const, skipExistingSupported: true as const };
     expect(() => validateResumeManifest(base, { ...base, configHash: "b" })).toThrow(/CONFIG_HASH/);
     expect(() => validateResumeManifest({ ...base, completedMatchIds: [] }, base)).toThrow(/MISSING/);
+  });
+
+  it("rejects pre-P6.6 v1 results from skip-existing", () => {
+    expect(canSkipExistingV2({ rawResultSchemaVersion: "d1-benchmark-result-v1", completed: true, failed: false }, { configHash: "cfg", provenanceHash: "p", executionSourceCommit: "a".repeat(40), replayMode: "all" })).toBe(false);
+    expect(canSkipExistingV2({ rawResultSchemaVersion: "d1-benchmark-result-v2", completed: true, failed: false, configHash: "cfg", provenanceHash: "p", executionSourceCommit: "a".repeat(40), durationMs: 1, d1Diagnostics: { schemaVersion: "d1-plan-selection-diagnostics-v1", applicable: true }, executionProvenance: {} }, { configHash: "cfg", provenanceHash: "p", executionSourceCommit: "a".repeat(40), replayMode: "all" })).toBe(false);
   });
 });

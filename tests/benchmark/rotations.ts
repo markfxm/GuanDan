@@ -4,6 +4,7 @@ import type { RoundSettlement, TributeState } from "../../src/game/settlement";
 import type { BenchmarkConfig } from "./contracts";
 import { canonicalJson } from "./contracts";
 import { canonicalStrategyId } from "./strategies";
+import type { D1ExecutionProvenanceV1 } from "./d1ProvenanceV2";
 
 export type Allocation = "AB" | "BA";
 
@@ -16,6 +17,9 @@ export interface BenchmarkGameTask {
   matchId: string;
   room?: RoomState;
   executionSourceCommit?: string;
+  phase?: "smoke" | "calibration" | "formal";
+  matchup?: string;
+  executionProvenance?: D1ExecutionProvenanceV1;
 }
 
 export function rotateRoom(room: RoomState, rotation: Seat): RoomState {
