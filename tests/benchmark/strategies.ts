@@ -10,8 +10,9 @@ import type {
   StrategyAction,
 } from "./contracts";
 import { cardFromPublicId, toLegacyObservation, toProductionObservation } from "./observation";
+import { resolveGitExecutionProvenance } from "./d1Provenance";
 
-const SOURCE_COMMIT = process.env.GIT_COMMIT ?? "unknown";
+const SOURCE_COMMIT = resolveGitExecutionProvenance({ cwd: process.cwd() }).executionSourceCommit;
 const CONFIG_HASH = "d0-v1";
 
 export type LegalRandomRuntime = { state: number; calls: number };
@@ -162,6 +163,10 @@ export const strategyDescriptors = [unifiedCurrent, unifiedD1TopK, legacyReferen
   ...(behaviorBaselineTag === undefined ? {} : { behaviorBaselineTag }),
   ...(keepCurrentLockFixtureHash === undefined ? {} : { keepCurrentLockFixtureHash }),
 }));
+
+export function strategyDescriptorsForExecution(executionSourceCommit: string): typeof strategyDescriptors {
+  return strategyDescriptors.map((descriptor) => ({ ...descriptor, sourceCommit: executionSourceCommit }));
+}
 
 function toStrategyAction(action: { type: "pass" } | { type: "play"; group: { cards: { id: string }[] } }): StrategyAction {
   return action.type === "pass" ? { type: "pass" } : { type: "play", cardIds: action.group.cards.map((card) => card.id).sort() };

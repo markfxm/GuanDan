@@ -152,6 +152,7 @@ export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: b
     publicTraceHash: publicTraceHash(publicEvents),
     finalPublicStateHash: finalPublicStateHash(publicState),
     durationMs,
+    executionSourceCommit: task.executionSourceCommit,
     finalPublicState: publicState,
     completed: room.status === "finished" && room.finishOrder.length === 4,
     failed: errors.length > 0,

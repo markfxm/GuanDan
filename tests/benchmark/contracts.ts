@@ -74,6 +74,7 @@ export interface BenchmarkConfig {
   strategyA: string;
   strategyB: string;
   replayMode: "none" | "failures" | "all";
+  executionSourceCommit?: string;
 }
 
 export interface GameSummary {
@@ -91,6 +92,7 @@ export interface GameSummary {
   finalPublicStateHash: string;
   /** Wall-clock duration measured around the complete simulation (milliseconds). */
   durationMs: number;
+  executionSourceCommit?: string;
 }
 
 export interface RandomReplayProvenance {

@@ -1084,3 +1084,27 @@ P2 测试必须覆盖：
 |---|---|---|---|
 | P1 `PowerGroupPolicyIndex` 没有 `softRiskUnits`，如何避免 P2 发明第二套 policy？ | P2 公式、P2 完成条件、本节 | D1 v1 仅使用现有 `protectionLoss`；hard policy 由 P3 selector 过滤；policy-native soft risk 延后 D1.1。 | 删除 `policyRiskUnits` 测试和实现要求；增加“不访问 softRiskUnits/不重复计分”测试。 |
 | protectionLoss 的归一化上限如何确定？ | 本节 protectionLossLimit 来源与公式 | 已批准使用同一 decision 的 `protectedGroups.length`；不使用 handSize、floor(handSize/4) 或固定常量。 | 增加零分母、不变量、整数/有限性、单调性、固定小数和同分母候选测试；非法数据必须失败。 |
+### P6.4 execution provenance and bounded smoke gate
+
+P6.4 resolves `executionSourceCommit` from the Git worktree at CLI startup using
+`git rev-parse --show-toplevel` and `git rev-parse HEAD`. It must be a full 40-character
+SHA and the execution path set must be clean; Git failures are fail-closed and never
+fall back to `unknown`, `HEAD`, `latest`, or a package version. The resolved commit is
+propagated to strategy descriptors, the effective config hash, every raw result, every
+batch manifest, and all later reports. `resume` and `skip-existing` reject missing,
+unknown, or mismatched provenance.
+
+The effective D1 config hash is the SHA-256 of the canonical tuple
+`requestedConfigHash + executionSourceCommit + benchmarkVersion + rank + phase + replayMode`.
+Changing only the execution commit therefore changes configHash and match identity.
+Dry-run reports `executionSourceCommit` and `worktreeClean` without writing artifacts;
+formal execution additionally requires a clean execution tree.
+
+Before P7 is restarted, remove or quarantine all invalid P7 output whose manifest has
+`executionSourceCommit = unknown`; it must not be resumed, merged, or repaired in place.
+Run seven bounded smoke commands independently, each with one matchup and the same
+seeds 201--220, replay mode `failures`, concurrency 1, and a non-overlapping output
+subdirectory. Each command must plan 160 raw games/80 paired units. The union of the
+seven expected ID sets must equal the all-matchup dry-run (1120 raw/560 paired), with
+no duplicates or gaps and one shared execution commit/configHash. P6.4 runs only the
+dry-runs and focused tests; it does not run formal smoke, calibration, or formal.

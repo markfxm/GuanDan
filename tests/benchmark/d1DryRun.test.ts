@@ -47,7 +47,9 @@ describe("D1 dry-run plan contract", () => {
     expect(output.matchups.every((matchup) => matchup.rawGames === 160 && matchup.pairedUnits === 80 && matchup.batchCount === 1 && matchup.replayMode === "failures")).toBe(true);
     expect(output.totals).toMatchObject({ matchups: 7, baseSeedMatchupBlocks: 140, rawGames: 1120, pairedUnits: 560, batches: 7, expectedMatchIds: 1120 });
     expect(output.expectedMatchIdsHash).toMatch(/^[a-f0-9]{64}$/);
-    expect(output.configHash).toBe("d1-config-unfrozen");
+    expect(output.configHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(output.executionSourceCommit).toMatch(/^[a-f0-9]{40}$/);
+    expect(output.worktreeClean).toEqual(expect.any(Boolean));
   });
 
   it("reports calibration counts and a single selected matchup deterministically", async () => {

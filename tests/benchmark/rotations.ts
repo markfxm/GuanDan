@@ -15,6 +15,7 @@ export interface BenchmarkGameTask {
   allocation: Allocation;
   matchId: string;
   room?: RoomState;
+  executionSourceCommit?: string;
 }
 
 export function rotateRoom(room: RoomState, rotation: Seat): RoomState {
