@@ -1,10 +1,25 @@
 # D2a.1 Production Identity Integration Implementation Plan
 
+## Current human approval (2026-07-17)
+
+- `decisionStatus`: `APPROVED_FOR_IMPLEMENTATION`.
+- Source contract: `APPROVED`.
+- Approved store: `better-sqlite3@12.11.1`.
+- Production baseline: Ubuntu/Linux x64, Node `22.22.2`, installed with `npm ci`.
+- Development/auxiliary support: Windows x64, Node `24.x`.
+- Unsupported: Linux ARM64, Windows ARM64, macOS, Node `<22`, and other unverified Node majors.
+- GitHub Actions evidence: run `29521740862`, job `87700224446`, artifact `8384974836`, SHA-256 `a291ee8433688989d8c58223db4786014fdc88d3061a239089e7dd06bc426b97`.
+- `ubuntuPrebuiltStatus`: `UNVERIFIED`; the inaccessible install log prevents a stronger claim.
+- The store-technology blocker for Tasks 1–6 is lifted. Task 1 may begin with its required RED test; no Task implementation is part of this commit.
+- D2b remains out of scope, legacy D1 compatibility gates remain unchanged, and `formalExecutionAllowed=false`.
+
 > For agentic workers: execute this plan task by task with the execution-plans skill.
 
 **Goal:** 正常 production 建局显式取得稳定 PublicGameIdentity 并创建 D2a publicLedger；legacy 创建显式隔离；D0/D1 trace、hash、schema、PublicRoom shape 与 D2a contract 不变。
 
-**Status:** source contract = APPROVED_SOURCE_CONTRACT；store technology = STORE_TECHNOLOGY_NOT_APPROVED。Task 1–6 和 D2b 继续阻塞。formalExecutionAllowed=false。
+**Status:** source contract = APPROVED；store technology = APPROVED_FOR_IMPLEMENTATION。Production baseline = Ubuntu/Linux x64 + Node 22.22.2 (`npm ci`)；development = Windows x64 + Node 24.x。Task 1–6 的 store blocker 已解除，但本提交不实施任何 Task。D2b 仍禁止。formalExecutionAllowed=false。
+
+> **Current status supersedes the historical preflight line above:** `APPROVED_FOR_IMPLEMENTATION` for Ubuntu/Linux x64 + Node 22.22.2 (`npm ci`), with Windows x64 + Node 24.x as development support. The store blocker for Tasks 1–6 is lifted; Task 1 must still start with RED and is not implemented in this commit. `formalExecutionAllowed=false`.
 
 ## 1. Actual lifecycle mapping
 
@@ -104,7 +119,7 @@ The store persists installationIdentity, nextGameSequence, idempotencyKey, descr
 
 Repository inspection found no production store. The formal candidates are exactly:
 
-**A. better-sqlite3 12.11.1 (recommended, not approved).** npm engines include Node 20/22/23/24/25/26; synchronous transaction and UNIQUE semantics are clear. Cost: native addon, Node ABI/prebuilt coverage, packaging and OS/architecture verification.
+**A. better-sqlite3 12.11.1 (approved).** npm engines include Node 20/22/23/24/25/26; synchronous transaction and UNIQUE semantics are clear. Cost: native addon, Node ABI/prebuilt coverage, packaging and OS/architecture verification. The approved production target is Ubuntu/Linux x64 on Node 22.22.2; the exact Ubuntu prebuilt-versus-node-gyp outcome remains UNVERIFIED.
 
 **B. node:sqlite (not selected).** Added in Node 22.5; Node 22.13 removed the flag but retained experimental stability; Node 24.15 is release candidate. Cost: minimum Node patch/stability coupling and upgrade risk while CI targets Node 22.
 
@@ -120,7 +135,7 @@ node-sqlite3 is removed from the formal candidates as deprecated/unmaintained. T
 - Temporary dependency and database were deleted; package.json, package-lock, production code and artifacts are unchanged.
 - Ubuntu Node 22 native install and real production OS/architecture were not executed; this is the approval blocker.
 
-Decision status is STORE_TECHNOLOGY_NOT_APPROVED, not APPROVED_FOR_IMPLEMENTATION.
+The former `STORE_TECHNOLOGY_NOT_APPROVED` sentence is historical pre-approval context. The current decision is `APPROVED_FOR_IMPLEMENTATION` for the explicitly frozen Ubuntu/Linux x64 Node 22.22.2 baseline; no other OS/architecture or unverified Node major is implied.
 
 ## 4. Room-level idempotency and bootstrap
 
@@ -248,4 +263,4 @@ Stop conditions: unapproved store, failed restart recovery, missing production l
 
 ### Supported matrix and final decision
 
-Confirmed compatibility: Windows x64 Node 24 development and Ubuntu x64 Node 22 CI. The actual production deployment target is not specified, so record PRODUCTION_DEPLOYMENT_TARGET_UNRESOLVED. CI_STORE_COMPATIBILITY_APPROVED is acceptable as a sub-result; the total decision remains STORE_TECHNOLOGY_NOT_APPROVED. Do not create the formal approval JSON.
+Historical pre-approval record: Windows x64 Node 24 development and Ubuntu x64 Node 22 CI were previously the only confirmed environments, so the preflight recorded `PRODUCTION_DEPLOYMENT_TARGET_UNRESOLVED` and `CI_STORE_COMPATIBILITY_APPROVED` as a sub-result. The human approval above supersedes that interim status, freezes the production baseline, and authorizes the formal approval JSON.

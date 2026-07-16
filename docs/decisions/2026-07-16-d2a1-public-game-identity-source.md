@@ -8,9 +8,9 @@
 
 **APPROVED_SOURCE_CONTRACT**
 
-**STORE_TECHNOLOGY_NOT_APPROVED**
+**APPROVED_FOR_IMPLEMENTATION**
 
-This decision approves the identity lifecycle and provider allocation semantics. better-sqlite3 12.11.1 is the recommended store candidate, but the actual Ubuntu Node 22 CI/deployment native-install matrix remains unverified. Production implementation is not authorized until that gate passes.
+This decision approves the identity lifecycle, provider allocation semantics, and the selected store technology for the frozen production deployment baseline. The exact Ubuntu prebuilt-versus-node-gyp installation outcome remains unverified because the CI install log is not readable in this environment; no prebuilt claim is made.
 
 ## Approved identity source
 
@@ -117,7 +117,7 @@ Provides synchronous transactions, UNIQUE constraints, and straightforward crash
 
 Node 22.5 introduced node:sqlite; Node 22.13 removed the flag but retained experimental stability, and Node 24.15 is release candidate. The cost is coupling the store to the Node minimum patch/stability level and to a future Node upgrade. It is not selected while CI targets Node 22.
 
-**Recommendation:** Candidate A, exact version 12.11.1. A Windows Node 22/24 temporary preflight passed module load, transaction, UNIQUE and reopen checks using a prebuilt binary. Ubuntu CI/deployment native installation was not executed here, so this decision remains STORE_TECHNOLOGY_NOT_APPROVED. Task 1 must not switch candidates without a new decision.
+**Recommendation:** Candidate A, exact version 12.11.1. A Windows Node 22/24 temporary preflight passed module load, transaction, UNIQUE and reopen checks using a prebuilt binary. The production deployment baseline is now explicitly approved as Ubuntu/Linux x64 with Node 22.22.2 and `npm ci`; the CI evidence below establishes the approved compatibility gate, while the exact Ubuntu prebuilt-versus-node-gyp line remains UNVERIFIED. Task 1 must not switch candidates without a new decision.
 
 ## Idempotency-Key contract
 
@@ -145,13 +145,19 @@ Rebuild creates the initial public ledger from the saved identity and initialSta
 
 Task 0 must record the selected store technology, transaction mechanism, unique constraints, restart test path, Idempotency-Key header contract, room-level gameId mapping and installation bootstrap transaction. Only after the Ubuntu Node 22/deployment native-install gate passes may Task 1–6 begin.
 
-Until that record is approved:
+## Current human approval (2026-07-17)
 
-- source status remains APPROVED_SOURCE_CONTRACT;
-- implementation status remains STORE_TECHNOLOGY_NOT_APPROVED;
-- no production code, tests, benchmark, approval, or artifact changes are authorized;
-- D2b is blocked;
-- formalExecutionAllowed remains false.
+- `sourceContractStatus`: `APPROVED`.
+- `decisionStatus`: `APPROVED_FOR_IMPLEMENTATION`.
+- `approvedStoreTechnology`: `better-sqlite3`.
+- `approvedStoreVersion`: `12.11.1`.
+- Production baseline: Ubuntu/Linux x64, Node `22.22.2`, installed with `npm ci`.
+- Development/auxiliary support: Windows x64, Node `24.x`.
+- Unsupported: Linux ARM64, Windows ARM64, macOS, Node `<22`, and any other unverified Node major.
+- GitHub Actions evidence: run `29521740862`, job `87700224446`, artifact `8384974836`, SHA-256 `a291ee8433688989d8c58223db4786014fdc88d3061a239089e7dd06bc426b97`.
+- `ubuntuPrebuiltStatus`: `UNVERIFIED`; the inaccessible install log prevents a stronger claim.
+- The store-technology blocker for Tasks 1–6 is lifted. Task 1 may begin with its required RED test, but no Task 1 implementation is part of this decision commit.
+- D2b remains out of scope, legacy D1 compatibility gates remain unchanged, and `formalExecutionAllowed=false`.
 ---
 ## Ubuntu gate result (2026-07-17)
 
@@ -180,4 +186,4 @@ The workflow logs and uploaded artifact require repository-admin authentication 
 
 ### Support and decision
 
-Confirmed: Windows x64 Node 24 development and Ubuntu x64 Node 22 CI. The project has not declared an actual production deployment target. Record PRODUCTION_DEPLOYMENT_TARGET_UNRESOLVED and CI_STORE_COMPATIBILITY_APPROVED as a sub-result. Overall status remains STORE_TECHNOLOGY_NOT_APPROVED; do not create d2a1-identity-source-decision.json.
+Historical pre-approval record: Windows x64 Node 24 development and Ubuntu x64 Node 22 CI were previously the only confirmed environments, so the preflight recorded `PRODUCTION_DEPLOYMENT_TARGET_UNRESOLVED` and `CI_STORE_COMPATIBILITY_APPROVED` as a sub-result. The 2026-07-17 human approval above supersedes that interim status, freezes the Ubuntu/Linux x64 Node 22.22.2 production baseline, and authorizes the machine-readable approval record.

@@ -3,7 +3,7 @@
 **Date:** 2026-07-17
 **Scope:** temporary audit only; no production implementation
 **Source commit:** 59f7c6ddb7892a4f54aec4e390e5fdad145ad83c
-**Final status:** STORE_TECHNOLOGY_NOT_APPROVED
+**Final status:** APPROVED_FOR_IMPLEMENTATION
 **formalExecutionAllowed:** false
 
 ## Environment
@@ -62,9 +62,9 @@ npm run build exited 0. The generated browser bundle was scanned for better-sqli
 
 Temporary dependency directory and database were deleted. git status remained clean before document edits. package.json, package-lock.json, src, benchmark schemas, approval and artifacts were not modified.
 
-## Remaining blocker
+## Historical pre-approval blocker
 
-Ubuntu Node 22 native installation and the real production OS/architecture were not available in this Windows environment. Therefore the preflight does not meet the requested APPROVED_FOR_IMPLEMENTATION gate. The decision remains STORE_TECHNOLOGY_NOT_APPROVED until a CI/deployment matrix run proves the native install and server startup.
+Ubuntu Node 22 native installation and the real production OS/architecture were not available in the original Windows-only preflight. This section records the historical blocker; it is superseded by the human deployment-target approval and the real GitHub Actions gate recorded below.
 
 ## Frozen room/idempotency and game-id requirements
 
@@ -99,6 +99,17 @@ Ubuntu Node 22 native installation and the real production OS/architecture were 
 - runtime settings: server-only import, D2A_IDENTITY_STORE_PATH, defaultSafeIntegers, foreign_keys=ON, synchronous=FULL, journal_mode=WAL, busy_timeout=5000 and BEGIN IMMEDIATE.
 - Idempotency-Key is required, 1-128 allowed ASCII characters, no trim, case-sensitive; 400 for missing/invalid and 409 for same key with a different descriptor.
 
+## Human approval update (2026-07-17)
+
+- Production baseline: Ubuntu/Linux x64, Node `22.22.2`, installed with `npm ci`.
+- Development/auxiliary support: Windows x64, Node `24.x`.
+- Unsupported: Linux ARM64, Windows ARM64, macOS, Node `<22`, and other unverified Node majors.
+- Store: `better-sqlite3@12.11.1`.
+- GitHub Actions evidence: run `29521740862`, job `87700224446`, artifact `8384974836`, SHA-256 `a291ee8433688989d8c58223db4786014fdc88d3061a239089e7dd06bc426b97`.
+- The CI compatibility gate passed and the production target is now frozen. `ubuntuPrebuiltStatus=UNVERIFIED` because this environment cannot read the install log; no prebuilt claim is made.
+- Current decision: `APPROVED_FOR_IMPLEMENTATION`. The formal approval record is `docs/benchmark-approvals/d2a1-identity-source-decision.json`.
+- `formalExecutionAllowed=false`; no implementation Task or benchmark execution is performed by this decision.
+
 ## Decision
 
-CI_STORE_COMPATIBILITY_APPROVED is recorded as a sub-result. Because the real production deployment target is not declared, record PRODUCTION_DEPLOYMENT_TARGET_UNRESOLVED and keep the overall status STORE_TECHNOLOGY_NOT_APPROVED. No approval JSON was created.
+The historical `CI_STORE_COMPATIBILITY_APPROVED` sub-result is now accompanied by the frozen production target above. The current status is `APPROVED_FOR_IMPLEMENTATION`; the prior `PRODUCTION_DEPLOYMENT_TARGET_UNRESOLVED` state is closed by human approval. No smoke, calibration or formal run is authorized here.
