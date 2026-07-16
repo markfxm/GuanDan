@@ -37,6 +37,10 @@ export function verifyPublicActionEventHash(event: PublicActionEvent): true {
   return true;
 }
 
+export function sha256Bytes(input: Uint8Array): string {
+  return sha256(input);
+}
+
 function normalizeDraft(input: PublicActionEventDraft): PublicActionEventDraft {
   assertPublicActionEventDraft(input);
   const source = input as Record<string, unknown>;
