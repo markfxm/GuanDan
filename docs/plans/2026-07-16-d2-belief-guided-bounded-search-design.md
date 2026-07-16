@@ -1,6 +1,6 @@
 # D2：Belief-Guided Bounded Search 设计规格
 
-状态：design-only，待评审；本轮不实施 production，不注册 treatment，不运行 smoke、calibration 或 formal。`formalExecutionAllowed` 必须继续为 `false`。
+状态：design-only，待评审；本轮不实施 production，不注册 treatment，不运行 smoke、calibration 或 formal。`formalExecutionAllowed` 必须继续为 `false`。本文件末尾的“D2 design patch”是对早期章节的规范性修订；如有冲突，以该 patch 为准。
 
 ## 1. Goal 与 Non-Goals
 
@@ -65,10 +65,12 @@ src/ai/evaluation/
 BenchmarkObservation/AiObservation(public + own hand)
   -> PublicActionEvent
   -> HardPublicLedger (dedup + monotonic validation)
-  -> PublicBeliefState = ledger + ParticleBank + DerivedBeliefFeatures
-  -> BeliefGuidedPlanPolicy (family priority + expansion quotas)
+  -> LightweightPublicEvidence
+  -> BeliefGuidedPlanPolicy (family priority + action prior)
   -> existing legal action generation
   -> ActionStrategicSignature reducer (8..12)
+  -> ParticleBank (only for retained roots)
+  -> particle-derived features
   -> common-random shallow rollout
   -> team utility - catastrophe risk
   -> atomic D2 runtime/action commit
@@ -128,7 +130,6 @@ replay 只需保存 `schemaVersion`、event sequence、public action stable keys
 type HiddenDealParticle = Readonly<{
   particleId: number;
   hypotheticalHands: Readonly<Record<number, readonly string[]>>;
-  remainingDeckIds: readonly string[];
   weight: number;
 }>;
 
@@ -177,15 +178,15 @@ ESS = 1 / sum_i(normalizedWeight[i]^2)
 
 ### 5.3 seed 与 common-random-number
 
-`scenarioSeed` 只由不随根动作变化的 canonical 场景组成：`gameSeed/roomSeed`、rank、seat、round identity、D2 algorithm/version。生产若不能从 observation 取得 room seed，必须在 seat-local runtime 创建时注入一个已冻结、与 wall-clock 无关的场景 seed；不能运行时猜测。
+`scenarioKey` 只由不随根动作变化的 canonical 场景组成：game/base seed、round/hand identity、level rank、placement、rotation、perspective seat 和 public decision index。它不得包含 treatment/control、ablation、implementationVersion、configHash、matchup、root action、outputDir、worker、duration 或 wall-clock。生产若不能从 observation 取得 game seed，必须在 seat-local runtime 创建时注入一个已冻结、与 wall-clock 无关的 seed；不能运行时猜测。
 
 ```text
-scenarioSeed = H("d2-scenario-seed-v1|" + canonical(gameSeed, rank, seat, roundId))
-particleSeed  = H(scenarioSeed + "|particle|" + particleIndex)
-rolloutSeed   = H(scenarioSeed + "|rollout|" + particleIndex + "|ply|" + ply + "|simSeat|" + simulatedSeat)
+scenarioSeed = H("d2-scenario-seed-v1|" + canonical(scenarioKey))
+particleSeed  = H(scenarioSeed + "|particle|" + particleSamplerVersion + "|" + particleIndex)
+rolloutSeed   = H(scenarioSeed + "|rollout|" + rolloutRandomVersion + "|" + particleIndex + "|ply|" + ply + "|simSeat|" + simulatedSeat)
 ```
 
-seed 禁止包含根动作 ID、treatment/control、matchup、configHash、outputDir、worker ID、duration 或 wall-clock。相同决策的所有根动作必须复用同一个 immutable `ParticleBank`、同一 normalized weights、同一 seat-local rollout stream 和同一 node/depth budgets。根动作只改变模拟状态，不改变随机流索引；这样差异来自动作，而非不同随机样本。
+同一采样算法下的不同 ablation 必须复用完全相同的 `scenarioKey`、`ParticleBank`、normalized weights 和 seat-local rollout streams；只允许 implementation/config provenance 字段不同。相同决策的所有根动作必须复用同一 immutable bank 和同一 node/depth budgets。根动作只改变模拟状态，不改变随机流索引；这样差异来自动作，而非不同随机样本。`particleSamplerVersion` 与 `rolloutRandomVersion` 必须分别持久化。
 
 ## 6. belief 如何减少组牌枚举
 
@@ -442,5 +443,202 @@ R1b.1 研究的是确定性多计划 candidate exposure 的 planner expansion co
 6. ParticleBank 的内存上限、GC 影响与 worker 隔离；不得以 wall-clock 偷偷改变 particle 数。
 7. D2 diagnostics 是否需要新增 artifact schema；在 P5 privacy 复审前不写正式报告字段。
 8. R1b 最终 candidate contract 是否批准；D2 保持 active-only 可用，不等待该决定。
+
+## 17. D2 design patch：两阶段 belief、依赖拆分与成本闭环
+
+本节取代早期“Ledger → ParticleBank → DerivedBeliefFeatures → plan priority”的顺序，并对相关接口、阶段和自审结论具有最高优先级。
+
+### 17.1 两阶段 belief 数据流
+
+```text
+HardPublicLedger
+  -> LightweightPublicEvidence
+  -> plan-family priority + action prior
+  -> legal action generation + mandatory action reduction
+  -> retain only 8..12 roots
+  -> ParticleBank for retained roots only
+  -> particle-derived features / action likelihood update
+  -> common-random shallow rollout
+  -> team utility + catastrophe risk
+```
+
+`LightweightPublicEvidence` 只使用已公开牌、各家剩余张数、当前牌墩、最近出牌/过牌、牌权、finish order、贡还牌公开事件和当前 AI 自己的手牌：
+
+```ts
+type LightweightPublicEvidence = Readonly<{
+  schemaVersion: "d2-lightweight-evidence-v1";
+  eventIndex: number;
+  ownHand: readonly string[];
+  publicPlayedCardIds: readonly string[];
+  handCounts: Readonly<Record<number, number>>;
+  trick: Readonly<{ leadSeat?: number; lastPlayStableKey?: string; lastPlaySeat?: number }>;
+  recentActions: readonly PublicActionEvent[];
+  finishOrder: readonly number[];
+  publicTributeEvents: readonly string[];
+  publicControlSeat?: number;
+  uncertainty: number;
+}>;
+```
+
+轻量阶段不得创建粒子、调用完整 `HandPlanner`、枚举未来隐藏牌或读取隐藏 state。它只负责低成本的 family priority、action prior、mandatory 标签和 action reduction；这样先减少昂贵搜索，再付出 particle/rollout 成本。`ParticleBank` 只有在保留下来的少量根动作需要深度比较时才创建或更新。
+
+### 17.2 action-search 与 plan-pruning 的依赖边界
+
+设计两个相互独立的能力：
+
+```ts
+type PlanPruningMode = "disabled" | "shadow" | "active";
+
+type BeliefGuidedActionSearch = (input: {
+  evidence: LightweightPublicEvidence;
+  candidatePlans: readonly HandPlan[]; // 0..5
+  legalActions: readonly ActionStrategicSignature[];
+  budget: DeterministicD2Budget;
+}) => BudgetedOutcome[];
+
+type BeliefGuidedPlanPolicy = (input: {
+  evidence: LightweightPublicEvidence;
+  candidatePlans: readonly HandPlan[]; // 0..5
+  mode: PlanPruningMode;
+  budget: DeterministicD2Budget;
+}) => Readonly<{ familyPriority: readonly string[]; expansionQuota: Readonly<Record<string, number>> }>;
+```
+
+`beliefGuidedActionSearch` 不依赖 R1b：candidatePlans 可以为 0–5，输入是全部合法动作、轻量公开证据、reducer 和 rollout。`beliefGuidedPlanPruning` 才依赖显式批准的 deterministic bounded planner backend；backend 未批准时只能 `shadow` 记录 priority/quota，不得改变动作、候选、runtime 或 planner 调用。
+
+`active` 只有在 bounded backend 通过独立设计、确定性、复杂度、privacy 和回归门禁后才允许。`shadow` 禁止调用现有无界 `generateHandPlans` 以满足 quota，禁止用 wall-clock 控制，禁止因为 D2 要求 quota 而临时发明 node limit；只能观测“如果 backend 存在会分配多少额度”。`disabled` 完全不创建 pruning state。D2 首轮实现默认 `planPruningMode="shadow"` 或 `disabled`，不包含 D2c-active。
+
+### 17.3 完整 108-card 粒子守恒
+
+删除 `HiddenDealParticle.remainingDeckIds`；掼蛋标准 108 张牌必须被四个座位完整分配。每个 particle 必须满足：
+
+```text
+own current hand
++ public played cards
++ hypothetical partner/opponent hands
+= complete standard 108-card multiset
+```
+
+验证契约：
+
+- 全部 CardId 与标准 108-card multiset 一一对应，无重复、无遗漏；
+- 已公开牌不得出现在任何 hypothetical hand；
+- 自己手牌与当前 observation 完全一致；
+- 其他座位 hypothetical hand 数量与 HardPublicLedger handCounts 一致；
+- 已进入 finishOrder 的座位 hypothetical hand 必须为空；
+- public played card、own hand 和 hypothetical hands 的交集为空；
+- 任何违反均使粒子权重为 0 并淘汰，不能静默修补或补一张“剩余牌”。
+
+`ParticleBank` 只保存完整 hypothetical hands 和 weight 的 opaque private value；不保存 `remainingDeckIds`，不写入 replay、debug、diagnostics、主报告或通用策略 runtime serialization。
+
+### 17.4 PublicActionEvent 与 action likelihood
+
+`PublicActionEvent` 扩展为只记录公开可见字段：
+
+```ts
+type PublicActionEvent = Readonly<{
+  schemaVersion: "d2-public-event-v2";
+  gameId: string;
+  eventIndex: number;
+  kind: "play" | "pass" | "trick-clear" | "finish" | "tribute";
+  seat: number;
+  patternType?: string;
+  groupType?: string;
+  handCountBefore?: number;
+  handCountAfter?: number;
+  leadSeat?: number;
+  lastPlaySeat?: number;
+  relationToLastPlayer?: "self" | "partner" | "opponent" | "unknown";
+  wasForcedDefense?: boolean;
+  opponentNearFinish?: boolean;
+  usedWildcardCount?: number;
+  usedBomb?: boolean;
+  trickIndex: number;
+  actionStableKey?: string;
+  publicPayloadHash: string;
+}>;
+```
+
+HardPublicLedger 长期保留精确 public card 计数、hand counts 和 finish order；另外保留最近 8–16 个 action summaries 或最近 2–4 个 trick，窗口大小由 frozen config 决定。事件去重、单调 index 和 replay hash 规则不变。
+
+新增只读模块 `publicActionLikelihood`：
+
+```ts
+type ActionLikelihood = Readonly<{
+  playLikelihood: (event: PublicActionEvent, evidence: LightweightPublicEvidence) => number;
+  passLikelihood: (event: PublicActionEvent, evidence: LightweightPublicEvidence) => number;
+  logWeightDelta: number;
+}>;
+```
+
+规则不可能的 event 使 particle log-weight 变为 `-Infinity` 并淘汰；行为不合理只降低有限 log-weight。pass 不能简单解释成“没有牌”，必须结合搭档领牌、保炸、protected group、逢人配和对手临近走完等公开特征。play likelihood 同样使用 pattern/group type、牌权、wildcard/bomb 使用和 hand-count 变化；pass likelihood 使用 relation-to-last-player、partner yield 和 defensive context。具体 likelihood 数值、校准样本与阈值在独立 calibration 冻结，本轮不猜测、不自动从当前数据推导。
+
+所有 log-weight 必须 finite 或明确为 `-Infinity`；NaN、正 Infinity、非法负概率、全零/全 `-Infinity` 权重集合均 fail-closed 并 fallback，不得归一化成伪造均匀分布。
+
+### 17.5 CRN seed 修订
+
+```ts
+scenarioKey = canonical(
+  gameOrBaseSeed,
+  roundOrHandIdentity,
+  levelRank,
+  placement,
+  rotation,
+  perspectiveSeat,
+  publicDecisionIndex
+)
+```
+
+`scenarioKey` 严禁包含 treatment/control、ablation、implementationVersion、configHash、matchup、root action、outputDir、worker、duration 或 wall-clock。`particleSamplerVersion` 与 `rolloutRandomVersion` 分开记录，但不参与 scenario identity 的 treatment 维度；同一 sampling algorithm 的不同 ablation 必须复用相同 scenarioKey、ParticleBank、weights 和 seat-local rollout streams。不同算法/版本必须产生新 provenance/configHash，不能把旧 artifact 当作新 CRN 结果。
+
+### 17.6 candidatePlans=0 的 action-only 语义
+
+当 `candidatePlans.length === 0`：
+
+- 进入 action-only D2；
+- 不创建 transient plan identity、root/family/lineage 或 pseudo-plan；
+- 不计算 plan alignment、plan damage、active family 或 plan switch；
+- reducer 仍保留 legal pass、immediate finish、urgent defense、power-preserving 和 uncertainty mandatory actions；
+- 原有 action evaluator 的 top-1 必须始终保留，并在 D2 无完整 outcome 时作为 fallback。
+
+只有 `candidatePlans.length >= 1` 时才使用 active-plan alignment、plan-family feature 或 plan damage。action-search 和 plan-pruning 的 diagnostics 必须分别记录 0-plan action-only，不得把它伪装成 candidateCount=1。
+
+### 17.7 D2a–D2g 新顺序
+
+1. **D2a Public ledger**：事件 schema、公开字段、去重、原子增量和 replay reconstruction。
+2. **D2b Lightweight public evidence**：低成本 evidence、recent window、action likelihood 输入，不创建粒子/不调用 HandPlanner。
+3. **D2c Plan priority/quota shadow**：family priority、action prior、quota 记录；首轮只允许 `disabled`/`shadow`，D2c-active 需要 bounded backend 单独批准。
+4. **D2d Representative action reducer**：全部合法动作、mandatory preservation、8–12 root cap、stable signatures。
+5. **D2e Particle/action likelihood/ESS**：仅对 retained roots 生成完整 108-card particles、更新 log-weight、ESS/resampling。
+6. **D2f CRN rollout/team utility**：common-random shallow rollout、seat-local observation、risk-adjusted utility 和 deterministic tie-break。
+7. **D2g Engine treatment/benchmark/ablation**：内部 treatment mode、原子 runtime、diagnostics、replay/privacy/readiness 和消融；formal 仍禁止。
+
+每阶段必须先有失败测试，再实现最小代码；D2c-active 不得提前进入首轮。每阶段继续通过 P0 keep-current byte lock，production 默认 mode 不变。
+
+### 17.8 效率验收与净收益
+
+不能只报告 planner expansion 减少。每个 fixture、每个 real hand、每个 frozen config 都要在同一 warm-up、concurrency=1 和 interleaved ordering 下分别记录：
+
+- `lightweightBeliefMs`；
+- `planFamilyReductionMs` 与 families/quotas；
+- `plannerExpansionMs`、expanded/generated/accepted/duplicate counts；
+- `legalActionReductionMs`、原始/保留 action 数；
+- `particleGenerationUpdateMs`、particle count、ESS；
+- `rolloutMs`、simulated decisions、plies；
+- `totalD2DecisionCost` P50/P95/P99；
+- `originalPlannerEvaluatorCost` P50/P95/P99；
+- `netCostDelta` 与 `totalD2DecisionCost / originalPlannerEvaluatorCost`。
+
+正常收益门槛比较总成本而非单一 planner 成本：若 D2 减少了 planner expansion 但 particle/rollout 增量使 total P95 变差，则该配置为 `NO_GO`，回退原 evaluator；不得用“planner 更少”掩盖总决策变慢。wall-clock guard 次数、fallback 次数和部分搜索丢弃次数单独报告，不能混入正常 timing。
+
+### 17.9 修订后的设计自审
+
+1. **昂贵粒子是否先于 pruning？** 否；LightweightPublicEvidence 和 action reduction 先执行，粒子只服务 retained roots。
+2. **D2c 是否暗中依赖无界 planner？** 否；未批准 bounded backend 时只能 shadow，禁止调用无界 `generateHandPlans` 满足 quota。
+3. **粒子是否保留 remaining deck？** 否；删除该字段，四座位 hypothetical hands 与 public cards 必须守恒 108 张。
+4. **pass/play 是否更新权重？** 是；通过 play/pass likelihood 的 finite log-weight，规则不可能淘汰、行为不合理降权。
+5. **不同 ablation 是否共享 CRN？** 是；同一算法共享 scenarioKey、ParticleBank、weights、seat-local streams。
+6. **0 plan 是否创建伪 plan？** 否；action-only，不创建 identity/alignment/damage。
+7. **belief 是否真正降低总成本？** 以全链路 P50/P95/P99 和净成本验收；只降低 planner 而总成本增加时不批准。
 
 以上问题未解决前，不得注册 D2 treatment、更新 P7.1 approval、运行 smoke/calibration/formal 或切换 production 默认 mode。
