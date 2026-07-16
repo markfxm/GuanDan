@@ -265,7 +265,6 @@ function playCardsWithPublicLedger(room: RoomState, seat: Seat, cardIds: string[
   const draft = structuredClone(room);
   const beforeHandCount = room.hands[seat].length;
   playCardsLegacy(draft, seat, cardIds);
-  if (JSON.stringify(draft.finishOrder) !== JSON.stringify(room.finishOrder)) throw new Error("D2A_FINISH_EVENT_PENDING");
   const play = draft.playHistory.at(-1);
   if (play?.action !== "play" || play.group === undefined || room.publicIdentity === undefined || room.publicLedger === undefined || room.publicEvents === undefined) throw new Error("D2A_PUBLIC_PLAY_EVENT_MISSING");
   const eventDrafts: PublicActionEventDraft[] = [{
@@ -286,6 +285,23 @@ function playCardsWithPublicLedger(room: RoomState, seat: Seat, cardIds: string[
     usedWildcardCount: play.group.wildcards.length,
     usedBomb: play.group.type === "bomb" || play.group.type === "straight-flush" || play.group.type === "joker-bomb",
   } as PublicActionEventDraft];
+  for (const finishedSeat of draft.finishOrder.slice(room.finishOrder.length)) {
+    const finishReason = finishedSeat === seat && draft.hands[finishedSeat].length === 0 ? "hand-empty" : "round-settlement";
+    eventDrafts.push({
+      schemaVersion: "d2-public-event-v2",
+      gameId: room.publicIdentity.gameId,
+      roundIdentity: room.publicIdentity.roundIdentity,
+      handIdentity: room.publicIdentity.handIdentity,
+      eventIndex: room.publicLedger.nextEventIndex + eventDrafts.length,
+      kind: "finish",
+      seat: finishedSeat,
+      publicStableKey: `finish:${room.finishOrder.length + eventDrafts.length}:${finishReason}`,
+      trickIndex: play.trickIndex ?? room.currentTrickIndex,
+      finishPosition: room.finishOrder.length + eventDrafts.length,
+      remainingHandCount: draft.hands[finishedSeat].length,
+      finishReason,
+    } as PublicActionEventDraft);
+  }
   commitPublicTransition(room, draft, eventDrafts);
 }
 
