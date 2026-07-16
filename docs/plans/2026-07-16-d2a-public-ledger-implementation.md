@@ -4,7 +4,7 @@
 
 **Goal:** 在不改变 D0/D1 AI 行为和公共网络 shape 的前提下，为真实 room 建立可重放、可去重、可校验、隐私安全的 `PublicActionEvent` 与 `HardPublicLedger`。
 
-**Architecture:** 事件契约、canonical hash 和 ledger 放在 `src/game` 的中立领域层，由 room 已成功提交的公开状态转换产生事件；AI belief 未来只读消费这些中立事件，不由 room 导入 `src/ai/belief`。room 将 ledger/event log 作为内部状态，`getPublicRoom` 明确排除它们；benchmark/replay 只读取 room 产生的事件，不再自行从 observation 拼装第二套事件。
+**Architecture:** 事件契约、canonical hash 和 ledger 放在 `src/game` 的中立领域层，由 room 已成功提交的公开状态转换产生事件；AI belief 未来只读消费这些中立事件，不由 room 导入 `src/ai/belief`。room 将 ledger/event log 作为内部状态，`getPublicRoom` 明确排除它们。D2a 新增只读 ledger adapter，但 legacy D1 public trace、hash、raw/replay schema 和 validator 保持不变；D2a 不在本阶段替换 legacy trace。
 
 **Tech Stack:** TypeScript 5.7、Vitest 2、现有 `src/game/room.ts`、`src/game/playRules.ts`、`src/game/settlement.ts`、Node `crypto`/项目内同步 SHA-256 适配、现有 D1 replay validator。
 
@@ -26,9 +26,9 @@
 ### 1.1 Room 创建与 identity
 
 - `src/game/room.ts:createRoom({ rank, seed, pendingTributeItems })` 是当前唯一建局函数。它调用 `shuffledDeck(seed)` 分牌、`resolveOpeningTribute(...)` 决定贡还状态、`randomOpeningLeader(seed)` 决定首家，并返回 `RoomState`。
-- 当前 `RoomState.id` 由模块级 `nextRoomId` 在 `createRoom` 中生成：`room-${nextRoomId++}`。它是当前运行内唯一 room identity；D2a 不另造时间/随机 identity。
+- 当前 `RoomState.id` 由模块级 `nextRoomId` 在 `createRoom` 中生成：`room-${nextRoomId++}`。它只是 `RoomTransportId`，用于 server/UI 的 room 定位，不能作为 replay/benchmark 的 canonical `gameId`，也不得进入 event hash。
 - 当前新局没有 room 内原地切换函数。`src/server/api.ts:buildApi` 的 `POST /api/rooms` 调用 `createRoom`；`src/ui/App.tsx:handleCreateRoom` 和 `handleNextRoom` 通过 `createGameRoom` 创建新 room。因此 D2a 的现有 reset 入口是 `createRoom`；将来的同 room 新手必须显式调用同一个 `resetPublicLedger`，不能复用上一手 ledger。
-- D2a 增加稳定内部字段：`gameId = RoomState.id`、`roundIdentity = \`${gameId}:round:0\``、`handIdentity = \`${roundIdentity}:hand:0\``。现有 `id` 不改名、不改变 API 返回；replay 保存这三个值。若未来在同一 room 开新手，`handSequence` 只做整数递增并组成 `handIdentity`，不使用时钟或随机数。
+- 当前 `createRoom` 没有 `PublicGameIdentity` 参数。计划在 D2a 接入时增加可选但在 ledger 初始化前必须解析的显式 `publicIdentity`；production 由稳定 game/session 生命周期分配，benchmark 由 canonical scenario key 派生，replay 保存并恢复。任何 fallback 都不得使用 Date.now、nextRoomId、对象地址、worker、目录或随机 UUID。
 
 ### 1.2 play/pass 提交顺序与唯一事件源
 
@@ -52,7 +52,7 @@
 ### 1.5 replay、public trace 与 AI 公开历史
 
 - 生产 room 当前没有独立 event replay serializer；UI replay 使用 `PublicRoom.playHistory`、`replayHands`，入口在 `src/ui/App.tsx:replaySteps`、`replayRemainingHand`。
-- benchmark 当前在 `tests/benchmark/simulator.ts:appendPublicEvent` 中从 `createBenchmarkObservation(room, seat)` 拼装 `PublicSimulationEvent`，并由 `tests/benchmark/reporting.ts:publicTraceHash`/`finalPublicStateHash` 做 hash；这不是 D2a 的权威事件源。实现 D2a 时必须改为读取 room 的 `publicEvents`，删除该独立事件生成路径，但不改变 action、统计或 seed。
+- benchmark 当前在 `tests/benchmark/simulator.ts:appendPublicEvent` 中从 `createBenchmarkObservation(room, seat)` 拼装 `PublicSimulationEvent`，并由 `tests/benchmark/reporting.ts:publicTraceHash`/`finalPublicStateHash` 做 hash。这条路径是 legacy D1 的既有契约，本阶段不得删除、替换或改写。D2a 另增只读 adapter 消费 room ledger，并用一致性测试证明两条观察结果来自同一 room transition；正式替换延后到 D2g，并必须使用新的 benchmarkVersion/schema/configHash/artifact 目录。
 - benchmark replay 写入在 `tests/benchmark/reporting.ts:writeReplay`，D1 replay 校验在 `tests/benchmark/d1ReplayValidation.ts:validateD1Replay`/`validateD1RawResultV2`；D2a replay round-trip 使用同一 public event sequence，并以 ledger 重建校验。
 - AI 取得公开历史的位置是 `src/game/room.ts:runAiStep` 构造 `AiObservation` 的对象字面量（`playedCards`、`handCounts`、`lastPlay`、`finishOrder`、`partnerPassedCurrentTrick`）；`src/ai/contracts.ts:AiObservation` 是生产契约。D2a 不向该契约加入 ledger 字段，也不改变 keep-current 控制流；D2b 才可增加只读 adapter。
 
@@ -74,17 +74,23 @@ tests/benchmark simulator/replay adapter（只读）
 
 ## 2. Canonical D2a contracts
 
-### 2.1 Identity
+### 2.1 Transport ID 与 canonical PublicGameIdentity
 
 ```ts
-type PublicIdentity = Readonly<{
-  gameId: string;             // RoomState.id，已存在且 replay 保存
-  roundIdentity: string;      // `${gameId}:round:${roundSequence}`
-  handIdentity: string;       // `${roundIdentity}:hand:${handSequence}`
-  roundSequence: number;      // non-negative integer
-  handSequence: number;       // non-negative integer
+type RoomTransportId = string; // RoomState.id；server/UI routing only
+
+type PublicGameIdentity = Readonly<{
+  schemaVersion: "d2-public-game-identity-v1";
+  gameId: string;              // canonical, explicit, replay-persisted
+  roundIdentity: string;       // `${gameId}:round:${roundSequence}`
+  handIdentity: string;        // `${roundIdentity}:hand:${handSequence}`
+  roundSequence: number;       // non-negative integer
+  handSequence: number;        // non-negative integer
+  source: "production-session" | "benchmark-scenario" | "replay";
 }>;
 ```
+
+`RoomTransportId` 保留当前 `RoomState.id`，只用于 server/UI 查找。它不得写入 `PublicActionEvent`、ledger canonical bytes 或 replay canonical identity。`PublicGameIdentity` 必须由 `createRoom` 的显式 `publicIdentity` 输入或其上游稳定生命周期分配器提供；benchmark 使用 canonical scenario key 派生，replay 从文档恢复。D2a 不实现分配器，但实现时若缺少 identity 必须在 ledger 初始化前 fail-closed，不能退回 `nextRoomId`。
 
 创建时 `roundSequence=0`、`handSequence=0`、`eventIndex=0`。同一 identity 的 replay 必须恢复同一 event sequence；新 hand 只能由 `handSequence + 1` 产生，并同时清空当前 ledger。`eventIndex` 属于 hand，不跨 hand 复用。
 
@@ -95,11 +101,11 @@ type PublicIdentity = Readonly<{
 ```ts
 type PublicActionEventBase = Readonly<{
   schemaVersion: "d2-public-event-v2";
-  gameId: string;
+  gameId: string;              // PublicGameIdentity.gameId, never RoomTransportId
   roundIdentity: string;
   handIdentity: string;
   eventIndex: number;
-  kind: "play" | "pass" | "trick-clear" | "finish" | "tribute" | "return";
+  kind: "play" | "pass" | "trick-clear" | "finish" | "tribute" | "return" | "anti-tribute";
   seat: 0 | 1 | 2 | 3;
   publicStableKey: string;
   patternType?: string;
@@ -146,8 +152,10 @@ type PublicTrickClearEvent = PublicActionEventBase & Readonly<{
 type PublicFinishEvent = PublicActionEventBase & Readonly<{
   kind: "finish";
   publicCardIds?: never;
-  handCountBefore: number;
-  handCountAfter: number;
+  handCountBefore?: never;
+  handCountAfter?: never;
+  finishPosition: number;
+  remainingHandCount: number;
   finishReason: "hand-empty" | "round-settlement";
   publicStableKey: `finish:${number}:${"hand-empty" | "round-settlement"}`;
 }>;
@@ -161,12 +169,22 @@ type PublicTributeEvent = PublicActionEventBase & Readonly<{
   publicStableKey: `tribute:${string}` | `return:${string}`;
 }>;
 
+type PublicAntiTributeEvent = PublicActionEventBase & Readonly<{
+  kind: "anti-tribute";
+  publicCardIds?: never;
+  handCountBefore?: never;
+  handCountAfter?: never;
+  reasonCode: "anti-tribute";
+  publicStableKey: `anti-tribute:${string}`;
+}>;
+
 type PublicActionEvent =
   | PublicPlayEvent
   | PublicPassEvent
   | PublicTrickClearEvent
   | PublicFinishEvent
-  | PublicTributeEvent;
+  | PublicTributeEvent
+  | PublicAntiTributeEvent;
 ```
 
 Kind validation is mandatory, not documentary:
@@ -176,8 +194,9 @@ Kind validation is mandatory, not documentary:
 | `play` | non-empty sorted `publicCardIds`, pattern/group, before/after counts, stable key | hidden cards, private runtime | successful `playCards` commit |
 | `pass` | equal before/after count, `pass:v2` | `publicCardIds`, pattern/group | successful `passTurn` commit |
 | `trick-clear` | ended `trickIndex`, next `leadSeat`, stable key | card ids, hand counts | all required passes committed and trick reset |
-| `finish` | seat, before/after count, reason | card ids | finish order changed after committed play/round settlement |
+| `finish` | `finishPosition`, `remainingHandCount`, reason | card ids, handCountBefore/After | append finish order only; play already changed hand count |
 | `tribute`/`return` | from/to, public card only if actually revealed, signed count changes | unshown selection, hidden hand | committed public tribute transfer |
+| `anti-tribute` | stable reason code and opening-tribute phase transition | card ids, hand counts, transfer fields | committed public anti-tribute state transition |
 
 `publicCardIds` 中的 card id 只能来自已公开 play 或已公开贡还牌；牌张排序使用 `Card.id` 字典序，seat/number 使用 JSON number，不用本地化字符串。
 
@@ -186,8 +205,14 @@ Kind validation is mandatory, not documentary:
 实现文件：`src/game/publicEventHash.ts`。
 
 ```ts
-export function canonicalPublicEventBytes(event: PublicActionEvent): Uint8Array;
-export function hashPublicActionEvent(event: PublicActionEvent): string; // lowercase SHA-256 hex
+type PublicActionEventDraft = Omit<PublicActionEvent, "publicPayloadHash" | "eventIndex"> & Readonly<{
+  eventIndex: number;
+}>;
+
+export function assertPublicActionEventDraft(draft: unknown): asserts draft is PublicActionEventDraft;
+export function finalizePublicActionEvent(draft: PublicActionEventDraft): PublicActionEvent;
+export function canonicalPublicEventBytes(event: PublicActionEventDraft): Uint8Array;
+export function hashPublicActionEvent(event: PublicActionEventDraft): string; // lowercase SHA-256 hex
 export function verifyPublicActionEventHash(event: PublicActionEvent): true;
 ```
 
@@ -197,10 +222,10 @@ Canonical bytes规则固定为：
 2. `undefined` 字段省略；禁止 `NaN`、`Infinity`、函数、symbol、Date 和对象引用。
 3. `publicCardIds` 升序；`handCountChanges` 固定按 seat `0,1,2,3` 输出；`publicStableKey` 和 schemaVersion 进入 hash。
 4. 字符串采用 UTF-8、无 BOM；number 使用 JSON 标准十进制表示，不使用 `toFixed` 或本地化格式。
-5. SHA-256 输出 64 位小写 hex；hash 本身不递归包含 `publicPayloadHash`，计算时先排除该字段再写回。
+5. SHA-256 输出 64 位小写 hex；hash 本身不递归包含 `publicPayloadHash`，计算时先排除该字段再由 `finalizePublicActionEvent` 写回。
 6. 不包含 duration、stack trace、目录、worker、runtime、hidden hand、seed-derived private state。
 
-Task 2 必须使用 known SHA-256 vector，并证明不同对象插入顺序、不同 card 输入顺序和重复 `publicPayloadHash` 写入不会改变 canonical hash。
+room 只能把 draft 交给 `finalizePublicActionEvent`；不得手工填写 placeholder hash、不得把未校验 draft 直接交给 ledger、不得构造包含自身 hash 的输入。Task 2 必须使用 known SHA-256 vector，并证明不同对象插入顺序、不同 card 输入顺序和重复 `publicPayloadHash` 写入不会改变 canonical hash。
 
 ### 2.4 HardPublicLedger
 
@@ -215,7 +240,14 @@ type HardPublicLedger = Readonly<{
   nextEventIndex: number;
   lastAppliedEventIndex: number; // 初始为 -1
   seenEventHashes: Readonly<Record<number, string>>;
-  playedCardIds: readonly string[]; // 长期精确累计，不被 recent window 裁剪
+  playedCardIds: readonly string[]; // 仅 play 事件；长期精确累计
+  revealedTransferEvents: readonly Readonly<{
+    eventIndex: number;
+    kind: "tribute" | "return";
+    cardId?: string;
+    fromSeat: 0 | 1 | 2 | 3;
+    toSeat: 0 | 1 | 2 | 3;
+  }>[]; // tribute/return 不写 playedCardIds
   handCounts: Readonly<Record<0 | 1 | 2 | 3, number>>;
   currentTrick: Readonly<{
     trickIndex: number;
@@ -225,7 +257,7 @@ type HardPublicLedger = Readonly<{
     passSeats: readonly (0 | 1 | 2 | 3)[];
   }>;
   finishOrder: readonly (0 | 1 | 2 | 3)[];
-  publicTributeEvents: readonly string[];
+  publicTributeEvents: readonly string[]; // stable phase/reason summaries
   recentActionSummaries: readonly Readonly<Record<string, string | number | boolean>>[];
 }>;
 
@@ -246,20 +278,24 @@ type ApplyPublicEventResult =
   | { ok: false; error: ApplyPublicEventErrorCode; ledger: HardPublicLedger };
 
 export function createInitialPublicLedger(input: {
-  identity: PublicIdentity;
+  identity: PublicGameIdentity;
   initialHandCounts: Readonly<Record<0 | 1 | 2 | 3, number>>;
   openingLeader: 0 | 1 | 2 | 3;
+  initialTrickIndex: number;
+  openingTributePublicState: Readonly<Record<string, string | number | boolean | null>>;
 }): HardPublicLedger;
 export function applyPublicEvent(ledger: HardPublicLedger, event: PublicActionEvent): ApplyPublicEventResult;
 export function resetPublicLedger(input: {
-  identity: PublicIdentity;
+  identity: PublicGameIdentity;
   initialHandCounts: Readonly<Record<0 | 1 | 2 | 3, number>>;
   openingLeader: 0 | 1 | 2 | 3;
+  initialTrickIndex: number;
+  openingTributePublicState: Readonly<Record<string, string | number | boolean | null>>;
 }): HardPublicLedger;
 export function canonicalPublicLedgerHash(ledger: HardPublicLedger): string;
 ```
 
-`recentActionSummaries` 只保留固定 16 个 event summary（或等价 4 个 trick），但 `playedCardIds`、`handCounts`、`finishOrder` 和 `publicTributeEvents` 永久精确保留。所有返回 ledger 都是新对象和新数组；失败返回原 ledger 引用/字节不变。
+`recentActionSummaries` 只保留固定 16 个 event summary（或等价 4 个 trick），但 `playedCardIds`、`revealedTransferEvents`、`handCounts`、`finishOrder` 和 `publicTributeEvents` 永久精确保留。`playedCardIds` 只由 play 写入；tribute/return card 只写入 `revealedTransferEvents`，因此公开贡牌之后仍可合法 play。所有返回 ledger 都是新对象和新数组；失败返回原 ledger 引用/字节不变。
 
 ### 2.5 Event application invariants
 
@@ -267,9 +303,9 @@ export function canonicalPublicLedgerHash(ledger: HardPublicLedger): string;
 
 1. 校验 schema、canonical hash、finite/integer 字段和 game/round/hand identity。
 2. `eventIndex === ledger.nextEventIndex` 时准备新状态；若 `eventIndex < nextEventIndex`，只有 `seenEventHashes[eventIndex] === event.publicPayloadHash` 才返回 `idempotent`；同 index 不同 hash 返回 `EVENT_INDEX_CONFLICT`；跳号返回 `EVENT_INDEX_GAP`。
-3. `play` 的公开牌不得重复，`handCountAfter = handCountBefore - publicCardIds.length`，不得为负；`pass` before 必须等于 after；tribute/return 的 count changes 总和必须为 0。
-4. finish order 只能 append 未出现 seat；不能回退、重复或跳过由 room 提供的顺序。trick-clear 必须引用当前 trick，并将 pass seats 清空、trickIndex 加一、leader 与事件一致。
-5. tribute/return 必须按 opening tribute phase 的合法顺序应用；未公开 card 不得写入 event。
+3. `play` 的公开牌不得出现在 `playedCardIds`，`handCountAfter = handCountBefore - publicCardIds.length`，不得为负；同一 CardId 第二次 play 失败。tribute/return card 不参与该检查，只按 `revealedTransferEvents` 的 transfer identity 去重；同一公开 transfer event 重放幂等，不同 from/to/kind/card 冲突。
+4. finish order 只能 append 未出现 seat；不能回退、重复或跳过由 room 提供的顺序。finish 只写 `finishOrder`，不修改 `handCounts`；`hand-empty` 要求 `remainingHandCount=0`，`round-settlement` 允许大于 0。trick-clear 必须引用当前 trick，并将 pass seats 清空、trickIndex 加一、leader 与事件一致。
+5. tribute/return 必须按 opening tribute phase 的合法顺序应用；transfer card 不写 `playedCardIds`；anti-tribute 不含 card、不改 hand counts，只推进稳定 phase/reason 摘要。
 6. 成功后复制 ledger、更新 seen hash、next/last index、长期计数和 recent window；任何检查失败都返回稳定 error code，不静默修正。
 
 ### 2.6 RoomState 内部字段与 PublicRoom 隔离
@@ -277,12 +313,12 @@ export function canonicalPublicLedgerHash(ledger: HardPublicLedger): string;
 修改 `src/game/room.ts` 的 `RoomState` 增加：
 
 ```ts
-publicIdentity: PublicIdentity;
+publicIdentity: PublicGameIdentity;
 publicLedger: HardPublicLedger;
 publicEvents: PublicActionEvent[];
 ```
 
-`PublicRoom` 类型改为继续 `Omit` 这三个字段；`getPublicRoom` 解构时显式丢弃它们。它们仅供 room/benchmark replay adapter 读取，不序列化到网络响应、`AiObservation`、AI runtime 或 D2 sidecar。现有 `playHistory`/`replayHands` 保持兼容，D2a 不删除旧 UI replay 数据。
+`PublicRoom` 类型改为继续 `Omit` 这三个字段；`getPublicRoom` 解构时显式丢弃它们。它们仅供 room/D2a replay adapter 读取，不序列化到网络响应、`AiObservation`、AI runtime 或 D2 sidecar。现有 `playHistory`/`replayHands` 保持兼容，D2a 不删除旧 UI replay 数据。
 
 ---
 
@@ -320,21 +356,25 @@ Task 4–6 必须依赖同一个 `commitPublicTransition`；不得让 play/pass/
 - Create: `tests/game/publicEventIdentity.test.ts`
 
 **Interfaces:**
-- Consumes: `RoomState.id` from `createRoom`, `Seat` and `CardGroup` from `src/game/room.ts`/`src/engine/groups.ts`。
-- Produces: `PublicIdentity`, the discriminated `PublicActionEvent` union, kind validator `assertPublicActionEvent`, and `publicStableKey` builders for later tasks。
+- Consumes: explicit `PublicGameIdentity` fixture input, `Seat` and `CardGroup` from `src/game/room.ts`/`src/engine/groups.ts`; it must not consume `RoomState.id` as canonical identity。
+- Produces: `PublicGameIdentity`, the discriminated `PublicActionEvent` union, kind validator `assertPublicActionEvent`, and `publicStableKey` builders for later tasks。
 
 - [ ] **Step 1: Write RED tests for identity and kind matrix.**
 
 ```ts
-it("derives replay-stable identity without time/random fields", () => {
-  const first = createRoom({ rank: "10", seed: 1 });
-  expect(buildPublicIdentity(first.id, 0, 0)).toEqual({
-    gameId: first.id,
-    roundIdentity: `${first.id}:round:0`,
-    handIdentity: `${first.id}:round:0:hand:0`,
+it("does not derive canonical identity from transport-room creation order", () => {
+  const first = explicitIdentity("scenario:seed:1");
+  const afterUnrelatedRoom = explicitIdentity("scenario:seed:1");
+  expect(buildPublicGameIdentity(first.gameId, 0, 0, "benchmark-scenario")).toEqual({
+    schemaVersion: "d2-public-game-identity-v1",
+    gameId: first.gameId,
+    roundIdentity: `${first.gameId}:round:0`,
+    handIdentity: `${first.gameId}:round:0:hand:0`,
     roundSequence: 0,
     handSequence: 0,
+    source: "benchmark-scenario",
   });
+  expect(afterUnrelatedRoom).toEqual(first);
 });
 
 it("rejects a pass carrying public cards and a play without counts", () => {
@@ -351,15 +391,15 @@ Run:
 npx vitest run tests/ai/publicEvent.test.ts tests/game/publicEventIdentity.test.ts --testTimeout=120000 --reporter=verbose
 ```
 
-Expected: FAIL because `publicEvent.ts` and `buildPublicIdentity`/`assertPublicActionEvent` do not exist.
+Expected: FAIL because `publicEvent.ts` and `buildPublicGameIdentity`/`assertPublicActionEvent` do not exist.
 
 - [ ] **Step 3: Implement the minimal discriminated union and deterministic identity helpers.**
 
-Implement `buildPublicIdentity(gameId, roundSequence, handSequence)` with integer validation; implement `assertPublicActionEvent` to enforce the matrix in §2.2 and reject forbidden/unknown kind fields.
+Implement `buildPublicGameIdentity(gameId, roundSequence, handSequence, source)` with integer validation; implement `assertPublicActionEvent` to enforce the matrix in §2.2 and reject forbidden/unknown kind fields. `createRoom` integration is deferred to Task 4 so Task 1 remains a pure contract boundary.
 
-- [ ] **Step 4: Re-run focused tests and add all six kind fixtures.**
+- [ ] **Step 4: Re-run focused tests and add all seven kind fixtures.**
 
-Run the same command; expected PASS. Add fixtures for play, pass, trick-clear, finish, tribute and return, including anti-tribute with an empty public card list.
+Run the same command; expected PASS. Add fixtures for play, pass, trick-clear, finish, tribute, return, and the independent anti-tribute event. The anti-tribute fixture must omit public card ids, hand-count fields, and transfer fields while carrying its stable reason code.
 
 - [ ] **Step 5: Commit the contract boundary.**
 
@@ -390,6 +430,14 @@ it("is invariant to object insertion and card input order", () => {
 it("excludes duration, stack, path and private runtime keys", () => {
   expect(() => hashPublicActionEvent(eventWithForbiddenKey("hands"))).toThrow("EVENT_SCHEMA_INVALID");
 });
+
+it("finalizes a draft and rejects placeholder or self-referential hashes", () => {
+  const draft = makePlayDraft();
+  const event = finalizePublicActionEvent(draft);
+  expect(event.publicPayloadHash).toMatch(/^[a-f0-9]{64}$/);
+  expect(() => finalizePublicActionEvent({ ...draft, publicPayloadHash: "placeholder" } as never)).toThrow("EVENT_SCHEMA_INVALID");
+  expect(verifyPublicActionEventHash(event)).toBe(true);
+});
 ```
 
 - [ ] **Step 2: Run RED.**
@@ -418,12 +466,12 @@ git commit -m "d2a: add canonical public event hashing"
 - Create: `tests/ai/publicLedger.test.ts`
 
 **Interfaces:**
-- Consumes: `PublicIdentity`, `PublicActionEvent`, `hashPublicActionEvent`。
+- Consumes: `PublicGameIdentity`, `PublicActionEvent`, `hashPublicActionEvent`。
 - Produces: `createInitialPublicLedger`, `resetPublicLedger`, `applyPublicEvent`, `canonicalPublicLedgerHash`, `ApplyPublicEventResult`。
 
 - [ ] **Step 1: Write RED tests for all ledger invariants.**
 
-The test table must include: event 0 success; event 0 same hash idempotence; same index different hash conflict; gap; identity mismatch; duplicate public card; negative/count increase; finish append/repeat; illegal trick clear; illegal tribute order; and input immutability.
+The test table must include: event 0 success; event 0 same hash idempotence; same index different hash conflict; gap; identity mismatch; duplicate play card; tribute/return transfer duplicate; a publicly transferred tribute card later played successfully; negative/count increase; finish append/repeat without hand-count mutation; illegal trick clear; illegal tribute order; anti-tribute with no card/count change; and input immutability.
 
 ```ts
 const before = structuredClone(ledger);
@@ -438,7 +486,7 @@ Run `npx vitest run tests/ai/publicLedger.test.ts --testTimeout=120000 --reporte
 
 - [ ] **Step 3: Implement initial/reset and copy-on-write application.**
 
-Implement the exact validation order in §2.5. Use fresh arrays/records on success; return the original ledger on failure. Implement a deterministic 16-summary recent window while retaining exact long-term card/count/finish/tribute state.
+Implement the exact validation order in §2.5. Use fresh arrays/records on success; return the original ledger on failure. Keep play ids and revealed transfer records as separate collections. Implement a deterministic 16-summary recent window while retaining exact long-term card/count/finish/transfer state.
 
 - [ ] **Step 4: Run focused ledger tests.**
 
@@ -460,12 +508,12 @@ git commit -m "d2a: implement copy-on-write public ledger"
 
 **Interfaces:**
 - Consumes: `applyPublicEvent` and event builders from Tasks 1–3。
-- Produces: internal `publicIdentity`, `publicLedger`, `publicEvents` and one room-local `commitPublicTransition` used by Tasks 5–6。
+- Produces: internal `publicIdentity`, `publicLedger`, `publicEvents` and one room-local `commitPublicTransition` using `RoomTransitionDraft`, `assertPublicActionEventDraft` and `finalizePublicActionEvent`, reused by Tasks 5–6。
 
 - [ ] **Step 1: Write RED tests for play/pass authority and atomicity.**
 
 ```ts
-it("appends a play event only after playCards commits", () => {
+it("appends a finalized play event only after playCards commits", () => {
   const room = createRoom({ rank: "10", seed: 1 });
   const id = room.hands[0][0]!.id;
   playCards(room, 0, [id]);
@@ -479,6 +527,13 @@ it("invalid play leaves room, event log and ledger unchanged", () => {
   expect(() => playCards(room, 0, ["not-a-card"])).toThrow();
   expect({ room: publicRoomMutationSnapshot(room), events: room.publicEvents, ledger: room.publicLedger }).toEqual(before);
 });
+
+it("ledger validation failure leaves every mutable room field byte-identical", () => {
+  const room = roomWithInjectedLedgerFailure();
+  const before = structuredClone({ hands: room.hands, trick: room.trick, currentTurn: room.currentTurn, leaderSeat: room.leaderSeat, playHistory: room.playHistory, finishOrder: room.finishOrder, openingTribute: room.openingTribute, settlement: room.settlement, status: room.status, events: room.publicEvents, ledger: room.publicLedger });
+  expect(() => commitTransitionThatProducesLedgerConflict(room)).toThrow("EVENT_INDEX_CONFLICT");
+  expect({ hands: room.hands, trick: room.trick, currentTurn: room.currentTurn, leaderSeat: room.leaderSeat, playHistory: room.playHistory, finishOrder: room.finishOrder, openingTribute: room.openingTribute, settlement: room.settlement, status: room.status, events: room.publicEvents, ledger: room.publicLedger }).toEqual(before);
+});
 ```
 
 - [ ] **Step 2: Run RED.**
@@ -487,11 +542,11 @@ Run `npx vitest run tests/game/publicEventRoomAdapter.test.ts --testTimeout=1200
 
 - [ ] **Step 3: Add internal fields without changing PublicRoom.**
 
-Initialize identity/ledger/events in `createRoom`; omit them in `PublicRoom` and `getPublicRoom`. Add a private `commitPublicTransition` that receives a fully prepared next public-state draft and ordered events, applies all events to a temporary ledger, then assigns room fields, ledger, and event log together.
+Initialize explicit `PublicGameIdentity`/ledger/events in `createRoom`; omit them in `PublicRoom` and `getPublicRoom`. Add a private `commitPublicTransition(room, draft: RoomTransitionDraft, eventDrafts)` that receives a complete copied state draft, finalizes every event, applies all finalized events to a temporary ledger, cross-checks draft counts/trick/finish state against that ledger, then assigns room fields, ledger, and event log together. `RoomTransportId` is never passed into the canonical event builder.
 
 - [ ] **Step 4: Refactor playCards/passTurn to use the transition commit.**
 
-Preserve all existing validation and `TrickPlay`/`playHistory` updates. Construct `play` with sorted card IDs and before/after counts; construct `pass` with `pass:v2` and equal counts. Do not call the event builder before action validation. A failed `applyPublicEvent` aborts before any room field is assigned.
+Preserve all existing validation and `TrickPlay`/`playHistory` updates. Construct `PublicActionEventDraft` for play with sorted card IDs and before/after counts; construct pass with `pass:v2` and equal counts. Call `assertPublicActionEventDraft` then `finalizePublicActionEvent`; never hand-fill `publicPayloadHash`. A failed finalize, cross-check or `applyPublicEvent` aborts before any room field is assigned.
 
 - [ ] **Step 5: Run room and focused tests.**
 
@@ -531,10 +586,18 @@ it("records pass before trick-clear", () => {
   expect(room.publicEvents.at(-1)?.eventIndex).toBe(4);
 });
 
-it("records finish immediately after the committed final play", () => {
+it("records a hand-empty finish without repeating the play hand-count change", () => {
   const room = roomWithSingleCardSeat(0);
   playCards(room, 0, [room.hands[0][0]!.id]);
   expect(room.publicEvents.slice(-2).map((event) => event.kind)).toEqual(["play", "finish"]);
+  expect(room.publicEvents.at(-1)).toMatchObject({ finishPosition: 1, remainingHandCount: 0, finishReason: "hand-empty" });
+  expect(room.publicLedger.handCounts[0]).toBe(0);
+});
+
+it("records round-settlement finishes with remaining cards and no hand-count mutation", () => {
+  const room = roomAfterThreeFinishedSeatsWithCardsRemaining();
+  expect(room.publicEvents.filter((event) => event.kind === "finish").every((event) => event.remainingHandCount! > 0)).toBe(true);
+  expect(room.publicLedger.handCounts).toEqual(publicHandCounts(room));
 });
 ```
 
@@ -544,7 +607,7 @@ Run `npx vitest run tests/ai/publicLedgerTrickFinish.test.ts tests/game/publicEv
 
 - [ ] **Step 3: Implement ordered trick-clear/finish draft events.**
 
-When pass count reaches `passesNeededToReset`, append `trick-clear` after the pass and before committing the reset trick. When `finishOrder` changes, append one finish event per newly appended seat in exact order. `finishReason` is `hand-empty` for a play that leaves count zero and `round-settlement` for seats appended by `finishRound`.
+When pass count reaches `passesNeededToReset`, append `trick-clear` after the pass and before committing the reset trick. When `finishOrder` changes, append one finish event per newly appended seat in exact order. A finish event contains `finishPosition`, `remainingHandCount` and `finishReason`, never handCountBefore/After; `play` alone owns the actual hand-count decrement. `finishReason` is `hand-empty` for a play that leaves count zero and `round-settlement` for seats appended by `finishRound`.
 
 - [ ] **Step 4: Run focused room tests and existing room regression.**
 
@@ -561,13 +624,14 @@ git commit -m "d2a: record trick clear and finish events"
 
 **Files:**
 - Modify: `src/game/room.ts:advanceOpeningTribute`, `completeOpeningTribute`, `createRoom`
-- Modify: `src/game/publicEvent.ts` and `src/game/publicLedger.ts` only if tribute validators need shared types
+- Modify: `src/game/publicEvent.ts` (add `PublicAntiTributeEvent` and transfer draft fields)
+- Modify: `src/game/publicLedger.ts` (transfer/anti-tribute validators)
 - Create: `tests/ai/publicLedgerTributeReset.test.ts`
 - Modify: `tests/game/room.test.ts` with event assertions for single and double tribute
 
 **Interfaces:**
 - Consumes: `PublicTributeEvent`, `resetPublicLedger`, room `openingTribute` phase and `settleRound` output。
-- Produces: ordered `tribute`/`return` events, explicit anti-tribute event with empty public card list, and a resettable hand-scoped ledger。
+- Produces: ordered `tribute`/`return` events, an independent `anti-tribute` event with no card/count fields, and a resettable hand-scoped ledger。
 
 - [ ] **Step 1: Write RED tests for tribute visibility/order/reset.**
 
@@ -580,10 +644,17 @@ it("records only publicly revealed tribute and return cards", () => {
   expect(room.publicEvents.every((event) => !("hands" in event))).toBe(true);
 });
 
+it("records anti-tribute without card ids or hand-count changes", () => {
+  const room = roomWithAntiTributeState();
+  expect(room.publicEvents.at(-1)).toMatchObject({ kind: "anti-tribute", reasonCode: "anti-tribute" });
+  expect(room.publicEvents.at(-1)).not.toHaveProperty("publicCardIds");
+  expect(room.publicLedger.handCounts).toEqual(initialPublicHandCounts(room));
+});
+
 it("reset starts event index at zero and never reuses the prior ledger", () => {
   const room = createRoom({ rank: "10", seed: 1 });
   playCards(room, 0, [room.hands[0][0]!.id]);
-  const next = resetPublicLedger({ identity: nextHandIdentity(room.publicIdentity), initialHandCounts: { 0: 27, 1: 27, 2: 27, 3: 27 }, openingLeader: 1 });
+  const next = resetPublicLedger({ identity: nextHandIdentity(room.publicIdentity), initialHandCounts: { 0: 27, 1: 27, 2: 27, 3: 27 }, openingLeader: 1, initialTrickIndex: 0, openingTributePublicState: { status: "none" } });
   expect(next.nextEventIndex).toBe(0);
   expect(next.playedCardIds).toEqual([]);
   expect(next.handIdentity).not.toBe(room.publicLedger.handIdentity);
@@ -596,7 +667,7 @@ Run `npx vitest run tests/ai/publicLedgerTributeReset.test.ts --testTimeout=1200
 
 - [ ] **Step 3: Implement tribute/return staged events.**
 
-For every committed card transfer, create a `handCountChanges` map whose sum is zero. Include the card id only after room has selected and exposed it. `anti-tribute` uses an empty `publicCardIds` tuple and a stable reason key. Apply all events for a multi-item transition in one `commitPublicTransition` call.
+For every committed card transfer, create a `handCountChanges` map whose sum is zero. Include the card id only after room has selected and exposed it. `anti-tribute` is an independent event kind with no `publicCardIds`, no `handCountBefore/After`, no transfer fields, and stable `reasonCode="anti-tribute"`; it only advances the opening-tribute public phase. Apply all events for a multi-item transition in one `commitPublicTransition` call.
 
 - [ ] **Step 4: Implement reset hook and current createRoom entry.**
 
@@ -616,69 +687,79 @@ git commit -m "d2a: persist public tribute events and hand resets"
 **Files:**
 - Create: `src/game/publicEventReplay.ts`
 - Create: `tests/ai/publicLedgerReplay.test.ts`
-- Create: `tests/benchmark/publicEventReplayAdapter.test.ts`
-- Modify: `tests/benchmark/contracts.ts`
-- Modify: `tests/benchmark/simulator.ts:appendPublicEvent` call site
-- Modify: `tests/benchmark/d1ReplayValidation.ts`
-- Modify: `scripts/replayD1TopKBenchmark.ts` only to consume the room event sequence/ledger rebuild result
+- Create: `tests/benchmark/d2aPublicLedgerAdapter.ts`
+- Create: `tests/benchmark/d2aPublicLedgerAdapter.test.ts`
+- Do not modify: `tests/benchmark/contracts.ts`, `tests/benchmark/simulator.ts`, `tests/benchmark/reporting.ts`, `tests/benchmark/d1ReplayValidation.ts`, `scripts/replayD1TopKBenchmark.ts`
 
 **Interfaces:**
-- Consumes: `PublicActionEvent[]`, `HardPublicLedger`, `applyPublicEvent`。
+- Consumes: `PublicActionEvent[]`, `HardPublicLedger`, `applyPublicEvent`, and an existing `RoomState` transition snapshot。
 - Produces:
 
 ```ts
 export function rebuildPublicLedger(input: {
-  initialLedger: HardPublicLedger;
+  initialState: PublicLedgerReplayDocument["initialState"];
   events: readonly PublicActionEvent[];
+  ledgerSnapshot?: HardPublicLedger;
 }): { ledger: HardPublicLedger; ledgerHash: string };
 export function assertPublicReplayRoundTrip(input: {
+  initialState: PublicLedgerReplayDocument["initialState"];
   events: readonly PublicActionEvent[];
   expectedLedger: HardPublicLedger;
 }): true;
+
+export function readD2aLedgerForValidation(room: RoomState): {
+  events: readonly PublicActionEvent[];
+  ledger: HardPublicLedger;
+};
 ```
 
 - [ ] **Step 1: Write RED tests for event-sequence authority.**
 
 ```ts
-it("rebuilds the exact ledger from event 0", () => {
+it("rebuilds the exact ledger from event 0 and explicit initialState", () => {
   const original = roomAfterPlayPassTributeScenario();
-  const rebuilt = rebuildPublicLedger({ initialLedger: initialLedgerFor(original), events: original.publicEvents });
+  const rebuilt = rebuildPublicLedger({ initialState: original.publicLedgerInitialState, events: original.publicEvents });
   expect(rebuilt.ledgerHash).toBe(canonicalPublicLedgerHash(original.publicLedger));
   expect(rebuilt.ledger).toEqual(original.publicLedger);
 });
 
 it("rejects missing, reordered, conflicting or version-mismatched events", () => {
-  expect(() => rebuildPublicLedger({ initialLedger, events: events.slice(1) })).toThrow("EVENT_INDEX_GAP");
-  expect(() => rebuildPublicLedger({ initialLedger, events: swapAdjacent(events) })).toThrow("EVENT_INDEX_GAP");
-  expect(() => rebuildPublicLedger({ initialLedger, events: [conflictingEvent, ...events.slice(1)] })).toThrow("EVENT_INDEX_CONFLICT");
+  expect(() => rebuildPublicLedger({ initialState, events: events.slice(1) })).toThrow("EVENT_INDEX_GAP");
+  expect(() => rebuildPublicLedger({ initialState, events: swapAdjacent(events) })).toThrow("EVENT_INDEX_GAP");
+  expect(() => rebuildPublicLedger({ initialState, events: [conflictingEvent, ...events.slice(1)] })).toThrow("EVENT_INDEX_CONFLICT");
+  expect(() => rebuildPublicLedger({ events, initialState: undefined as never })).toThrow("REPLAY_INITIAL_STATE_MISSING");
+});
+
+it("does not treat an optional snapshot as the replay authority", () => {
+  expect(() => rebuildPublicLedger({ initialState, events, ledgerSnapshot: tamperedSnapshot })).toThrow("LEDGER_SNAPSHOT_MISMATCH");
 });
 ```
 
 - [ ] **Step 2: Run RED.**
 
-Run `npx vitest run tests/ai/publicLedgerReplay.test.ts tests/benchmark/publicEventReplayAdapter.test.ts --testTimeout=120000 --reporter=verbose`; expected FAIL because no replay rebuild utility exists and simulator still creates a second event stream.
+Run `npx vitest run tests/ai/publicLedgerReplay.test.ts tests/benchmark/d2aPublicLedgerAdapter.test.ts --testTimeout=120000 --reporter=verbose`; expected FAIL because no replay rebuild utility or D2a adapter exists.
 
 - [ ] **Step 3: Implement event-sequence rebuild.**
 
-Start from the persisted initial ledger, sort nothing, apply exactly the supplied sequence in event-index order, reject gaps/conflicts/version mismatch, and compare canonical ledger hash. A snapshot may be stored as a cache but is never authoritative; if snapshot and rebuilt hash differ, reject.
+Start from the required persisted `initialState` (identity, initial counts, opening leader, initial trick index and opening tribute public state), create a fresh ledger, sort nothing, apply exactly the supplied sequence in event-index order, reject gaps/conflicts/version mismatch, and compare canonical ledger hash. A `ledgerSnapshot` may be stored as a cache but is never authoritative; if snapshot and rebuilt hash differ, reject. No default initial state may be synthesized from a snapshot.
 
-- [ ] **Step 4: Replace benchmark event fabrication.**
+- [ ] **Step 4: Add the benchmark adapter without replacing legacy event fabrication.**
 
-Change `tests/benchmark/simulator.ts` to copy `room.publicEvents` after each successful room transition and remove the `appendPublicEvent` path that derives events from `createBenchmarkObservation`. Keep `BenchmarkObservation` as the strategy whitelist; it is not an event source. Update replay contracts/validation to preserve `PublicActionEvent` schema, identity and `publicPayloadHash`.
+Implement `tests/benchmark/d2aPublicLedgerAdapter.ts` as a read-only adapter that returns `room.publicEvents` and `room.publicLedger` for D2a validation. Keep `BenchmarkObservation`, `tests/benchmark/simulator.ts:appendPublicEvent`, `tests/benchmark/reporting.ts:publicTraceHash`, D1 raw/replay schema and `tests/benchmark/d1ReplayValidation.ts` unchanged. Add a consistency test that runs the same room transition and proves the D2a event sequence and legacy D1 trace describe the same play/pass transitions; do not replace either hash. Formal replacement is deferred to D2g with a new benchmarkVersion, schema, configHash and artifact directory.
 
 - [ ] **Step 5: Run replay focused tests and commit.**
 
 Run:
 
 ```bash
-npx vitest run tests/ai/publicLedgerReplay.test.ts tests/benchmark/publicEventReplayAdapter.test.ts tests/benchmark/d1ReplayValidation.test.ts --testTimeout=120000 --reporter=verbose
+npx vitest run tests/ai/publicLedgerReplay.test.ts tests/benchmark/d2aPublicLedgerAdapter.test.ts tests/benchmark/d1ReplayValidation.test.ts --testTimeout=120000 --reporter=verbose
 ```
 
-Expected: PASS; the benchmark simulator consumes room events and no benchmark module allocates an event index.
+Expected: PASS; the D2a adapter consumes room events without changing the legacy D1 simulator or allocating a second canonical event index.
 
 ```bash
-git add src/game/publicEventReplay.ts tests/ai/publicLedgerReplay.test.ts tests/benchmark/publicEventReplayAdapter.test.ts tests/benchmark/contracts.ts tests/benchmark/simulator.ts tests/benchmark/d1ReplayValidation.ts scripts/replayD1TopKBenchmark.ts
-git commit -m "d2a: make public event sequence the replay authority"
+git add src/game/publicEventReplay.ts tests/ai/publicLedgerReplay.test.ts tests/benchmark/d2aPublicLedgerAdapter.ts tests/benchmark/d2aPublicLedgerAdapter.test.ts
+git commit -m "d2a: add public ledger replay adapter"
 ```
 
 ### Task 8: Privacy, byte-lock, dependency and complete regression gate
@@ -719,7 +800,7 @@ Scan only serialized event/ledger/replay values; fail on forbidden keys anywhere
 - [ ] **Step 4: Run all D2a focused and regression gates.**
 
 ```bash
-npx vitest run tests/ai/publicEvent.test.ts tests/ai/publicEventHash.test.ts tests/ai/publicLedger.test.ts tests/ai/publicLedgerTrickFinish.test.ts tests/ai/publicLedgerTributeReset.test.ts tests/ai/publicLedgerReplay.test.ts tests/ai/publicLedgerPrivacy.test.ts tests/game/publicEventIdentity.test.ts tests/game/publicEventRoomAdapter.test.ts tests/game/publicRoomLedgerIsolation.test.ts --testTimeout=120000 --reporter=verbose
+npx vitest run tests/ai/publicEvent.test.ts tests/ai/publicEventHash.test.ts tests/ai/publicLedger.test.ts tests/ai/publicLedgerTrickFinish.test.ts tests/ai/publicLedgerTributeReset.test.ts tests/ai/publicLedgerReplay.test.ts tests/ai/publicLedgerPrivacy.test.ts tests/game/publicEventIdentity.test.ts tests/game/publicEventRoomAdapter.test.ts tests/game/publicRoomLedgerIsolation.test.ts tests/benchmark/d2aPublicLedgerAdapter.test.ts --testTimeout=120000 --reporter=verbose
 npm test
 npm run test:benchmark
 npm run test:simulation
@@ -741,26 +822,41 @@ git commit -m "d2a: lock public ledger privacy and behavior boundaries"
 
 ---
 
-## 5. Room transaction protocol
+## 5. Room transition draft and atomic commit protocol
 
 Every public mutation uses this exact protocol; Task 4–6 implementations must not bypass it:
 
 ```ts
-function commitPublicTransition(room: RoomState, draft: PublicRoomDraft, events: readonly PublicActionEvent[]): void {
-  const candidate = events.reduce((ledger, event) => {
+type RoomTransitionDraft = Readonly<{
+  hands: RoomState["hands"];
+  trick: RoomState["trick"];
+  currentTurn: RoomState["currentTurn"];
+  leaderSeat: RoomState["leaderSeat"];
+  playHistory: RoomState["playHistory"];
+  finishOrder: RoomState["finishOrder"];
+  openingTribute?: RoomState["openingTribute"];
+  settlement?: RoomState["settlement"];
+  status: RoomState["status"];
+  actionLog: RoomState["actionLog"];
+}>;
+
+function commitPublicTransition(room: RoomState, draft: RoomTransitionDraft, eventDrafts: readonly PublicActionEventDraft[]): void {
+  const finalizedEvents = eventDrafts.map((draftEvent) => finalizePublicActionEvent(draftEvent));
+  const candidate = finalizedEvents.reduce((ledger, event) => {
     const applied = applyPublicEvent(ledger, event);
     if (!applied.ok) throw new Error(applied.error);
     return applied.ledger;
   }, room.publicLedger);
 
-  // No assignments before every event validates.
+  crossCheckDraftAgainstLedger(draft, candidate, finalizedEvents);
+  // No assignments before every draft, finalize, event and cross-check validates.
   assignDraftRoomFields(room, draft);
   room.publicLedger = candidate;
-  room.publicEvents = [...room.publicEvents, ...events];
+  room.publicEvents = [...room.publicEvents, ...finalizedEvents];
 }
 ```
 
-`PublicRoomDraft` contains only public room fields touched by the action (`hands` counts are represented by already validated hand mutation, trick, current turn, leader, finish order, status, settlement, opening tribute, play history and action log). The implementation must construct it from copies before commit; `assignDraftRoomFields` performs plain deterministic assignments and cannot throw after validation. If any event or draft validation fails, the original room, ledger and event log remain byte-identical.
+`RoomTransitionDraft` 是完整副本，不是只包含 public 字段的局部 patch。任何 ledger/event 校验前都不得修改原 room 的 `hands`、`trick`、`currentTurn`、`leaderSeat`、`playHistory`、`finishOrder`、`openingTribute`、`settlement` 或 `status`。完整顺序固定为：`action validation` → `draft state transition` → `assertPublicActionEventDraft`/`finalizePublicActionEvent` → temporary ledger apply → `crossCheckDraftAgainstLedger` → 一次性 commit。`assignDraftRoomFields` 只执行不会抛错的确定性赋值；任一步失败，原 room、ledger 和 event log 字节不变。
 
 The event source is therefore the room’s validated state transition, not a request, AI decision, observation, hidden hand, or benchmark callback. A request that fails `classifyPlay`, `canBeatPlay`, tribute validation or turn validation never allocates an event index.
 
@@ -775,18 +871,24 @@ The public replay payload contains:
 ```ts
 type PublicLedgerReplayDocument = Readonly<{
   schemaVersion: "d2-public-replay-v1";
-  identity: PublicIdentity;
-  initialLedger: HardPublicLedger; // optional cache, never authority
+  initialState: Readonly<{
+    identity: PublicGameIdentity;
+    initialHandCounts: Readonly<Record<0 | 1 | 2 | 3, number>>;
+    openingLeader: 0 | 1 | 2 | 3;
+    initialTrickIndex: number;
+    openingTributePublicState: Readonly<Record<string, string | number | boolean | null>>;
+  }>;
   events: readonly PublicActionEvent[]; // authority, eventIndex 0..N-1
+  ledgerSnapshot?: HardPublicLedger; // optional cache, never authority
   finalLedgerHash: string;
 }>;
 ```
 
-Recovery always runs `createInitialPublicLedger(identity, initial counts, opening leader)` followed by `applyPublicEvent` for every event. It then compares `canonicalPublicLedgerHash(rebuilt)` to `finalLedgerHash` and any supplied snapshot hash. Missing event, duplicate/conflicting index, unknown schema or mismatch rejects recovery; no default fields are synthesized.
+Recovery always runs `createInitialPublicLedger(initialState.identity, initialState.initialHandCounts, initialState.openingLeader, initialState.initialTrickIndex, initialState.openingTributePublicState)` followed by `applyPublicEvent` for every event. It then compares `canonicalPublicLedgerHash(rebuilt)` to `finalLedgerHash`; only after that, if `ledgerSnapshot` exists, it compares the snapshot hash and rejects mismatch. Missing `initialState`, duplicate/conflicting index, unknown schema or mismatch rejects recovery; no default initial data is synthesized from a snapshot.
 
 ### 6.2 Reset
 
-`resetPublicLedger` is called in `createRoom` after deal/tribute initialization inputs are known and before any action can be accepted. It sets `nextEventIndex=0`, `lastAppliedEventIndex=-1`, clears `seenEventHashes`, `playedCardIds`, `finishOrder`, `publicTributeEvents` and recent window, initializes hand counts, trick index/leader, and binds the new `handIdentity`. No previous ledger object is mutated or reused. The current UI’s “next room” path naturally creates a new identity; a future in-place next-hand path must call `resetPublicLedger` explicitly.
+`resetPublicLedger` is called in `createRoom` after deal/tribute initialization inputs are known and before any action can be accepted. It sets `nextEventIndex=0`, `lastAppliedEventIndex=-1`, clears `seenEventHashes`, `playedCardIds`, `revealedTransferEvents`, `finishOrder`, `publicTributeEvents` and recent window, initializes hand counts, trick index/leader, and binds the new `handIdentity`. No previous ledger object is mutated or reused. The current UI’s “next room” path naturally creates a new identity; a future in-place next-hand path must call `resetPublicLedger` explicitly.
 
 ---
 
@@ -794,15 +896,16 @@ Recovery always runs `createInitialPublicLedger(identity, initial counts, openin
 
 D2a is complete only when:
 
-1. All six event kinds validate their required/prohibited fields and canonical hashes.
+1. All seven event kinds (`play`, `pass`, `trick-clear`, `finish`, `tribute`, `return`, `anti-tribute`) validate their required/prohibited fields and canonical hashes.
 2. event 0..N-1 is accepted; same index/hash is idempotent; conflicts/gaps fail closed.
 3. Public card duplicates, invalid counts, finish regressions, trick transitions and tribute ordering fail closed.
-4. Room play/pass/trick-clear/finish/tribute/return events come only from successful room transitions and are committed atomically with ledger.
+4. Room play/pass/trick-clear/finish/tribute/return/anti-tribute events come only from successful room transitions and are committed atomically with ledger.
 5. New room/reset starts a new hand identity and event index 0; prior ledger is not reused.
 6. Replay event sequence rebuilds an identical canonical ledger hash.
 7. Event/ledger/replay privacy scanner rejects all hidden-state keys and `PublicRoom` shape remains unchanged.
-8. D0 fixture check-only, focused D2a tests, ordinary/benchmark/simulation/performance tests, build, TypeScript and diff-check pass.
-9. No D2b/D2c/D2d/D2e/D2f/D2g code, treatment registration, smoke, calibration or formal run is present.
+8. Legacy D1 public trace, hash, raw/replay schema, validator and P7.1 artifacts remain byte/validation compatible; D2a adapter consistency is additive only.
+9. D0 fixture check-only, focused D2a tests, ordinary/benchmark/simulation/performance tests, build, TypeScript and diff-check pass.
+10. No D2b/D2c/D2d/D2e/D2f/D2g code, treatment registration, smoke, calibration or formal run is present.
 
 ---
 
@@ -811,7 +914,12 @@ D2a is complete only when:
 - No task assumes five candidate plans; D2a does not inspect candidate plans at all.
 - No wall-clock value controls event ordering, index allocation, normal completion or replay.
 - No particle, likelihood, action reducer, rollout, team utility or plan-pruning module is created.
-- There is one room ledger and one room event log; benchmark consumes them instead of fabricating observation-derived events.
+- There is one room ledger and one room event log; the additive D2a adapter consumes them, while legacy D1 observation-derived trace generation remains unchanged until D2g.
+- `RoomState.id`/`nextRoomId` are transport-only; canonical replay identity is always explicit `PublicGameIdentity`.
+- Tribute/return transfers are separate from `playedCardIds`; a revealed tribute card can later be played, while the same card cannot be played twice.
+- Finish events append only `finishOrder`; they never repeat the play hand-count decrement.
+- Replay requires `initialState`; an optional snapshot can only be checked after event replay.
+- No event uses a hand-written placeholder hash, and no original room mutable field is assigned before draft/event/ledger validation.
 - Event deduplication is index/hash based and atomic; no request-time append/rollback exists.
 - `PublicActionEvent` contains no perspective-derived fields such as relation, forced defense or near-finish judgment; those belong to D2b derived evidence.
 - `formalExecutionAllowed` remains `false` throughout; this plan does not authorize any experiment.
