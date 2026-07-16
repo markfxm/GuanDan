@@ -136,6 +136,24 @@ export function createRoom({
       openingTributePublicState: { status: openingTribute?.status ?? "none" },
     });
     room.publicEvents = [];
+    if (openingTribute?.status === "anti-tribute") {
+      const antiTribute = finalizePublicActionEvent({
+        schemaVersion: "d2-public-event-v2",
+        gameId: publicIdentity.gameId,
+        roundIdentity: publicIdentity.roundIdentity,
+        handIdentity: publicIdentity.handIdentity,
+        eventIndex: room.publicLedger.nextEventIndex,
+        kind: "anti-tribute",
+        seat: openingLeader,
+        publicStableKey: "anti-tribute:anti-tribute",
+        trickIndex: 0,
+        reasonCode: "anti-tribute",
+      } as PublicActionEventDraft);
+      const result = applyPublicEvent(room.publicLedger, antiTribute);
+      if (!result.ok) throw new Error(result.error);
+      room.publicLedger = result.ledger;
+      room.publicEvents = [antiTribute];
+    }
   }
   return room;
 }
@@ -491,6 +509,58 @@ function emptyAiRuntime(): AiRuntimeState {
 }
 
 export function advanceOpeningTribute(room: RoomState, seat?: Seat, cardIds: string[] = []): void {
+  if (room.publicIdentity !== undefined && room.publicLedger !== undefined && room.publicEvents !== undefined) {
+    return advanceOpeningTributeWithPublicLedger(room, seat, cardIds);
+  }
+  advanceOpeningTributeLegacy(room, seat, cardIds);
+}
+
+function advanceOpeningTributeWithPublicLedger(room: RoomState, seat?: Seat, cardIds: string[] = []): void {
+  const draft = structuredClone(room);
+  const phase = room.openingTribute?.phase;
+  advanceOpeningTributeLegacy(draft, seat, cardIds);
+  const eventDrafts = buildTransferEventDrafts(room, draft, phase);
+  commitPublicTransition(room, draft, eventDrafts);
+}
+
+function buildTransferEventDrafts(room: RoomState, draft: RoomState, phase: TributeState["phase"]): PublicActionEventDraft[] {
+  if (room.publicIdentity === undefined || room.publicLedger === undefined) return [];
+  const changes = { 0: 0, 1: 0, 2: 0, 3: 0 } as Record<Seat, number>;
+  let fromSeat: Seat | undefined;
+  let toSeat: Seat | undefined;
+  let cardId: string | undefined;
+  for (const candidate of [0, 1, 2, 3] as const) {
+    const before = new Set(room.hands[candidate].map((card) => card.id));
+    const after = new Set(draft.hands[candidate].map((card) => card.id));
+    const removed = [...before].filter((id) => !after.has(id));
+    const added = [...after].filter((id) => !before.has(id));
+    changes[candidate] = draft.hands[candidate].length - room.hands[candidate].length;
+    if (removed.length === 1) {
+      fromSeat = candidate;
+      cardId = removed[0];
+    }
+    if (added.length === 1) toSeat = candidate;
+  }
+  if (fromSeat === undefined || toSeat === undefined || cardId === undefined || fromSeat === toSeat) return [];
+  const kind = phase === "return" ? "return" : "tribute";
+  return [{
+    schemaVersion: "d2-public-event-v2",
+    gameId: room.publicIdentity.gameId,
+    roundIdentity: room.publicIdentity.roundIdentity,
+    handIdentity: room.publicIdentity.handIdentity,
+    eventIndex: room.publicLedger.nextEventIndex,
+    kind,
+    seat: fromSeat,
+    publicCardIds: [cardId],
+    fromSeat,
+    toSeat,
+    handCountChanges: changes,
+    publicStableKey: `${kind}:${fromSeat}:${toSeat}:${cardId}`,
+    trickIndex: room.publicLedger.currentTrick.trickIndex,
+  } as PublicActionEventDraft];
+}
+
+function advanceOpeningTributeLegacy(room: RoomState, seat?: Seat, cardIds: string[] = []): void {
   const tribute = room.openingTribute;
   if (tribute === undefined || tribute.status !== "pending") {
     return;
