@@ -78,3 +78,27 @@ Ubuntu Node 22 native installation and the real production OS/architecture were 
 - game-id bytes are UTF8(D2A-PUBLIC-GAME-ID-V1), NUL, lowercase RFC-4122 UUID, NUL, canonical decimal sequence; SHA-256 lowercase hex;
 - fixed vector gameId: 1876686cbc6a0d445682319d421e704aa38440f0b0d772b3dfdd09cbd203a1d5.
 ---
+## Real GitHub Actions gate
+
+- Temporary branch: codex/d2a1-store-preflight.
+- Run id: 29521740862.
+- Job id: 87700224446.
+- Head SHA: 1a5f5f53082862e911d0f0ffe3f905c5298e6cf6.
+- Runner: ubuntu-latest; configured Node 22.22.2; natural completion; conclusion success; duration 19 seconds.
+- Install, transaction/restart script and artifact upload steps all succeeded.
+- Artifact: d2a1-store-preflight-29521740862, id 8384974836, digest sha256:a291ee8433688989d8c58223db4786014fdc88d3061a239089e7dd06bc426b97.
+- GitHub API allowed run/job/artifact metadata but returned 403 for logs and 401 for artifact download without repository-admin authentication. Exact install log lines are therefore not independently readable here; prebuilt/node-gyp is not claimed from metadata alone.
+
+## Canonical precision and restart semantics
+
+- gameSequence is bigint internally and canonical decimal string in JSON/review/provenance.
+- better-sqlite3 safe-integer reads are mandatory; values around and above 2^53 are test vectors.
+- lifecycle states are allocated and room-committed.
+- After restart, allocated may retry from its saved descriptor. room-committed without a durable room snapshot returns ROOM_STATE_UNAVAILABLE_AFTER_RESTART and never creates a new initial room with the same gameId.
+- replay remains independent of provider/store.
+- runtime settings: server-only import, D2A_IDENTITY_STORE_PATH, defaultSafeIntegers, foreign_keys=ON, synchronous=FULL, journal_mode=WAL, busy_timeout=5000 and BEGIN IMMEDIATE.
+- Idempotency-Key is required, 1-128 allowed ASCII characters, no trim, case-sensitive; 400 for missing/invalid and 409 for same key with a different descriptor.
+
+## Decision
+
+CI_STORE_COMPATIBILITY_APPROVED is recorded as a sub-result. Because the real production deployment target is not declared, record PRODUCTION_DEPLOYMENT_TARGET_UNRESOLVED and keep the overall status STORE_TECHNOLOGY_NOT_APPROVED. No approval JSON was created.

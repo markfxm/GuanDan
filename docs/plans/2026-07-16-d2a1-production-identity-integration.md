@@ -219,3 +219,33 @@ After Task 6 run D2a focused, D2a.1 focused, three fresh npm test runs, npm run 
 Detailed environment, candidate, install, transaction, browser isolation, cleanup and decision evidence: docs/research/2026-07-16-d2a1-store-technology-preflight.md.
 
 Stop conditions: unapproved store, failed restart recovery, missing production ledger, changed D1 trace/hash/schema, leaked PublicRoom identity/ledger, or any need to change D2a contracts.
+## 10. Ubuntu native-store approval gate (2026-07-17)
+
+### Precision and allocation lifecycle
+
+- PublicIdentityStore and provider use bigint for gameSequence; JSON, review, provenance and descriptor fields use canonical decimal strings.
+- better-sqlite3 is opened with defaultSafeIntegers; code may not read SQLite INTEGER into an unsafe JavaScript number.
+- gameId derivation accepts only a no-leading-zero decimal string; the 2^53 boundary vector and a value above it are required tests.
+- Allocation lifecycle is allocated or room-committed.
+- Same process, same key and descriptor returns the same live room and transport id.
+- After restart, allocated may retry room creation from its saved descriptor. room-committed without a durable room snapshot returns ROOM_STATE_UNAVAILABLE_AFTER_RESTART; it must not create a new initial room with the same gameId.
+- Public replay remains fully independent of provider/store. Full room persistence is outside D2a.1.
+
+### Frozen SQLite runtime contract
+
+- Import better-sqlite3 only from server modules; browser code and Vite entrypoints cannot import it.
+- Database path is an explicit D2A_IDENTITY_STORE_PATH server configuration; outputDir, temp paths and RoomState.id are invalid.
+- Every connection calls defaultSafeIntegers(), PRAGMA foreign_keys=ON, PRAGMA synchronous=FULL, PRAGMA journal_mode=WAL and PRAGMA busy_timeout=5000.
+- Bootstrap and allocation use BEGIN IMMEDIATE with commit/rollback; WAL is selected for concurrent readers plus one serialized writer and must be covered by contention tests.
+
+### Real GitHub Actions evidence
+
+- Workflow branch: codex/d2a1-store-preflight; head SHA 1a5f5f53082862e911d0f0ffe3f905c5298e6cf6.
+- Run: 29521740862; job: 87700224446; runner label: ubuntu-latest; Node: 22.22.2; job duration: 19 seconds; conclusion: success; natural completion.
+- checkout, setup-node, temporary install, transaction/restart script and artifact upload steps all reported success.
+- Uploaded artifact: d2a1-store-preflight-29521740862, artifact id 8384974836, digest sha256:a291ee8433688989d8c58223db4786014fdc88d3061a239089e7dd06bc426b97.
+- GitHub log/artifact download requires repository-admin authentication in this environment (API returned 403/401). Therefore prebuilt-versus-node-gyp cannot be independently asserted from the log content here; the artifact metadata proves upload, not its readable contents.
+
+### Supported matrix and final decision
+
+Confirmed compatibility: Windows x64 Node 24 development and Ubuntu x64 Node 22 CI. The actual production deployment target is not specified, so record PRODUCTION_DEPLOYMENT_TARGET_UNRESOLVED. CI_STORE_COMPATIBILITY_APPROVED is acceptable as a sub-result; the total decision remains STORE_TECHNOLOGY_NOT_APPROVED. Do not create the formal approval JSON.

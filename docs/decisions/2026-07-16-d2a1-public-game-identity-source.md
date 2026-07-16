@@ -153,3 +153,31 @@ Until that record is approved:
 - D2b is blocked;
 - formalExecutionAllowed remains false.
 ---
+## Ubuntu gate result (2026-07-17)
+
+### Precision contract
+
+PublicIdentityStore/provider use bigint internally. JSON, review, provenance and descriptor representations use canonical decimal strings. better-sqlite3 connections call defaultSafeIntegers; unsafe JavaScript number reads are forbidden. gameId accepts only a no-leading-zero decimal string, including tests around and above 2^53.
+
+Allocation has two states: allocated and room-committed. Same process and same key/descriptor return the same live room and transport id. After restart, allocated may retry from its saved descriptor. room-committed without a durable room snapshot returns ROOM_STATE_UNAVAILABLE_AFTER_RESTART and cannot create a new initial room with the same gameId. Public replay remains independent of provider/store; full room persistence is outside D2a.1.
+
+### SQLite runtime settings
+
+- server-only better-sqlite3 import;
+- database path from explicit D2A_IDENTITY_STORE_PATH;
+- defaultSafeIntegers();
+- PRAGMA foreign_keys=ON;
+- PRAGMA synchronous=FULL;
+- PRAGMA journal_mode=WAL;
+- PRAGMA busy_timeout=5000;
+- BEGIN IMMEDIATE for bootstrap/allocation with explicit commit/rollback.
+
+### Real CI evidence
+
+Workflow codex/d2a1-store-preflight completed successfully in GitHub Actions: run 29521740862, job 87700224446, head 1a5f5f53082862e911d0f0ffe3f905c5298e6cf6, ubuntu-latest, Node 22.22.2, natural completion in 19 seconds. Install, transaction/restart script and artifact upload steps succeeded. Artifact 8384974836 has digest sha256:a291ee8433688989d8c58223db4786014fdc88d3061a239089e7dd06bc426b97.
+
+The workflow logs and uploaded artifact require repository-admin authentication for download in this environment (API returned 403/401). Therefore the exact prebuilt-versus-node-gyp line cannot be independently read here; no unsupported claim is made.
+
+### Support and decision
+
+Confirmed: Windows x64 Node 24 development and Ubuntu x64 Node 22 CI. The project has not declared an actual production deployment target. Record PRODUCTION_DEPLOYMENT_TARGET_UNRESOLVED and CI_STORE_COMPATIBILITY_APPROVED as a sub-result. Overall status remains STORE_TECHNOLOGY_NOT_APPROVED; do not create d2a1-identity-source-decision.json.
