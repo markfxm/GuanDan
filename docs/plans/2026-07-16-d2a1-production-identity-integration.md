@@ -2,36 +2,43 @@
 
 > For agentic workers: execute this plan task by task with the execution-plans skill.
 
-**Goal:** 正常 production 建局显式创建 D2a publicLedger；legacy 创建显式隔离；D0/D1 trace、hash、schema、PublicRoom shape 和 D2a contracts 不变。
+**Goal:** 正常 production 建局显式取得稳定 PublicGameIdentity 并创建 D2a publicLedger；legacy 创建显式隔离；D0/D1 trace、hash、schema、PublicRoom shape 与 D2a contract 不变。
 
-**Status gate:** source contract 已批准；store technology 仍为 STORE_TECHNOLOGY_PENDING。未完成 store 决策前不得实施 Task 1–6、不得开始 D2b。formalExecutionAllowed=false。
+**Status:** source contract = APPROVED_SOURCE_CONTRACT；store technology = STORE_TECHNOLOGY_NOT_APPROVED。Task 1–6 和 D2b 继续阻塞。formalExecutionAllowed=false。
 
-## 1. 代码映射与事实
+## 1. Actual lifecycle mapping
 
-- server composition root：src/server/dev.ts 的 buildApi() 后 app.listen；没有 session/store/provider。
-- API：src/server/api.ts 的 buildApi() 建立局部 rooms Map；POST /api/rooms 的 CreateRoomBody 只有 rank、seed、pendingTributeItems，调用无 identity 的 createRoom。
-- transport：src/game/room.ts 的模块级 nextRoomId 产生 room-加序号的 RoomState.id；它只用于 API/UI 定位，不是 canonical gameId。
-- UI：src/ui/api.ts 的 createGameRoom 与 src/ui/App.tsx 的 handleCreateRoom/handleNextRoom 均不持有 identity/sequence。
-- replay：src/game/publicEventReplay.ts 文档已保存 identity、initialState、events、finalLedgerHash。
-- legacy 调用：scripts/unifiedAiSimulation.ts、scripts/research/measureD1PlannerExpansionBudget.ts、tests/benchmark/simulator.ts 的无 identity createRoom；D2a adapter/ledger tests 已显式传 buildPublicGameIdentity。
-- 当前无 authenticated session、match/series identity、持久 sequence 或生产持久 store；rooms Map、nextRoomId、Date.now seed 都不是 identity 来源。
+| Area | Actual code | Finding |
+|---|---|---|
+| server entry | src/server/dev.ts: buildApi(), app.listen | no provider/session/store |
+| API root | src/server/api.ts: buildApi() | local rooms Map only |
+| production POST | src/server/api.ts: POST /api/rooms | Body has rank, seed, pendingTributeItems; calls createRoom without identity |
+| transport id | src/game/room.ts: nextRoomId/createRoom | room transport id only; never canonical |
+| UI | src/ui/api.ts:createGameRoom; src/ui/App.tsx:handleCreateRoom/handleNextRoom | no identity or sequence state |
+| replay | src/game/publicEventReplay.ts | document already stores identity, initialState, events, finalLedgerHash |
+| legacy callers | scripts/unifiedAiSimulation.ts; scripts/research/measureD1PlannerExpansionBudget.ts; tests/benchmark/simulator.ts | no identity; must be explicit legacy |
+| canonical fixtures | tests/game/publicEventRoomAdapter.test.ts; tests/benchmark/d2aPublicLedgerAdapter.test.ts; tests/ai/publicLedger*.test.ts | explicit buildPublicGameIdentity |
 
-## 2. 已批准 identity source 与无循环 provider
+package.json has no engines or packageManager field. package-lock.json is lockfileVersion 3 and CI uses npm ci. Local development is Windows_NT 10.0.19045, win32 x64, Node 24.15.0, npm 11.12.1. CI is ubuntu-latest with Node 22. Production start is npm run api / src/server/dev.ts; browser build is npm run build. No Dockerfile, Electron, pkg, nexe or single-file packaging was found. README documents Windows start scripts; Ubuntu is documented only by CI. macOS and other deployment targets are unverified.
+
+No existing authenticated session, match/series id, durable sequence or production persistence was found. rooms Map, nextRoomId and Date.now seed are forbidden identity sources.
+
+## 2. Approved identity and provider contract
 
 ### Installation identity
 
-单 server 使用 persistent installation identity：
+The single-server installation has one persistent opaque UUID:
 
-1. 第一次 store 初始化生成 opaque UUID；
-2. 必须成功持久化后才允许 allocation；
-3. restart 读取同一值；
-4. 不来自 RoomState.id、nextRoomId、时间、worker、目录或 deck；
-5. 未持久化随机 UUID 禁止；生成并成功持久化的 opaque UUID 允许；
-6. 不进入 UI、PublicRoom、ledger。
+1. generate only on first store initialization;
+2. write it durably and read it back before accepting allocation;
+3. retain it across restart;
+4. never derive it from RoomState.id, nextRoomId, time, worker, directory, hidden cards or deck;
+5. an uncommitted UUID is invalid;
+6. keep it out of UI, PublicRoom, ledger and public events.
 
-### Canonical request与provider
+### Canonical request
 
-调用者只提供：
+Callers provide only:
 
 ~~~ts
 type CanonicalRoomRequestDescriptor = Readonly<{
@@ -41,7 +48,7 @@ type CanonicalRoomRequestDescriptor = Readonly<{
 }>;
 ~~~
 
-provider 不接收 sessionIdentity 或 gameSequence：
+Provider never accepts sessionIdentity or gameSequence:
 
 ~~~ts
 type PublicGameIdentityProvider = Readonly<{
@@ -57,149 +64,158 @@ type PublicGameIdentityProvider = Readonly<{
 }>;
 ~~~
 
-事务顺序固定为：查 idempotencyKey → 校验 descriptorHash → 原子分配并递增 gameSequence → 派生 gameId/roundIdentity/handIdentity → 持久化 allocation → 返回。
+Transaction order is fixed: lookup key → compare descriptorHash → atomically allocate/increment sequence → derive identity → persist full allocation → return.
 
-### Canonical derivation
+### Game ID bytes
 
-固定版本化 domain separator D2A-PUBLIC-GAME-ID-V1：
+Use exact bytes, not string concatenation:
 
 ~~~text
-gameId = SHA-256(domainSeparator || installationIdentity || canonicalDecimal(gameSequence))
+UTF8("D2A-PUBLIC-GAME-ID-V1")
++ 0x00
++ UTF8(lowercase RFC-4122 installation UUID with hyphens)
++ 0x00
++ UTF8(canonicalDecimal(gameSequence))
 ~~~
 
-roundIdentity/handIdentity 继续从 gameId 和 round/hand 序号派生。gameSequence 只能存在于 allocation record/result，绝不能由 UI/API 传入。
+gameSequence starts at 1, has no leading zeros, and SHA-256 output is lowercase hex. Fixed vector:
 
-## 3. PublicIdentityStore与候选
+~~~text
+installationIdentity = 00000000-0000-4000-8000-000000000001
+gameSequence = 1
+inputHex = 4432412d5055424c49432d47414d452d49442d56310030303030303030302d303030302d343030302d383030302d3030303030303030303030310031
+gameId = 1876686cbc6a0d445682319d421e704aa38440f0b0d772b3dfdd09cbd203a1d5
+~~~
 
-至少持久化 installationIdentity、nextGameSequence、idempotencyKey、descriptorHash、gameSequence、gameId、完整 PublicGameIdentity。必须具备事务或等价原子唯一约束：
+roundIdentity and handIdentity remain deterministic derivations from gameId and their sequence numbers.
 
-- idempotencyKey UNIQUE；
-- gameSequence UNIQUE；
-- gameId UNIQUE；
-- 同 key 同 descriptor 幂等；
-- 同 key 不同 descriptor 冲突；
-- 并发同 key 只生成一次；
-- restart 返回同一 allocation。
+## 3. PublicIdentityStore and technology decision
 
-当前 package.json 未包含可用生产 store；脚本 fs 写入不满足门禁。候选如下：
+The store persists installationIdentity, nextGameSequence, idempotencyKey, descriptorHash, gameSequence, gameId and full PublicGameIdentity. Required constraints:
 
-1. **SQLite + better-sqlite3（推荐供人工批准）**：同步事务、UNIQUE、崩溃恢复语义清晰；代价是 native addon、Node ABI 和各平台预编译/构建验证。
-2. **SQLite + sqlite3 async driver（备选）**：事务/UNIQUE 成熟；代价是异步 callback/worker 调度更复杂、初始化和并发错误传播更难审计。
+- idempotencyKey UNIQUE;
+- gameSequence UNIQUE;
+- gameId UNIQUE;
+- same key/same descriptor is idempotent;
+- same key/different descriptor is conflict;
+- concurrent same key creates one allocation;
+- restart returns the same allocation;
+- ordinary in-memory Map or unlocked JSON write is not acceptable.
 
-Task 1 必须使用决策文档批准的候选；实现者不得临场选择。
+Repository inspection found no production store. The formal candidates are exactly:
 
-## 4. API、幂等与 replay
+**A. better-sqlite3 12.11.1 (recommended, not approved).** npm engines include Node 20/22/23/24/25/26; synchronous transaction and UNIQUE semantics are clear. Cost: native addon, Node ABI/prebuilt coverage, packaging and OS/architecture verification.
 
-- API/UI 使用 opaque Idempotency-Key header；一个新建游戏意图一个 key，retry 复用，成功后结束，下一局新 key。
-- key 不进入 identity、ledger、PublicRoom 或 replay public event。
-- 同 key 同 descriptor 幂等；同 key 不同 descriptor 返回 409；并发同 key 只有一次 allocation。
-- production POST 只能 canonical；legacy benchmark/research/test 显式 mode legacy；没有 identity 不得自动转 legacy。
-- replay 的权威输入是保存的 PublicGameIdentity、initialState、events、finalLedgerHash；allocation store 只作可选 audit。provider 不可用不应阻止完整历史 replay。
+**B. node:sqlite (not selected).** Added in Node 22.5; Node 22.13 removed the flag but retained experimental stability; Node 24.15 is release candidate. Cost: minimum Node patch/stability coupling and upgrade risk while CI targets Node 22.
 
-## 5. TDD任务与提交边界
+node-sqlite3 is removed from the formal candidates as deprecated/unmaintained. Task 1 may not switch candidates without a new decision.
 
-所有任务由 STORE_TECHNOLOGY_PENDING 阻断，Task 0 批准 store 后才进入 Task 1。
+### Preflight evidence
 
-### Task 0 — source/store decision gate
+- better-sqlite3 12.11.1 installed in an isolated temporary directory.
+- Windows Node 24.15.0 win32 x64 used a prebuilt binary; verbose install confirmed prebuild-install success and no node-gyp invocation.
+- Temporary database passed BEGIN/COMMIT, UNIQUE conflict, close/reopen and row recovery.
+- Node 22.22.2 win32 x64 loaded the same module and opened an in-memory database.
+- npm run build passed; browser bundle scan found zero better-sqlite3/node:sqlite/sqlite3 references.
+- Temporary dependency and database were deleted; package.json, package-lock, production code and artifacts are unchanged.
+- Ubuntu Node 22 native install and real production OS/architecture were not executed; this is the approval blocker.
 
-Files：本轮创建 docs/decisions/2026-07-16-d2a1-public-game-identity-source.md；批准后创建 docs/benchmark-approvals/d2a1-identity-source-decision.json、tests/server/publicIdentityProviderContract.test.ts。
+Decision status is STORE_TECHNOLOGY_NOT_APPROVED, not APPROVED_FOR_IMPLEMENTATION.
 
-RED：先写 contract test，运行
-npx vitest run tests/server/publicIdentityProviderContract.test.ts --testTimeout=120000
-预期仅因 store technology/provider contract 未批准失败。
+## 4. Room-level idempotency and bootstrap
 
-最小步骤：记录 installation lifecycle、store technology、transaction/unique constraints、restart、Idempotency-Key；不写 production。状态保持 STORE_TECHNOLOGY_PENDING。无 production commit。
+Persist canonical gameId to active transport room mapping.
 
-### Task 1 — provider与descriptor
+- Same process, same key/descriptor returns the existing room; no second transport id.
+- Allocation committed but room commit failed: retry same key reconstructs from saved descriptor/allocation; no new sequence.
+- Successful room response lost: retry returns original room.
+- After restart provider returns same identity; deterministic initial-room reconstruction may use a new transport id, but gameId is unchanged.
+- Allocation record retains the canonical descriptor needed for deterministic reconstruction.
 
-Files：src/server/publicIdentityProvider.ts、src/server/publicIdentityDescriptor.ts、批准的 store adapter、tests/server/publicIdentityProvider.test.ts、tests/server/publicIdentityDescriptor.test.ts；src/game/room.ts 仅暴露 canonical input boundary。
+Installation bootstrap uses a metadata singleton row. Generate UUID in memory, insert inside an atomic transaction, commit, read back, then enable allocation. Concurrent initializers use a singleton unique constraint; losers read the winner. Failed/rolled-back UUIDs are invalid.
 
-RED：allocation 接口若接受 sessionIdentity/gameSequence、installation 未持久化即 allocation、同 key 不同 descriptor 不冲突，测试应失败。
+## 5. Idempotency-Key contract
 
-最小步骤：实现 descriptor hash、installation bootstrap、事务 sequence、domain-separated gameId、allocation record；不改 API/UI。
+Header name: Idempotency-Key.
 
-Focused：
+- required on production POST /api/rooms;
+- missing, empty, malformed or whitespace-containing value: HTTP 400;
+- length 1–128;
+- allowed ASCII: A–Z, a–z, 0–9, dot, underscore, tilde, colon, hyphen;
+- no trim; leading/trailing whitespace rejected; comparison case-sensitive;
+- same key + same descriptor: idempotent response;
+- same key + different descriptor: HTTP 409;
+- key is absent from PublicGameIdentity, ledger, replay events and PublicRoom;
+- one new-game intent owns one key; retry reuses it; next game uses a new key.
+
+## 6. Production/legacy boundary and replay
+
+Use explicit canonical/legacy input (or two explicit helpers). POST /api/rooms can only call canonical. Legacy D1 benchmark, research scripts and fixtures explicitly call legacy and have no ledger. Missing identity never silently becomes legacy.
+
+Replay is independent of provider storage. Its authority is saved PublicGameIdentity, initialState, events and finalLedgerHash. Rebuild directly from that document; provider is optional audit only.
+
+## 7. TDD tasks and commits
+
+All tasks are blocked until store technology approval.
+
+### Task 0 — source/store approval gate
+
+Files: docs/decisions/2026-07-16-d2a1-public-game-identity-source.md; after approval, docs/benchmark-approvals/d2a1-identity-source-decision.json and tests/server/publicIdentityProviderContract.test.ts.
+
+RED: run the contract test and expect only the unapproved store/provider decision to fail. Record installation lifecycle, selected store, transaction/UNIQUE constraints, restart path, room idempotency and Idempotency-Key. No production code.
+
+### Task 1 — provider and descriptor
+
+Create src/server/publicIdentityProvider.ts, src/server/publicIdentityDescriptor.ts, approved store adapter, tests/server/publicIdentityProvider.test.ts and tests/server/publicIdentityDescriptor.test.ts. Modify src/game/room.ts only for explicit canonical input.
+
+RED: reject caller-supplied sessionIdentity/gameSequence; reject allocation before read-back; reject same key/different descriptor. Focused command:
 npx vitest run tests/server/publicIdentityProvider.test.ts tests/server/publicIdentityDescriptor.test.ts --testTimeout=120000 --reporter=verbose
-Commit：d2a1-task1-identity-provider-contract
+Commit: d2a1-task1-identity-provider-contract.
 
 ### Task 2 — production API
 
-Files：src/server/api.ts、src/server/dev.ts、tests/server/apiCanonicalIdentity.test.ts、tests/server/api.test.ts。
+Modify src/server/api.ts and src/server/dev.ts; create tests/server/apiCanonicalIdentity.test.ts; extend tests/server/api.test.ts.
 
-RED：无 store/provider 的 POST 必须失败；provider-backed POST 必须有 private ledger；当前实现会成功创建 legacy room。
-
-最小步骤：读取 Idempotency-Key，构造 descriptor，调用 provider.allocate，canonical create 成功后写 rooms Map，response 不变。
-
-Focused：
+RED: missing provider/store POST fails; successful canonical POST has private ledger; response shape unchanged. Focused command:
 npx vitest run tests/server/apiCanonicalIdentity.test.ts tests/server/api.test.ts --testTimeout=120000 --reporter=verbose
-Commit：d2a1-task2-production-api-canonical-room
+Commit: d2a1-task2-production-api-canonical-room.
 
-### Task 3 — UI idempotency lifecycle
+### Task 3 — UI idempotency
 
-Files：src/ui/api.ts、src/ui/App.tsx、tests/ui/productionIdentityLifecycle.test.tsx、tests/server/apiIdempotency.test.ts。
+Modify src/ui/api.ts and src/ui/App.tsx; create tests/ui/productionIdentityLifecycle.test.tsx and tests/server/apiIdempotency.test.ts.
 
-RED：UI 必须不传 identity/gameSequence、首局/下一局带 opaque header、retry 复用 key、下一局换 key；当前 client 会失败。
-
-最小步骤：UI 只维护创建意图 key，不暴露 identity/sequence。
-
-Focused：
+RED: UI sends no identity/sequence, sends Idempotency-Key, retries same key and uses a new key for next game. Focused command:
 npx vitest run tests/ui/productionIdentityLifecycle.test.tsx tests/server/apiIdempotency.test.ts --testTimeout=120000 --reporter=verbose
-Commit：d2a1-task3-ui-api-idempotency
+Commit: d2a1-task3-ui-api-idempotency.
 
 ### Task 4 — explicit legacy isolation
 
-Files：src/game/room.ts creation boundary、scripts/unifiedAiSimulation.ts、scripts/research/measureD1PlannerExpansionBudget.ts、tests/benchmark/simulator.ts、tests/game/legacyRoomIsolation.test.ts、tests/benchmark/legacyD1Compatibility.test.ts。
+Modify src/game/room.ts creation boundary, scripts/unifiedAiSimulation.ts, scripts/research/measureD1PlannerExpansionBudget.ts and tests/benchmark/simulator.ts; create tests/game/legacyRoomIsolation.test.ts and tests/benchmark/legacyD1Compatibility.test.ts.
 
-RED：缺 mode/identity 不得静默 legacy；显式 legacy 无 ledger 且 D1 trace/hash/schema 不变。
-
-最小步骤：显式标注 legacy 调用，不改 seed、matchId、replay、statistics。
-Focused：
+RED: missing mode/identity is rejected; explicit legacy has no ledger and old D1 trace/hash/schema remain byte-compatible. Focused command:
 npx vitest run tests/game/legacyRoomIsolation.test.ts tests/benchmark/legacyD1Compatibility.test.ts tests/benchmark/d2aPublicLedgerAdapter.test.ts --testTimeout=120000 --reporter=verbose
-Commit：d2a1-task4-explicit-legacy-isolation
+Commit: d2a1-task4-explicit-legacy-isolation.
 
-### Task 5 — restart recovery与standalone replay
+### Task 5 — restart recovery and standalone replay
 
-Files：批准的 store adapter、src/game/publicEventReplay.ts 的文档 identity 输入、tests/server/publicIdentityStoreRestart.test.ts、tests/server/publicIdentityConcurrency.test.ts、tests/game/publicEventReplayIdentity.test.ts。
+Use the approved store adapter; modify replay only for saved document identity; create tests/server/publicIdentityStoreRestart.test.ts, tests/server/publicIdentityConcurrency.test.ts and tests/game/publicEventReplayIdentity.test.ts.
 
-RED：store reopen 后同 key 返回同 allocation；并发不双分配；断开 provider 后 replay 仍可用文档 identity/initialState/events/hash 成功。
-
-最小步骤：验证 store recovery/unique constraints；replay 不调用 provider。
-Focused：
+RED: store reopen returns same allocation; concurrent key does not double allocate; replay succeeds when provider is unavailable. Focused command:
 npx vitest run tests/server/publicIdentityStoreRestart.test.ts tests/server/publicIdentityConcurrency.test.ts tests/game/publicEventReplayIdentity.test.ts --testTimeout=120000 --reporter=verbose
-Commit：d2a1-task5-restart-and-standalone-replay
+Commit: d2a1-task5-restart-and-standalone-replay.
 
-### Task 6 — production integration与回归
+### Task 6 — integration and regression
 
-Files：仅修改上述 production composition/API/UI 文件；tests/server/d2a1ProductionIntegration.test.ts；tests/reviews/d2a1Acceptance.test.ts；门禁通过后更新 D2a review（本轮不更新）。
-
-RED：production POST identity/ledger、UI canonical、legacy 无 ledger、PublicRoom shape、D0/D1 hash 全部锁定；当前 integration-incomplete 时失败。
-
-最小步骤：全部 focused/regression 通过后更新 review evidence，不引入 D2b。
-Focused：
+Modify only the already-listed production composition/API/UI files; create tests/server/d2a1ProductionIntegration.test.ts and review tests. RED: production POST has canonical identity/ledger, UI reaches it, legacy is ledger-free, PublicRoom shape and D0/D1 hashes are unchanged. Focused command:
 npx vitest run tests/server/d2a1ProductionIntegration.test.ts tests/server/apiCanonicalIdentity.test.ts tests/ui/productionIdentityLifecycle.test.tsx tests/game/legacyRoomIsolation.test.ts tests/benchmark/legacyD1Compatibility.test.ts --testTimeout=120000 --reporter=verbose
-Commit：d2a1-production-identity-integration
+Commit: d2a1-production-identity-integration.
 
-## 6. 必测断言
+## 8. Final gates
 
-1. installation identity 先持久化，restart 不变。
-2. provider.allocate 只接收 descriptor + opaque key。
-3. UI/API 不可提供 gameSequence。
-4. domain-separated gameId 稳定且不同 sequence 不同。
-5. 三个唯一约束和同 key 幂等/冲突正确。
-6. production POST room 有 private ledger。
-7. UI 首局/下一局只管理 Idempotency-Key。
-8. replay 脱离 provider 仍可恢复。
-9. legacy D1 无 ledger、trace/hash/schema 不变。
-10. PublicRoom 不含 identity/ledger，D0 fixture check-only 通过。
+After Task 6 run D2a focused, D2a.1 focused, three fresh npm test runs, npm run test:benchmark, npm run test:simulation, npm run test:ai-performance, npm run build, npx tsc --noEmit, D0 fixture check-only and git diff --check. Record exit code, natural exit, duration and stderr. Never run smoke, calibration or formal. Review status can only be D2A_APPROVED_FOR_D2B_PLANNING or D2A_NOT_APPROVED.
 
-## 7. 最终门禁
+## 9. Preflight record
 
-Task 6 后运行 D2a focused、D2a.1 focused、连续三次 fresh npm test、npm run test:benchmark、npm run test:simulation、npm run test:ai-performance、npm run build、npx tsc --noEmit、D0 fixture check-only、git diff --check；逐条记录 exit code、自然退出、耗时和 stderr。不得运行 smoke/calibration/formal。review 只能输出 D2A_APPROVED_FOR_D2B_PLANNING 或 D2A_NOT_APPROVED。
+Detailed environment, candidate, install, transaction, browser isolation, cleanup and decision evidence: docs/research/2026-07-16-d2a1-store-technology-preflight.md.
 
-## 8. 停止条件
-
-- store technology 未批准：Task 1 前停止。
-- provider 无法 restart recovery：停止，不改用内存计数器。
-- production room 无 ledger：D2A_INTEGRATION_INCOMPLETE。
-- legacy D1 trace/hash/schema 变化、PublicRoom 泄漏 identity/ledger、或需修改 D2a contract：停止并请求设计修订。
----
+Stop conditions: unapproved store, failed restart recovery, missing production ledger, changed D1 trace/hash/schema, leaked PublicRoom identity/ledger, or any need to change D2a contracts.

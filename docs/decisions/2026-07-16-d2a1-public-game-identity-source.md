@@ -8,9 +8,9 @@
 
 **APPROVED_SOURCE_CONTRACT**
 
-**STORE_TECHNOLOGY_PENDING**
+**STORE_TECHNOLOGY_NOT_APPROVED**
 
-This decision approves the identity lifecycle and provider allocation semantics. It does not yet authorize production implementation. The store technology must be approved before Task 1–6.
+This decision approves the identity lifecycle and provider allocation semantics. better-sqlite3 12.11.1 is the recommended store candidate, but the actual Ubuntu Node 22 CI/deployment native-install matrix remains unverified. Production implementation is not authorized until that gate passes.
 
 ## Approved identity source
 
@@ -72,7 +72,11 @@ No API, UI, benchmark adapter, or replay caller may pass sessionIdentity or game
 Use the versioned domain separator D2A-PUBLIC-GAME-ID-V1 and canonical decimal encoding:
 
 ~~~text
-gameId = SHA-256(domainSeparator || installationIdentity || canonicalDecimal(gameSequence))
+UTF8("D2A-PUBLIC-GAME-ID-V1") + 0x00
++ UTF8(lowercase RFC-4122 UUID with hyphens) + 0x00
++ UTF8(canonicalDecimal(gameSequence))
+
+gameId = SHA-256(the exact bytes above)
 ~~~
 
 The separator, encoding, SHA-256 implementation, and canonical concatenation must be locked by tests before implementation. roundIdentity and handIdentity remain deterministic derivations from gameId and their explicit sequence values.
@@ -105,19 +109,20 @@ An in-memory Map, an unlocked ordinary JSON write, or a file replacement without
 
 Repository inspection found no production SQLite, Postgres, LevelDB, or equivalent persistence dependency. Existing fs writes are benchmark/artifact writers and are not suitable.
 
-### Candidate A — SQLite with better-sqlite3 (recommended for approval)
+### Candidate A — better-sqlite3 12.11.1 (recommended, not yet approved)
 
 Provides synchronous transactions, UNIQUE constraints, and straightforward crash/reopen behavior for a single server. The cost is a native addon, Node ABI/prebuilt-binary coverage, packaging, and a browser/server boundary that must be tested in the server build only.
 
-### Candidate B — SQLite with sqlite3 async driver
+### Candidate B — node:sqlite
 
-Provides mature transactions and UNIQUE constraints through an asynchronous API. The cost is callback/worker scheduling, more complex initialization ordering, and more difficult audit of concurrent error propagation.
+Node 22.5 introduced node:sqlite; Node 22.13 removed the flag but retained experimental stability, and Node 24.15 is release candidate. The cost is coupling the store to the Node minimum patch/stability level and to a future Node upgrade. It is not selected while CI targets Node 22.
 
-**Recommendation:** approve Candidate A unless deployment constraints reject native better-sqlite3. The implementation task must not switch candidates without a new decision.
+**Recommendation:** Candidate A, exact version 12.11.1. A Windows Node 22/24 temporary preflight passed module load, transaction, UNIQUE and reopen checks using a prebuilt binary. Ubuntu CI/deployment native installation was not executed here, so this decision remains STORE_TECHNOLOGY_NOT_APPROVED. Task 1 must not switch candidates without a new decision.
 
 ## Idempotency-Key contract
 
-- API uses an opaque HTTP Idempotency-Key header.
+- API uses an opaque HTTP header named Idempotency-Key.
+- Missing, empty, malformed or whitespace-containing values return HTTP 400; accepted length is 1–128 ASCII characters from A–Z, a–z, 0–9, dot, underscore, tilde, colon and hyphen. Values are not trimmed and comparison is case-sensitive.
 - One user create intent owns one key.
 - Request retry reuses that key.
 - A successful intent is complete; the next game uses a new key.
@@ -138,12 +143,12 @@ Rebuild creates the initial public ledger from the saved identity and initialSta
 
 ## Implementation gate
 
-Task 0 must record the selected store technology, transaction mechanism, unique constraints, restart test path, and Idempotency-Key header contract. Only then may Task 1–6 begin.
+Task 0 must record the selected store technology, transaction mechanism, unique constraints, restart test path, Idempotency-Key header contract, room-level gameId mapping and installation bootstrap transaction. Only after the Ubuntu Node 22/deployment native-install gate passes may Task 1–6 begin.
 
 Until that record is approved:
 
 - source status remains APPROVED_SOURCE_CONTRACT;
-- implementation status remains STORE_TECHNOLOGY_PENDING;
+- implementation status remains STORE_TECHNOLOGY_NOT_APPROVED;
 - no production code, tests, benchmark, approval, or artifact changes are authorized;
 - D2b is blocked;
 - formalExecutionAllowed remains false.
