@@ -1,6 +1,7 @@
 /// <reference types="node" />
 
 import { buildApi } from "./api";
+import { createApiShutdown } from "./apiShutdown";
 import { createPublicIdentityProvider } from "./publicIdentityProvider";
 import { PublicIdentityStore } from "./publicIdentityStore";
 
@@ -11,17 +12,11 @@ if (storePath === undefined || storePath.length === 0) throw new Error("D2A_IDEN
 const store = new PublicIdentityStore(storePath);
 const provider = createPublicIdentityProvider(store);
 const app = buildApi(provider);
-let shuttingDown = false;
+const shutdown = createApiShutdown(app, provider);
 
-async function shutdown(): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  await app.close();
-  provider.close();
-}
-
-process.once("SIGINT", () => { void shutdown(); });
-process.once("SIGTERM", () => { void shutdown(); });
+const handleSignal = () => { void shutdown().catch((error) => console.error("API shutdown failed", error)); };
+process.once("SIGINT", handleSignal);
+process.once("SIGTERM", handleSignal);
 
 try {
   await app.listen({ host, port });

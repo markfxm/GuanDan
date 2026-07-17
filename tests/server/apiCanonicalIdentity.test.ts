@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildPublicGameIdentity, type PublicGameIdentity } from "../../src/game/publicEvent";
 import { createPublicIdentityProvider, type PublicIdentityProvider } from "../../src/server/publicIdentityProvider";
+import type { PublicIdentityAllocation } from "../../src/server/publicIdentityStore";
 import { PublicIdentityStore } from "../../src/server/publicIdentityStore";
 import { buildApi } from "../../src/server/api";
 import { createRoom as createGameRoom } from "../../src/game/room";
@@ -83,13 +84,32 @@ describe("canonical production room creation", () => {
     expect(privateRoom?.publicLedger?.gameId).toBe(privateRoom?.publicIdentity?.gameId);
   });
 
-  it("returns the same transport room for a same-key same-descriptor retry", async () => {
-    const h = harness();
+  it("returns the same room without repeating room creation or commit side effects", async () => {
+    let committed = false;
+    const identity = buildPublicGameIdentity("b".repeat(64), 0, 0, "production-session");
+    const allocation = (): PublicIdentityAllocation => ({
+      status: committed ? "idempotent" : "new",
+      lifecycle: committed ? "room-committed" : "allocated",
+      descriptorHash: "descriptor-hash",
+      gameSequence: "1",
+      publicIdentity: identity,
+    });
+    const allocate = vi.fn(allocation);
+    const markRoomCommitted = vi.fn(() => {
+      committed = true;
+      return allocation();
+    });
+    const provider: PublicIdentityProvider = { allocate, markRoomCommitted, markAllocated: vi.fn(() => { throw new Error("MARK_ALLOCATED_NOT_USED"); }), close: vi.fn() };
+    const createRoom = vi.fn((input: Parameters<typeof createGameRoom>[0]) => createGameRoom(input));
+    const h = harness(provider, createRoom);
     const first = await h.app.inject({ method: "POST", url: "/api/rooms", headers: headers("retry"), payload: { rank: "10", seed: 1 } });
     const second = await h.app.inject({ method: "POST", url: "/api/rooms", headers: headers("retry"), payload: { rank: "10", seed: 1 } });
     expect(first.statusCode).toBe(200);
     expect(second.statusCode).toBe(200);
     expect(second.json().room.id).toBe(first.json().room.id);
+    expect(allocate).toHaveBeenCalledTimes(2);
+    expect(createRoom).toHaveBeenCalledTimes(1);
+    expect(markRoomCommitted).toHaveBeenCalledTimes(1);
     expect(h.registry.size).toBe(1);
   });
 
@@ -102,15 +122,31 @@ describe("canonical production room creation", () => {
     expect(h.registry.size).toBe(1);
   });
 
-  it("does not allow caller identity or sequence fields into the descriptor", async () => {
+  it.each([
+    ["publicIdentity", { publicIdentity: { gameId: "forbidden" } }],
+    ["gameSequence", { gameSequence: 99 }],
+    ["multiple identity fields", { publicIdentity: {}, gameSequence: 99, sessionIdentity: "forbidden" }],
+    ["unknown field", { unknownField: true }],
+  ])("rejects %s without provider, room, or allocation side effects", async (_label, extra) => {
     const allocate = vi.fn<PublicIdentityProvider["allocate"]>();
     const identity = buildPublicGameIdentity("a".repeat(64), 0, 0, "production-session");
     allocate.mockReturnValue({ status: "new", lifecycle: "allocated", descriptorHash: "hash", gameSequence: "1", publicIdentity: identity });
     const provider: PublicIdentityProvider = { allocate, markRoomCommitted: vi.fn(), markAllocated: () => { throw new Error("MARK_ALLOCATED_NOT_USED"); }, close: vi.fn() };
-    const h = harness(provider);
-    const response = await h.app.inject({ method: "POST", url: "/api/rooms", headers: headers("opaque"), payload: { rank: "10", seed: 1, gameSequence: 99, publicIdentity: identity } });
+    const createRoom = vi.fn();
+    const h = harness(provider, createRoom);
+    const response = await h.app.inject({ method: "POST", url: "/api/rooms", headers: headers("opaque"), payload: { rank: "10", seed: 1, ...extra } });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: "INVALID_CREATE_ROOM_REQUEST" });
+    expect(allocate).not.toHaveBeenCalled();
+    expect(createRoom).not.toHaveBeenCalled();
+    expect(h.registry.size).toBe(0);
+    expect(h.store.getAllocationByIdempotencyKey("opaque")).toBeUndefined();
+  });
+
+  it("accepts the allow-listed room body fields", async () => {
+    const h = harness();
+    const response = await h.app.inject({ method: "POST", url: "/api/rooms", headers: headers("allowed"), payload: { rank: "10", seed: 1, pendingTributeItems: [] } });
     expect(response.statusCode).toBe(200);
-    expect(allocate).toHaveBeenCalledWith({ descriptor: { rank: "10", seed: 1, normalizedPendingTributeItems: [] }, idempotencyKey: "opaque" });
   });
 
   it.each([
@@ -144,6 +180,30 @@ describe("canonical production room creation", () => {
     fail = false;
     const second = await h.app.inject({ method: "POST", url: "/api/rooms", headers: headers("room-failure"), payload: { rank: "10", seed: 1 } });
     expect(second.statusCode).toBe(200);
+    expect(createRoom).toHaveBeenCalledTimes(2);
+  });
+
+  it("rolls back maps when commit fails and retries the same allocation", async () => {
+    let commitAttempts = 0;
+    const identity = buildPublicGameIdentity("c".repeat(64), 0, 0, "production-session");
+    const provider: PublicIdentityProvider = {
+      allocate: vi.fn(({ idempotencyKey }): PublicIdentityAllocation => ({ status: commitAttempts === 0 ? "new" : "idempotent", lifecycle: "allocated", descriptorHash: idempotencyKey, gameSequence: "1", publicIdentity: identity })),
+      markRoomCommitted: vi.fn((): PublicIdentityAllocation => {
+        commitAttempts += 1;
+        if (commitAttempts === 1) throw new Error("commit failed");
+        return { status: "new", lifecycle: "room-committed", descriptorHash: "commit", gameSequence: "1", publicIdentity: identity };
+      }),
+      markAllocated: vi.fn(() => { throw new Error("MARK_ALLOCATED_NOT_USED"); }),
+      close: vi.fn(),
+    };
+    const createRoom = vi.fn((input: Parameters<typeof createGameRoom>[0]) => createGameRoom(input));
+    const h = harness(provider, createRoom);
+    const first = await h.app.inject({ method: "POST", url: "/api/rooms", headers: headers("commit-failure"), payload: { rank: "10", seed: 1 } });
+    expect(first.statusCode).toBe(500);
+    expect(h.registry.size).toBe(0);
+    const second = await h.app.inject({ method: "POST", url: "/api/rooms", headers: headers("commit-failure"), payload: { rank: "10", seed: 1 } });
+    expect(second.statusCode).toBe(200);
+    expect(h.registry.size).toBe(1);
     expect(createRoom).toHaveBeenCalledTimes(2);
   });
 

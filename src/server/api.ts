@@ -152,7 +152,11 @@ export function buildApi(provider: PublicIdentityProvider, options: BuildApiOpti
   });
 
   app.post<{ Body: CreateRoomBody }>("/api/rooms", async (request, reply) => {
-    const { rank = DEFAULT_RANK, seed, pendingTributeItems } = request.body ?? {};
+    if (!isAllowedCreateRoomBody(request.body)) {
+      return reply.code(400).send({ error: "INVALID_CREATE_ROOM_REQUEST" });
+    }
+
+    const { rank = DEFAULT_RANK, seed, pendingTributeItems } = request.body;
     let idempotencyKey: string;
     try {
       idempotencyKey = validateIdempotencyKey(request.headers["idempotency-key"]);
@@ -323,6 +327,27 @@ export function buildApi(provider: PublicIdentityProvider, options: BuildApiOpti
   });
 
   return app;
+}
+
+const ALLOWED_CREATE_ROOM_KEYS = new Set(["rank", "seed", "pendingTributeItems"]);
+
+function isAllowedCreateRoomBody(value: unknown): value is CreateRoomBody {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+
+  let descriptors: PropertyDescriptorMap;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    return false;
+  }
+
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (typeof key !== "string" || !ALLOWED_CREATE_ROOM_KEYS.has(key)) return false;
+    const descriptor = descriptors[key];
+    if (descriptor === undefined || descriptor.enumerable !== true || descriptor.get !== undefined || descriptor.set !== undefined) return false;
+  }
+
+  return true;
 }
 
 function isValidOptionalInteger(value: unknown): value is number | undefined {
