@@ -3,8 +3,11 @@ import { createDeck, RANKS, SUITS, type Card, type GameRank, type JokerRank, typ
 import { generatePlans } from "../engine/planner";
 import { scorePlans } from "../engine/scorer";
 import { dealHand, validateHand } from "../engine/validation";
-import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, type RoomState, type Seat } from "../game/room";
+import { advanceOpeningTribute, createRoom as createGameRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, type RoomState, type Seat } from "../game/room";
 import type { TributeItem } from "../game/settlement";
+import { canonicalizeRoomRequestDescriptor, InvalidCanonicalRoomDescriptorError, validateIdempotencyKey, type CanonicalRoomRequestDescriptor } from "./publicIdentityDescriptor";
+import type { PublicIdentityProvider } from "./publicIdentityProvider";
+import { IdempotencyConflictError, IdentityStoreBusyError } from "./publicIdentityStore";
 
 type DealBody = {
   rank?: unknown;
@@ -45,9 +48,18 @@ const VALID_RANKS = new Set<Rank>(RANKS);
 const VALID_SUITS = new Set(SUITS);
 const CANONICAL_CARDS_BY_ID = new Map(createDeck().map((card) => [card.id, card]));
 
-export function buildApi() {
+export type BuildApiOptions = Readonly<{
+  onRoomRegistry?: (rooms: ReadonlyMap<string, RoomState>) => void;
+  createRoom?: typeof createGameRoom;
+}>;
+
+export function buildApi(provider: PublicIdentityProvider, options: BuildApiOptions = {}) {
+  if (provider === undefined) throw new Error("PUBLIC_IDENTITY_PROVIDER_REQUIRED");
   const app = Fastify({ logger: false });
   const rooms = new Map<string, RoomState>();
+  const canonicalGameIdToTransportRoomId = new Map<string, string>();
+  const roomCreator = options.createRoom ?? createGameRoom;
+  options.onRoomRegistry?.(rooms);
 
   app.addHook("onRequest", async (request, reply) => {
     const origin = request.headers.origin;
@@ -59,7 +71,7 @@ export function buildApi() {
 
     reply.header("Vary", "Origin");
     reply.header("Access-Control-Allow-Methods", "POST, OPTIONS");
-    reply.header("Access-Control-Allow-Headers", "Content-Type");
+    reply.header("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key");
 
     if (request.method === "OPTIONS") {
       return reply.code(204).send();
@@ -141,13 +153,20 @@ export function buildApi() {
 
   app.post<{ Body: CreateRoomBody }>("/api/rooms", async (request, reply) => {
     const { rank = DEFAULT_RANK, seed, pendingTributeItems } = request.body ?? {};
+    let idempotencyKey: string;
+    try {
+      idempotencyKey = validateIdempotencyKey(request.headers["idempotency-key"]);
+    } catch {
+      return reply.code(400).send({ error: "INVALID_ROOM_CREATION_REQUEST" });
+    }
+
     const invalidRank = validateGameRank(rank);
 
     if (invalidRank !== undefined) {
       return reply.code(400).send(invalidRank);
     }
 
-    if (!isValidOptionalInteger(seed)) {
+    if (!isValidRequiredInteger(seed)) {
       return reply.code(400).send(INVALID_SEED_ERROR);
     }
 
@@ -155,8 +174,52 @@ export function buildApi() {
       return reply.code(400).send({ valid: false, errors: ["pendingTributeItems must be valid seat pairs."], warnings: [] });
     }
 
-    const room = createRoom({ rank: rank as GameRank, seed, pendingTributeItems });
+    let descriptor: CanonicalRoomRequestDescriptor;
+    let allocation;
+    try {
+      descriptor = canonicalizeRoomRequestDescriptor({
+        rank: rank as GameRank,
+        seed,
+        pendingTributeItems: pendingTributeItems ?? [],
+      });
+      allocation = provider.allocate({ descriptor, idempotencyKey });
+    } catch (error) {
+      return sendRoomCreationError(reply, error);
+    }
+
+    const existingTransportId = canonicalGameIdToTransportRoomId.get(allocation.publicIdentity.gameId);
+    if (existingTransportId !== undefined) {
+      const existingRoom = rooms.get(existingTransportId);
+      if (existingRoom !== undefined) return { room: getPublicRoom(existingRoom, 0, { ensurePlans: false }) };
+      canonicalGameIdToTransportRoomId.delete(allocation.publicIdentity.gameId);
+    }
+
+    if (allocation.lifecycle === "room-committed") {
+      return reply.code(410).send({ error: "ROOM_STATE_UNAVAILABLE_AFTER_RESTART" });
+    }
+
+    let room: RoomState;
+    try {
+      room = roomCreator({
+        publicIdentity: allocation.publicIdentity,
+        rank: rank as GameRank,
+        seed,
+        pendingTributeItems: Array.from(descriptor.normalizedPendingTributeItems),
+      });
+    } catch (error) {
+      request.log.error(error, "canonical room creation failed");
+      return reply.code(500).send({ error: "ROOM_CREATION_FAILED" });
+    }
+
     rooms.set(room.id, room);
+    canonicalGameIdToTransportRoomId.set(allocation.publicIdentity.gameId, room.id);
+    try {
+      provider.markRoomCommitted(idempotencyKey);
+    } catch (error) {
+      rooms.delete(room.id);
+      canonicalGameIdToTransportRoomId.delete(allocation.publicIdentity.gameId);
+      return sendRoomCreationError(reply, error);
+    }
     return { room: getPublicRoom(room, 0, { ensurePlans: false }) };
   });
 
@@ -264,6 +327,24 @@ export function buildApi() {
 
 function isValidOptionalInteger(value: unknown): value is number | undefined {
   return value === undefined || (typeof value === "number" && Number.isInteger(value) && Number.isFinite(value));
+}
+
+function isValidRequiredInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value);
+}
+
+function sendRoomCreationError(reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }, error: unknown): unknown {
+  const code = (error as { code?: unknown })?.code;
+  if (error instanceof InvalidCanonicalRoomDescriptorError || code === "INVALID_CANONICAL_ROOM_DESCRIPTOR") {
+    return reply.code(400).send({ error: "INVALID_ROOM_CREATION_REQUEST" });
+  }
+  if (error instanceof IdempotencyConflictError || code === "IDEMPOTENCY_CONFLICT") {
+    return reply.code(409).send({ error: "IDEMPOTENCY_CONFLICT" });
+  }
+  if (error instanceof IdentityStoreBusyError || code === "IDENTITY_STORE_BUSY") {
+    return reply.code(503).send({ error: "IDENTITY_STORE_BUSY" });
+  }
+  return reply.code(500).send({ error: "ROOM_CREATION_FAILED" });
 }
 
 function isValidOptionalPlanCount(value: unknown): value is number | undefined {
