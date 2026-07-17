@@ -1,0 +1,217 @@
+name: D2a1 Verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact commit SHA to verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Ubuntu Node 22.22.2 exact-commit gate
+    runs-on: ubuntu-latest
+    env:
+      INPUT_COMMIT_SHA: ${{ inputs.commit_sha }}
+      D0_SOURCE_COMMIT: e2a20e18f8e5c0871db38ad69426262e43766ce1
+      ARTIFACT_DIR: artifacts/d2a1-verification
+
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Initialize evidence directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$ARTIFACT_DIR/status"
+
+      - name: Set up Node.js 22.22.2
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.2
+          cache: npm
+
+      - name: Checkout and verify exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$INPUT_COMMIT_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          git fetch --no-tags origin "$INPUT_COMMIT_SHA"
+          git checkout --detach "$INPUT_COMMIT_SHA"
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$actual_sha" == "$INPUT_COMMIT_SHA" ]]
+
+      - name: Initialize evidence directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$ARTIFACT_DIR/status"
+          {
+            echo "commitSha=$INPUT_COMMIT_SHA"
+            echo "runnerOs=$RUNNER_OS"
+            echo "runnerArch=$RUNNER_ARCH"
+            echo "nodeVersion=$(node --version)"
+            echo "npmVersion=$(npm --version)"
+            echo "uname=$(uname -a)"
+            echo "checkoutHead=$(git rev-parse HEAD)"
+          } > "$ARTIFACT_DIR/environment.txt"
+          git rev-parse HEAD > "$ARTIFACT_DIR/commit.txt"
+
+      - name: Prepare isolated D0 source worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          D0_SOURCE_WORKTREE="$RUNNER_TEMP/d2a1-d0-fixture-source"
+          printf '%s\n' "$D0_SOURCE_WORKTREE" > "$ARTIFACT_DIR/d0-source-worktree.txt"
+          git worktree add --detach "$D0_SOURCE_WORKTREE" "$D0_SOURCE_COMMIT"
+          [[ "$(git -C "$D0_SOURCE_WORKTREE" rev-parse HEAD)" == "$D0_SOURCE_COMMIT" ]]
+          [[ -z "$(git -C "$D0_SOURCE_WORKTREE" status --porcelain -- src)" ]]
+          git -C "$D0_SOURCE_WORKTREE" describe --tags --exact-match > "$ARTIFACT_DIR/d0-source-tag.txt"
+
+      - name: Run formal Task 2 verification gates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_gate() {
+            local key="$1"
+            local log_name="$2"
+            shift 2
+            printf 'command=%q ' "$@" > "$ARTIFACT_DIR/${key}.command.txt"
+            printf '\n' >> "$ARTIFACT_DIR/${key}.command.txt"
+            if "$@" 2>&1 | tee "$ARTIFACT_DIR/$log_name"; then
+              printf 'PASS\n' > "$ARTIFACT_DIR/status/$key.status"
+            else
+              printf 'FAIL\n' > "$ARTIFACT_DIR/status/$key.status"
+              return 1
+            fi
+          }
+
+          D0_SOURCE_WORKTREE="$(cat "$ARTIFACT_DIR/d0-source-worktree.txt")"
+
+          run_gate npm-ci npm-ci.log npm ci
+
+          run_gate portability portability.log \
+            npx vitest run \
+              tests/tooling/npmTestCollectionContract.test.ts \
+              --testTimeout=120000 \
+              --reporter=verbose
+
+          run_gate task1-focused task1-focused.log \
+            npx vitest run \
+              tests/server/publicIdentityDescriptor.test.ts \
+              tests/server/publicIdentityProvider.test.ts \
+              tests/server/publicIdentityConcurrency.test.ts \
+              --testTimeout=120000 \
+              --reporter=verbose
+
+          run_gate task2-focused task2-focused.log \
+            npx vitest run \
+              tests/server/api.test.ts \
+              tests/server/apiCanonicalIdentity.test.ts \
+              tests/server/apiShutdown.test.ts \
+              tests/server/publicRoomLegacyResponse.test.ts \
+              --testTimeout=120000 \
+              --reporter=verbose
+
+          run_gate npm-test npm-test.log npm test -- --reporter=verbose
+
+          run_gate tsc tsc.log npx tsc --noEmit
+
+          run_gate build build.log npm run build
+
+          run_gate d0-fixture d0-fixture.log \
+            npx tsx scripts/generateD0KeepCurrentFixtures.ts \
+              --source-worktree "$D0_SOURCE_WORKTREE" \
+              --source-commit "$D0_SOURCE_COMMIT" \
+              --output tests/ai/fixtures/d0KeepCurrentCases.json \
+              --generator-version d0-fixture-v1 \
+              --check-only
+
+          run_gate bundle-scan bundle-scan.log bash -c '
+            set -euo pipefail
+            matches="$(grep -R -n -E "better-sqlite3|sqlite3|node:sqlite|better_sqlite3\\.node" dist || true)"
+            if [[ -n "$matches" ]]; then
+              printf "%s\\n" "$matches"
+              printf "nativeReferenceCount=%s\\n" "$(printf "%s\\n" "$matches" | sed "/^$/d" | wc -l)"
+              exit 1
+            fi
+            printf "nativeReferenceCount=0\\n"
+          '
+
+      - name: Generate verification summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const { execFileSync } = require("node:child_process");
+
+          const dir = process.env.ARTIFACT_DIR;
+          const read = (name) => {
+            const file = path.join(dir, name);
+            return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+          };
+          const status = (key) => read(path.join("status", `${key}.status`)).trim() || "NOT_RUN";
+          const npmLog = read("npm-test.log").replace(/\u001b\[[0-9;]*m/g, "");
+          const uniqueFiles = (pattern) => new Set(
+            [...npmLog.matchAll(/tests\/[^\s>]+\.test\.[cm]?[jt]sx?/g)]
+              .map((match) => match[0])
+              .filter((file) => file.startsWith(pattern)),
+          ).size;
+          const firstNumber = (regex) => {
+            const match = npmLog.match(regex);
+            return match ? Number(match[1]) : 0;
+          };
+          const bundleMatch = read("bundle-scan.log").match(/nativeReferenceCount=(\d+)/);
+          const summary = {
+            commitSha: process.env.INPUT_COMMIT_SHA,
+            runnerOs: process.env.RUNNER_OS,
+            runnerArch: process.env.RUNNER_ARCH,
+            nodeVersion: process.version,
+            npmVersion: execFileSync("npm", ["--version"], { encoding: "utf8" }).trim(),
+            portabilityResult: status("portability"),
+            task1FocusedResult: status("task1-focused"),
+            task2FocusedResult: status("task2-focused"),
+            npmTestResult: status("npm-test"),
+            npmTestFiles: firstNumber(/Test Files\s+(\d+)\s+passed/),
+            npmTestTests: firstNumber(/Tests\s+(\d+)\s+passed/),
+            benchmarkCollected: uniqueFiles("tests/benchmark/"),
+            simulationCollected: uniqueFiles("tests/simulation/"),
+            performanceCollected: uniqueFiles("tests/performance/"),
+            tscResult: status("tsc"),
+            buildResult: status("build"),
+            d0FixtureResult: status("d0-fixture"),
+            browserNativeReferenceCount: bundleMatch ? Number(bundleMatch[1]) : null,
+            formalExecutionAllowed: false,
+          };
+          fs.writeFileSync(path.join(dir, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
+          NODE
+
+      - name: Remove temporary D0 source worktree
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f "$ARTIFACT_DIR/d0-source-worktree.txt" ]]; then
+            D0_SOURCE_WORKTREE="$(cat "$ARTIFACT_DIR/d0-source-worktree.txt")"
+            git worktree remove --force "$D0_SOURCE_WORKTREE"
+          fi
+
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d2a1-verification-${{ inputs.commit_sha }}
+          path: artifacts/d2a1-verification/
+          if-no-files-found: error
+          retention-days: 14
