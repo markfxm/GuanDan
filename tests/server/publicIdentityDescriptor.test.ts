@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canonicalizeRoomRequestDescriptor,
   hashCanonicalRoomRequestDescriptor,
+  InvalidCanonicalRoomDescriptorError,
   validateIdempotencyKey,
 } from "../../src/server/publicIdentityDescriptor";
 
@@ -74,5 +75,64 @@ describe("CanonicalRoomRequestDescriptor", () => {
     const before = JSON.stringify(input);
     canonicalizeRoomRequestDescriptor(input);
     expect(JSON.stringify(input)).toBe(before);
+  });
+
+  it("rejects top-level accessors without executing them", () => {
+    let rankReads = 0;
+    let seedReads = 0;
+    let tributeReads = 0;
+    const input = {} as Record<string, unknown>;
+    Object.defineProperties(input, {
+      rank: { enumerable: true, get: () => { rankReads += 1; return "2"; } },
+      seed: { enumerable: true, get: () => { seedReads += 1; return 1; } },
+      normalizedPendingTributeItems: { enumerable: true, get: () => { tributeReads += 1; return []; } },
+    });
+
+    expect(() => canonicalizeRoomRequestDescriptor(input)).toThrow(InvalidCanonicalRoomDescriptorError);
+    expect(rankReads).toBe(0);
+    expect(seedReads).toBe(0);
+    expect(tributeReads).toBe(0);
+  });
+
+  it("rejects setter-only, non-enumerable, and legal-valued accessors", () => {
+    const setterOnly = {} as Record<string, unknown>;
+    Object.defineProperty(setterOnly, "rank", { enumerable: true, set: () => undefined });
+    Object.defineProperty(setterOnly, "seed", { enumerable: true, value: 1 });
+    expect(() => canonicalizeRoomRequestDescriptor(setterOnly)).toThrow(InvalidCanonicalRoomDescriptorError);
+
+    const nonEnumerable = {} as Record<string, unknown>;
+    Object.defineProperty(nonEnumerable, "rank", { enumerable: false, value: "2" });
+    Object.defineProperty(nonEnumerable, "seed", { enumerable: true, value: 1 });
+    expect(() => canonicalizeRoomRequestDescriptor(nonEnumerable)).toThrow(InvalidCanonicalRoomDescriptorError);
+
+    let nestedPayerReads = 0;
+    let nestedReceiverReads = 0;
+    const item = {} as Record<string, unknown>;
+    Object.defineProperties(item, {
+      payer: { enumerable: true, get: () => { nestedPayerReads += 1; return 0; } },
+      receiver: { enumerable: true, get: () => { nestedReceiverReads += 1; return 1; } },
+    });
+    const nested = { rank: "2", seed: 1, pendingTributeItems: [item] };
+    expect(() => canonicalizeRoomRequestDescriptor(nested)).toThrow(InvalidCanonicalRoomDescriptorError);
+    expect(nestedPayerReads).toBe(0);
+    expect(nestedReceiverReads).toBe(0);
+
+    let throwingGetterReads = 0;
+    const throwing = {} as Record<string, unknown>;
+    Object.defineProperties(throwing, {
+      rank: { enumerable: true, get: () => { throwingGetterReads += 1; throw new Error("must not execute"); } },
+      seed: { enumerable: true, value: 1 },
+    });
+    expect(() => canonicalizeRoomRequestDescriptor(throwing)).toThrow(InvalidCanonicalRoomDescriptorError);
+    expect(throwingGetterReads).toBe(0);
+  });
+
+  it("accepts ordinary data properties with unchanged canonical hash", () => {
+    const descriptor = { rank: "2" as const, seed: 1, pendingTributeItems: [] };
+    const canonical = canonicalizeRoomRequestDescriptor(descriptor);
+    expect(canonical).toEqual({ rank: "2", seed: 1, normalizedPendingTributeItems: [] });
+    expect(hashCanonicalRoomRequestDescriptor(canonical)).toBe(
+      hashCanonicalRoomRequestDescriptor(canonicalizeRoomRequestDescriptor(canonical)),
+    );
   });
 });
