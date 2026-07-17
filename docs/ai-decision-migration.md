@@ -1,5 +1,10 @@
 # AI 决策迁移映射（C1）
 
+> C3b update: `decideAiAction` is now the sole production decision body.
+> `src/game/ai.ts` is a thin compatibility adapter; the former implementation
+> lives only at `tests/helpers/legacyAiReference.ts` for shadow/reference tests.
+> There is no production legacy switch, fallback, or shadow double execution.
+
 本轮保持 `src/game/ai.ts` 的 `chooseAiAction` 作为生产入口，仅提取可独立验证的纯能力；不导入 RoomState，也不读取隐藏手牌。
 
 | 当前函数/区域 | 目标模块 | 外部调用方 | 纯函数 | 隐藏信息 | C1 状态 |

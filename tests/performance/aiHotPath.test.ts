@@ -1,6 +1,6 @@
 import { createDeck } from "../../src/engine/cards";
 import { getDetectGroupsCallCount, resetDetectGroupsCallCount } from "../../src/engine/groups";
-import { chooseAiAction } from "../../src/game/ai";
+import { chooseAiAction } from "../helpers/legacyAiReference";
 import { createRoom, getPublicRoom, runAiStep } from "../../src/game/room";
 import { getCreateHandAnalysisCallCount, resetCreateHandAnalysisCallCount } from "../../src/game/protectedGroups";
 

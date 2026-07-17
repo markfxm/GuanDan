@@ -2,7 +2,7 @@ import { analyzeHand } from "../../src/ai/analysis/handAnalyzer";
 import { decideAiAction } from "../../src/ai/aiDecisionEngine";
 import type { AiAction, AiDecision, PolicyVerdict } from "../../src/ai/contracts";
 import { evaluatePowerGroupUse } from "../../src/ai/policy/powerGroupPolicy";
-import { chooseAiAction } from "../../src/game/ai";
+import { chooseAiAction } from "./legacyAiReference";
 import { canBeatPlay, classifyPlay } from "../../src/game/playRules";
 import type { AiDecisionScenario } from "../fixtures/aiDecisionScenarios";
 

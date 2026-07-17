@@ -1,6 +1,6 @@
 import { createDeck, type Card, type Rank, type Suit } from "../../src/engine/cards";
 import { generatePlans } from "../../src/engine/planner";
-import { chooseAiAction } from "../../src/game/ai";
+import { chooseAiAction } from "../helpers/legacyAiReference";
 import { canBeatPlay, classifyPlay } from "../../src/game/playRules";
 import { assessProtectedGroupUse, buildAiCandidatePool } from "../../src/game/protectedGroups";
 
