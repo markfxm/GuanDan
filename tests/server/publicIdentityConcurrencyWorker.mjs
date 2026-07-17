@@ -1,18 +1,18 @@
-import { parentPort, threadId, workerData } from "node:worker_threads";
+import { existsSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 import { canonicalizeRoomRequestDescriptor } from "../../src/server/publicIdentityDescriptor.ts";
 import { createPublicIdentityProvider } from "../../src/server/publicIdentityProvider.ts";
 import { PublicIdentityStore } from "../../src/server/publicIdentityStore.ts";
 
-const input = workerData;
-const signal = new Int32Array(input.startSignal);
+const input = JSON.parse(process.env.D2A1_WORKER_INPUT ?? "");
 
 function log(stage, extra = {}) {
-  parentPort?.postMessage({ stage, worker: threadId, at: Date.now(), ...extra });
+  process.stdout.write(`${JSON.stringify({ stage, worker: process.pid, at: Date.now(), ...extra })}\n`);
 }
 
 async function run() {
   log("worker-ready");
-  Atomics.wait(signal, 0, 0);
+  while (!existsSync(input.barrierPath)) await delay(5);
   log("connection-open-start");
   let store;
   try {
@@ -39,4 +39,8 @@ async function run() {
   }
 }
 
-void run();
+void run().catch((error) => {
+  const cause = error ?? {};
+  log("error", { code: cause.code, name: cause.name, message: cause.message });
+  process.exitCode = 1;
+});

@@ -1,8 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { Worker } from "node:worker_threads";
 import { describe, expect, it } from "vitest";
 import { PublicIdentityStore } from "../../src/server/publicIdentityStore";
 
@@ -20,35 +19,70 @@ function removeTemporaryDatabase(directory: string): void {
 }
 
 async function runPair(databasePath: string, keyForWorker: (index: number) => string, seedForWorker: (index: number) => number): Promise<WorkerMessage[]> {
-  const startSignal = new SharedArrayBuffer(4);
-  const workerUrl = pathToFileURL(join(process.cwd(), "tests/server/publicIdentityConcurrencyWorker.mjs"));
-  const workers = [0, 1].map((index) => new Worker(workerUrl, {
-    execArgv: ["--import=tsx/esm"],
-    workerData: {
-      databasePath,
-      installationIdentity: "00000000-0000-4000-8000-000000000001",
-      idempotencyKey: keyForWorker(index),
-      seed: seedForWorker(index),
-      startSignal,
-    },
+  const barrierPath = join(databasePath, "..", "start.barrier");
+  const workerPath = join(process.cwd(), "tests/server/publicIdentityConcurrencyWorker.mjs");
+  const tsxCli = join(process.cwd(), "node_modules/tsx/dist/cli.mjs");
+  const sessions = [0, 1].map((index) => spawnChild(workerPath, tsxCli, {
+    databasePath,
+    installationIdentity: "00000000-0000-4000-8000-000000000001",
+    idempotencyKey: keyForWorker(index),
+    seed: seedForWorker(index),
+    barrierPath,
   }));
+  try {
+    await Promise.all(sessions.map((session) => session.ready));
+    writeFileSync(barrierPath, "go\n");
+    const results = await Promise.all(sessions.map((session) => session.done));
+    return results.flat();
+  } finally {
+    if (existsSync(barrierPath)) rmSync(barrierPath, { force: true });
+    for (const session of sessions) session.child.kill();
+  }
+}
+
+function spawnChild(workerPath: string, tsxCli: string, input: Record<string, string | number>): {
+  child: ChildProcessWithoutNullStreams;
+  ready: Promise<void>;
+  done: Promise<WorkerMessage[]>;
+} {
+  const child = spawn(process.execPath, [tsxCli, workerPath], {
+    cwd: process.cwd(),
+    env: { ...process.env, D2A1_WORKER_INPUT: JSON.stringify(input) },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   const messages: WorkerMessage[] = [];
-  const completion = workers.map((worker) => new Promise<void>((resolve, reject) => {
-    worker.on("message", (message: WorkerMessage) => messages.push(message));
-    worker.once("error", reject);
-    worker.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`worker exit ${code}`)));
-  }));
-  const ready = workers.map((worker) => new Promise<void>((resolve, reject) => {
-    worker.once("error", reject);
-    worker.on("message", (message: WorkerMessage) => {
-      if (message.stage === "worker-ready") resolve();
-    });
-  }));
-  await Promise.all(ready);
-  Atomics.store(new Int32Array(startSignal), 0, 1);
-  Atomics.notify(new Int32Array(startSignal), 0, workers.length);
-  await Promise.all(completion);
-  return messages;
+  let readyResolve!: () => void;
+  let readyReject!: (error: Error) => void;
+  let doneResolve!: (messages: WorkerMessage[]) => void;
+  let doneReject!: (error: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+  const done = new Promise<WorkerMessage[]>((resolve, reject) => { doneResolve = resolve; doneReject = reject; });
+  let stdout = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+    const lines = stdout.split("\n");
+    stdout = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const message = JSON.parse(line) as WorkerMessage;
+      messages.push(message);
+      if (message.stage === "worker-ready") readyResolve();
+    }
+  });
+  child.stderr.setEncoding("utf8");
+  let stderr = "";
+  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+  child.once("error", (error) => { readyReject(error); doneReject(error); });
+  child.once("exit", (code) => {
+    if (code === 0) doneResolve(messages);
+    else {
+      const error = new Error(`worker process exit ${code}: ${stderr}`);
+      readyReject(error);
+      doneReject(error);
+    }
+  });
+  return { child, ready, done };
 }
 
 describe("Public identity store concurrency", () => {
