@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PublicIdentityStore } from "../../src/server/publicIdentityStore";
 
-type WorkerMessage = Readonly<{ stage: string; worker: number; at: number; [key: string]: unknown }>;
+type WorkerMessage = Readonly<{ stage: string; requestId: number; worker: number; [key: string]: unknown }>;
 const stressRounds = Number(process.env.D2A1_STRESS_ROUNDS ?? "10");
 const reportRetries = process.env.D2A1_REPORT_RETRIES === "1";
 
