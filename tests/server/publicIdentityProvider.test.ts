@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { canonicalizeRoomRequestDescriptor } from "../../src/server/publicIdentityDescriptor";
 import { createPublicIdentityProvider } from "../../src/server/publicIdentityProvider";
-import { PublicIdentityStore } from "../../src/server/publicIdentityStore";
+import { IdempotencyConflictError, PublicIdentityStore } from "../../src/server/publicIdentityStore";
 
 function temporaryDatabase(): { directory: string; path: string } {
   const directory = mkdtempSync(join(tmpdir(), "d2a1-task1-"));
@@ -71,7 +71,13 @@ describe("PublicIdentityStore and provider", () => {
       const retry = provider.allocate({ descriptor: descriptor(1), idempotencyKey: "same-key" });
       expect(retry.status).toBe("idempotent");
       expect({ ...retry, status: "new" }).toEqual(first);
-      expect(() => provider.allocate({ descriptor: descriptor(2), idempotencyKey: "same-key" })).toThrow("IDEMPOTENCY_CONFLICT");
+      try {
+        provider.allocate({ descriptor: descriptor(2), idempotencyKey: "same-key" });
+        throw new Error("expected conflict");
+      } catch (error) {
+        expect(error).toBeInstanceOf(IdempotencyConflictError);
+        expect((error as IdempotencyConflictError).code).toBe("IDEMPOTENCY_CONFLICT");
+      }
       expect(provider.allocate({ descriptor: descriptor(2), idempotencyKey: "second-key" }).gameSequence).toBe("2");
       provider.close();
     } finally {

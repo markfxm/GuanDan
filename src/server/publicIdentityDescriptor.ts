@@ -19,24 +19,27 @@ export type CanonicalRoomRequestInput = Readonly<{
 }>;
 
 export function canonicalizeRoomRequestDescriptor(input: unknown): CanonicalRoomRequestDescriptor {
-  if (!isRecord(input)) throw new Error("DESCRIPTOR_INVALID");
+  if (!isPlainRecord(input)) throw new Error("DESCRIPTOR_INVALID");
   if ("sessionIdentity" in input || "gameSequence" in input) throw new Error("DESCRIPTOR_FORBIDDEN_FIELD");
+  assertAllowedKeys(input, ["rank", "seed", "pendingTributeItems", "normalizedPendingTributeItems"]);
+  if (!hasOwn(input, "rank") || !hasOwn(input, "seed")) throw new Error("DESCRIPTOR_INVALID");
   if (!isGameRank(input.rank) || !Number.isSafeInteger(input.seed)) throw new Error("DESCRIPTOR_INVALID");
-  const rawItems = input.pendingTributeItems ?? [];
+  const hasPendingItems = hasOwn(input, "pendingTributeItems");
+  const hasNormalizedItems = hasOwn(input, "normalizedPendingTributeItems");
+  if (hasPendingItems && hasNormalizedItems) throw new Error("DESCRIPTOR_INVALID");
+  const rawItems = hasPendingItems ? input.pendingTributeItems : hasNormalizedItems ? input.normalizedPendingTributeItems : [];
   if (!Array.isArray(rawItems)) throw new Error("DESCRIPTOR_INVALID");
   const normalizedPendingTributeItems = rawItems.map((item) => {
-    if (!isRecord(item) || !isSeat(item.payer) || !isSeat(item.receiver)) throw new Error("DESCRIPTOR_INVALID");
+    if (!isPlainRecord(item)) throw new Error("DESCRIPTOR_INVALID");
+    assertAllowedKeys(item, ["payer", "receiver"]);
+    if (!hasOwn(item, "payer") || !hasOwn(item, "receiver") || !isSeat(item.payer) || !isSeat(item.receiver)) throw new Error("DESCRIPTOR_INVALID");
     return Object.freeze({ payer: item.payer, receiver: item.receiver });
   }).sort((left, right) => left.payer - right.payer || left.receiver - right.receiver);
   return Object.freeze({ rank: input.rank, seed: input.seed, normalizedPendingTributeItems: Object.freeze(normalizedPendingTributeItems) });
 }
 
 export function hashCanonicalRoomRequestDescriptor(descriptor: CanonicalRoomRequestDescriptor): string {
-  const canonical = canonicalizeRoomRequestDescriptor({
-    rank: descriptor.rank,
-    seed: descriptor.seed,
-    pendingTributeItems: descriptor.normalizedPendingTributeItems,
-  });
+  const canonical = canonicalizeRoomRequestDescriptor(descriptor);
   const bytes = new TextEncoder().encode(JSON.stringify({
     rank: canonical.rank,
     seed: canonical.seed,
@@ -61,6 +64,22 @@ function isSeat(value: unknown): value is CanonicalTributeItem["payer"] {
   return value === 0 || value === 1 || value === 2 || value === 3;
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function isPlainRecord(value: unknown): value is Record<string, any> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function assertAllowedKeys(value: Record<string, unknown>, allowed: readonly string[]): void {
+  const allowedSet = new Set(allowed);
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowedSet.has(key)) throw new Error("DESCRIPTOR_UNKNOWN_FIELD");
+  }
+  for (const key in value) {
+    if (!allowedSet.has(key)) throw new Error("DESCRIPTOR_UNKNOWN_FIELD");
+  }
 }

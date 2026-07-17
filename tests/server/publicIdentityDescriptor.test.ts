@@ -54,4 +54,25 @@ describe("CanonicalRoomRequestDescriptor", () => {
     expect(() => validateIdempotencyKey("a".repeat(129))).toThrow("IDEMPOTENCY_KEY_INVALID");
     expect(() => validateIdempotencyKey("with/slash")).toThrow("IDEMPOTENCY_KEY_INVALID");
   });
+
+  it("rejects unknown, inherited, symbol, and non-plain descriptor fields without mutating input", () => {
+    expect(() => canonicalizeRoomRequestDescriptor({ rank: "2", seed: 1, pendingTributeItems: [], unexpected: true } as never)).toThrow("DESCRIPTOR_UNKNOWN_FIELD");
+    expect(() => canonicalizeRoomRequestDescriptor({ rank: "2", seed: 1, pendingTributeItems: [{ payer: 0, receiver: 1, unexpected: true }] } as never)).toThrow("DESCRIPTOR_UNKNOWN_FIELD");
+
+    const inherited = Object.create({ unexpected: true }) as Record<string, unknown>;
+    inherited.rank = "2";
+    inherited.seed = 1;
+    inherited.pendingTributeItems = [];
+    expect(() => canonicalizeRoomRequestDescriptor(inherited)).toThrow();
+
+    const symbol = Symbol("unexpected");
+    expect(() => canonicalizeRoomRequestDescriptor(Object.assign({ rank: "2", seed: 1, pendingTributeItems: [] }, { [symbol]: true }) as never)).toThrow("DESCRIPTOR_UNKNOWN_FIELD");
+    expect(() => canonicalizeRoomRequestDescriptor([])).toThrow("DESCRIPTOR_INVALID");
+
+    const items = [{ payer: 2 as const, receiver: 3 as const }, { payer: 0 as const, receiver: 1 as const }];
+    const input = { rank: "2" as const, seed: 1, pendingTributeItems: items };
+    const before = JSON.stringify(input);
+    canonicalizeRoomRequestDescriptor(input);
+    expect(JSON.stringify(input)).toBe(before);
+  });
 });

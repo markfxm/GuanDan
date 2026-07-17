@@ -10,6 +10,32 @@ import {
 
 export type AllocationLifecycle = "allocated" | "room-committed";
 
+export class IdempotencyConflictError extends Error {
+  public readonly code = "IDEMPOTENCY_CONFLICT" as const;
+  public readonly idempotencyKey: string;
+
+  public constructor(idempotencyKey: string) {
+    super("idempotency key is already bound to a different descriptor");
+    this.name = "IdempotencyConflictError";
+    this.idempotencyKey = idempotencyKey;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+export class IdentityStoreBusyError extends Error {
+  public readonly code = "IDENTITY_STORE_BUSY" as const;
+  public readonly attempts: number;
+  public readonly cause: unknown;
+
+  public constructor(attempts: number, cause: unknown) {
+    super("identity store remained busy after bounded retry");
+    this.name = "IdentityStoreBusyError";
+    this.attempts = attempts;
+    this.cause = cause;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 export type PublicIdentityAllocation = Readonly<{
   status: "new" | "idempotent";
   lifecycle: AllocationLifecycle;
@@ -21,18 +47,36 @@ export type PublicIdentityAllocation = Readonly<{
 type StoredAllocation = Omit<PublicIdentityAllocation, "status">;
 
 const GAME_ID_DOMAIN_SEPARATOR = "D2A-PUBLIC-GAME-ID-V1";
+const BUSY_RETRY_LIMIT = 3;
+const BUSY_RETRY_DELAY_MS = 100;
 
 export class PublicIdentityStore {
   private readonly database: Database.Database;
+  private busyRetryCount = 0;
 
   public constructor(databasePath: string, options: Readonly<{ installationIdentity?: string }> = {}) {
     this.database = new Database(databasePath);
-    this.database.defaultSafeIntegers();
-    this.database.pragma("foreign_keys = ON");
-    this.database.pragma("synchronous = FULL");
-    this.database.pragma("journal_mode = WAL");
-    this.database.pragma("busy_timeout = 5000");
-    this.database.exec(`
+    try {
+      this.database.defaultSafeIntegers();
+      this.database.pragma("busy_timeout = 5000");
+      this.database.pragma("foreign_keys = ON");
+      this.database.pragma("synchronous = FULL");
+      this.withBusyRetry(() => {
+        const journalMode = String(this.database.pragma("journal_mode", { simple: true })).toLowerCase();
+        if (journalMode !== "wal") this.database.pragma("journal_mode = WAL");
+      });
+      this.initializeSchemaAndInstallation(options.installationIdentity);
+    } catch (error) {
+      this.database.close();
+      throw error;
+    }
+  }
+
+  private initializeSchemaAndInstallation(requested?: string): void {
+    this.withBusyRetry(() => {
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(`
       CREATE TABLE IF NOT EXISTS d2a_metadata (
         key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
@@ -50,11 +94,22 @@ export class PublicIdentityStore {
         lifecycle TEXT NOT NULL CHECK (lifecycle IN ('allocated', 'room-committed'))
       );
     `);
-    this.bootstrapInstallationIdentity(options.installationIdentity);
+        this.bootstrapInstallationIdentityInTransaction(requested);
+        this.database.exec("COMMIT");
+      } catch (error) {
+        try { this.database.exec("ROLLBACK"); } catch { /* preserve the original initialization error */ }
+        throw error;
+      }
+    });
   }
 
   public getInstallationIdentity(): string {
     return this.readMetadata("installation_identity");
+  }
+
+  /** @internal diagnostics for bounded-concurrency verification. */
+  public getBusyRetryCount(): number {
+    return this.busyRetryCount;
   }
 
   /** @internal diagnostics for the approved server-store contract tests. */
@@ -73,7 +128,7 @@ export class PublicIdentityStore {
     const transaction = this.database.transaction(() => {
       const existing = this.readStoredAllocation(validKey);
       if (existing) {
-        if (existing.descriptorHash !== descriptorHash) throw new Error("IDEMPOTENCY_CONFLICT");
+        if (existing.descriptorHash !== descriptorHash) throw new IdempotencyConflictError(validKey);
         return Object.freeze({ status: "idempotent" as const, ...existing });
       }
       const next = this.readSequence();
@@ -92,7 +147,7 @@ export class PublicIdentityStore {
         publicIdentity,
       });
     }).immediate;
-    return transaction() as PublicIdentityAllocation;
+    return this.withBusyRetry(() => transaction()) as PublicIdentityAllocation;
   }
 
   public getAllocationByIdempotencyKey(idempotencyKey: string): PublicIdentityAllocation | undefined {
@@ -111,7 +166,7 @@ export class PublicIdentityStore {
       if (!committed || committed.lifecycle !== "room-committed") throw new Error("ALLOCATION_LIFECYCLE_INVALID");
       return Object.freeze({ status: "new" as const, ...committed });
     }).immediate;
-    return transaction() as PublicIdentityAllocation;
+    return this.withBusyRetry(() => transaction()) as PublicIdentityAllocation;
   }
 
   public markAllocated(idempotencyKey: string): never {
@@ -133,24 +188,25 @@ export class PublicIdentityStore {
   }
 
   public close(): void {
-    this.database.pragma("wal_checkpoint(TRUNCATE)");
-    this.database.close();
+    try {
+      this.withBusyRetry(() => this.database.pragma("wal_checkpoint(TRUNCATE)"));
+    } finally {
+      this.database.close();
+    }
   }
 
-  private bootstrapInstallationIdentity(requested?: string): void {
-    const transaction = this.database.transaction(() => {
-      const existing = this.readOptionalMetadata("installation_identity");
-      if (existing) {
-        if (requested !== undefined && requested !== existing) throw new Error("INSTALLATION_IDENTITY_CONFLICT");
-        return;
-      }
-      const identity = requested ?? randomUUID();
-      assertCanonicalInstallationIdentity(identity);
-      this.database.prepare("INSERT INTO d2a_metadata (key, value) VALUES ('installation_identity', ?)").run(identity);
-      this.database.prepare("INSERT INTO d2a_metadata (key, value) VALUES ('next_game_sequence', '1')").run();
-      if (this.readMetadata("installation_identity") !== identity) throw new Error("INSTALLATION_IDENTITY_READBACK_FAILED");
-    }).immediate;
-    transaction();
+  private bootstrapInstallationIdentityInTransaction(requested?: string): void {
+    const existing = this.readOptionalMetadata("installation_identity");
+    if (existing) {
+      if (requested !== undefined && requested !== existing) throw new Error("INSTALLATION_IDENTITY_CONFLICT");
+      if (this.readOptionalMetadata("next_game_sequence") === undefined) throw new Error("IDENTITY_STORE_CORRUPT");
+      return;
+    }
+    const identity = requested ?? randomUUID();
+    assertCanonicalInstallationIdentity(identity);
+    this.database.prepare("INSERT INTO d2a_metadata (key, value) VALUES ('installation_identity', ?)").run(identity);
+    this.database.prepare("INSERT INTO d2a_metadata (key, value) VALUES ('next_game_sequence', '1')").run();
+    if (this.readMetadata("installation_identity") !== identity) throw new Error("INSTALLATION_IDENTITY_READBACK_FAILED");
   }
 
   private readSequence(): bigint {
@@ -189,6 +245,30 @@ export class PublicIdentityStore {
     const row = this.database.prepare("SELECT value FROM d2a_metadata WHERE key = ?").get(key) as { value?: unknown } | undefined;
     return row?.value === undefined ? undefined : String(row.value);
   }
+
+  private withBusyRetry<T>(operation: () => T): T {
+    return withBusyRetry(operation, () => { this.busyRetryCount += 1; });
+  }
+}
+
+function withBusyRetry<T>(operation: () => T, onRetry: () => void): T {
+  let attempt = 0;
+  while (true) {
+    try {
+      return operation();
+    } catch (error) {
+      if (!isBusyError(error)) throw error;
+      if (attempt >= BUSY_RETRY_LIMIT) throw new IdentityStoreBusyError(attempt + 1, error);
+      attempt += 1;
+      onRetry();
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, BUSY_RETRY_DELAY_MS);
+    }
+  }
+}
+
+function isBusyError(error: unknown): boolean {
+  const code = (error as { code?: unknown })?.code;
+  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED";
 }
 
 export function deriveGameId(installationIdentity: string, sequence: bigint | string): string {
