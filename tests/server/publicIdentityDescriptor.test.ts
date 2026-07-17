@@ -1,0 +1,57 @@
+import { describe, expect, it } from "vitest";
+import {
+  canonicalizeRoomRequestDescriptor,
+  hashCanonicalRoomRequestDescriptor,
+  validateIdempotencyKey,
+} from "../../src/server/publicIdentityDescriptor";
+
+describe("CanonicalRoomRequestDescriptor", () => {
+  it("sorts pending tribute items and produces a stable descriptor hash", () => {
+    const left = canonicalizeRoomRequestDescriptor({
+      rank: "10",
+      seed: 17,
+      pendingTributeItems: [
+        { payer: 2, receiver: 3 },
+        { payer: 0, receiver: 1 },
+      ],
+    });
+    const right = canonicalizeRoomRequestDescriptor({
+      rank: "10",
+      seed: 17,
+      pendingTributeItems: [
+        { payer: 0, receiver: 1 },
+        { payer: 2, receiver: 3 },
+      ],
+    });
+
+    expect(left).toEqual(right);
+    expect(hashCanonicalRoomRequestDescriptor(left)).toBe(hashCanonicalRoomRequestDescriptor(right));
+    expect(left.normalizedPendingTributeItems).toEqual([
+      { payer: 0, receiver: 1 },
+      { payer: 2, receiver: 3 },
+    ]);
+  });
+
+  it("rejects caller supplied identity and sequence fields", () => {
+    expect(() => canonicalizeRoomRequestDescriptor({
+      rank: "2",
+      seed: 1,
+      pendingTributeItems: [],
+      sessionIdentity: "caller-controlled",
+    } as never)).toThrow("DESCRIPTOR_FORBIDDEN_FIELD");
+    expect(() => canonicalizeRoomRequestDescriptor({
+      rank: "2",
+      seed: 1,
+      pendingTributeItems: [],
+      gameSequence: "7",
+    } as never)).toThrow("DESCRIPTOR_FORBIDDEN_FIELD");
+  });
+
+  it("validates the Idempotency-Key contract", () => {
+    expect(validateIdempotencyKey("create-001")).toBe("create-001");
+    expect(() => validateIdempotencyKey(undefined)).toThrow("IDEMPOTENCY_KEY_REQUIRED");
+    expect(() => validateIdempotencyKey(" key ")).toThrow("IDEMPOTENCY_KEY_INVALID");
+    expect(() => validateIdempotencyKey("a".repeat(129))).toThrow("IDEMPOTENCY_KEY_INVALID");
+    expect(() => validateIdempotencyKey("with/slash")).toThrow("IDEMPOTENCY_KEY_INVALID");
+  });
+});
