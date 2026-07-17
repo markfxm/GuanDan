@@ -1,28 +1,20 @@
 import { parentPort, threadId, workerData } from "node:worker_threads";
-import { canonicalizeRoomRequestDescriptor } from "../../src/server/publicIdentityDescriptor";
-import { createPublicIdentityProvider } from "../../src/server/publicIdentityProvider";
-import { PublicIdentityStore } from "../../src/server/publicIdentityStore";
+import { canonicalizeRoomRequestDescriptor } from "../../src/server/publicIdentityDescriptor.ts";
+import { createPublicIdentityProvider } from "../../src/server/publicIdentityProvider.ts";
+import { PublicIdentityStore } from "../../src/server/publicIdentityStore.ts";
 
-type WorkerInput = Readonly<{
-  databasePath: string;
-  installationIdentity: string;
-  idempotencyKey: string;
-  seed: number;
-  startSignal: SharedArrayBuffer;
-}>;
-
-const input = workerData as WorkerInput;
+const input = workerData;
 const signal = new Int32Array(input.startSignal);
 
-function log(stage: string, extra: Record<string, unknown> = {}): void {
+function log(stage, extra = {}) {
   parentPort?.postMessage({ stage, worker: threadId, at: Date.now(), ...extra });
 }
 
-async function run(): Promise<void> {
+async function run() {
   log("worker-ready");
   Atomics.wait(signal, 0, 0);
   log("connection-open-start");
-  let store: PublicIdentityStore | undefined;
+  let store;
   try {
     store = new PublicIdentityStore(input.databasePath, { installationIdentity: input.installationIdentity });
     log("bootstrap-complete");
@@ -34,14 +26,14 @@ async function run(): Promise<void> {
     });
     log("allocate-complete", { result });
   } catch (error) {
-    const cause = error as { code?: string; message?: string; name?: string; stack?: string };
+    const cause = error ?? {};
     log("error", { code: cause.code, name: cause.name, message: cause.message });
   } finally {
     try {
       store?.close();
       log("closed", { retryCount: store?.getBusyRetryCount() ?? 0 });
     } catch (error) {
-      const cause = error as { code?: string; message?: string; name?: string };
+      const cause = error ?? {};
       log("close-error", { code: cause.code, name: cause.name, message: cause.message });
     }
   }

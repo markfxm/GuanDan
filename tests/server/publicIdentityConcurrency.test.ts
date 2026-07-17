@@ -21,9 +21,9 @@ function removeTemporaryDatabase(directory: string): void {
 
 async function runPair(databasePath: string, keyForWorker: (index: number) => string, seedForWorker: (index: number) => number): Promise<WorkerMessage[]> {
   const startSignal = new SharedArrayBuffer(4);
-  const workerUrl = pathToFileURL(join(process.cwd(), "tests/server/publicIdentityConcurrencyWorker.ts"));
+  const workerUrl = pathToFileURL(join(process.cwd(), "tests/server/publicIdentityConcurrencyWorker.mjs"));
   const workers = [0, 1].map((index) => new Worker(workerUrl, {
-    execArgv: ["--import", "tsx/esm"],
+    execArgv: ["--import=tsx/esm"],
     workerData: {
       databasePath,
       installationIdentity: "00000000-0000-4000-8000-000000000001",
