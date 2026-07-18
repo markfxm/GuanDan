@@ -34,6 +34,39 @@
 
 The D1 writer therefore has two distinct version concepts that are currently conflated. The implementation must separate them without renaming the existing D1 semantic version.
 
+### ReplayDocument field accounting
+
+The following matrix is based on the actual ReplayDocument interface, the current writeD1Replay, writeReplay, SimulationSummary, and legacyD1Compatibility.test.ts. replayMode and durationMs are optional in ReplayDocument; finalPublicState is not a ReplayDocument field, but the current D1 writer emits it when summary.finalPublicState is defined and that behavior is preserved.
+
+| Field | Required by ReplayDocument | Current writeD1Replay | Corrected source | Allowed change |
+|---|---:|---|---|---|
+| schemaVersion | yes | "d1-replay-v1" | literal "1" | change only this value |
+| replayVersion | yes | versions.replayVersion | same | no |
+| benchmarkVersion | yes | versions.benchmarkVersion | same | no |
+| engineVersion | yes | versions.engineVersion | same | no |
+| roomRulesVersion | yes | versions.roomRulesVersion | same | no |
+| configHash | yes | summary.configHash | same | no |
+| matchId | yes | summary.matchId | same | no |
+| seed | yes | summary.seed | same | no |
+| rank | yes | missing | summary.rank | add only missing field |
+| rotation | yes | summary.rotation | same | no |
+| strategiesBySeat | yes | ordered summary.strategiesBySeat | same ordering/helper | no |
+| strategyDescriptors | yes | versions.strategyDescriptors | same | no |
+| deterministicRandom | yes | summary.randomProvenance or current fallback | summary.randomProvenance, after required-field guard | no semantic change; fail closed if absent |
+| publicEvents | yes | summary.publicEvents or [] | same | no |
+| finishOrder | yes | copy of summary.finishOrder | same | no |
+| winnerTeam | yes | summary.winnerTeam | same | no |
+| teamScore | yes | copied { 0, 1 } values | same | no |
+| replayMode | optional | omitted | omitted | no opportunistic addition |
+| actionCount | yes | summary.actionCount | same | no |
+| publicTraceHash | yes | summary.publicTraceHash | same | no |
+| finalPublicStateHash | yes | summary.finalPublicStateHash | same | no |
+| durationMs | optional | omitted | omitted | no opportunistic addition |
+| finalPublicState | outside ReplayDocument | emitted when defined | same conditional spread | no semantic change |
+| D1 allocation and extension arrays | outside ReplayDocument | emitted | same typed extraction | no semantic change |
+
+The fixed D1 summary must therefore differ from the current JSON only by schemaVersion: "d1-replay-v1" becoming schemaVersion: "1" and adding rank: summary.rank. No implementation step may add replayMode or durationMs merely because generic writeReplay emits them. The Task 4 local ReplayDocument fixture explicitly writes those optional fields because it is a complete generic replay fixture; that does not authorize changing the D1 writer.
+
 ### Inventory table
 
 | Component | File | Purpose | Callers | Production? |
@@ -146,6 +179,16 @@ Forbidden in Task 5A:
 
   These tests must assert that validation/replay does not rewrite the input object or create a new output file. The generic `writeReplay`/`replayMatch` version split remains an unchanged regression surface, not a new D1 adapter requirement.
 
+  The fixed-summary assertions must include:
+
+  ```ts
+  expect(document.replayMode).toBeUndefined();
+  expect(document.durationMs).toBeUndefined();
+  expect(document.finalPublicState).toEqual(summary.finalPublicState);
+  expect(path.dirname(outputPath)).toBe(expectedOutputDirectory);
+  expect(path.basename(outputPath)).toBe(expectedFileName);
+  ```
+
 - [ ] **Step 2: Run the characterization RED command.**
 
   ```bash
@@ -188,12 +231,12 @@ Forbidden in Task 5A:
   Define and export the writer's in-memory document as the following D1-only intersection; do not widen or edit `ReplayDocument` itself:
 
   ```ts
-  type D1ReplayDocument = ReplayDocument & {
-    allocation: "AB" | "BA";
-    handCountChanges: Array<Record<Seat, number>>;
-    trickEvents: Array<PublicSimulationEvent["trick"]>;
-    tributeEvents: Array<PublicTributeEvent>;
-    finalPublicState?: SimulationSummary["finalPublicState"];
+  export type D1ReplayDocument = ReplayDocument & {
+    allocation: NonNullable<SimulationSummary["allocation"]>;
+    handCountChanges: Array<NonNullable<PublicSimulationEvent["handCountChanges"]>>;
+    trickEvents: Array<NonNullable<PublicSimulationEvent["trick"]>>;
+    tributeEvents: Array<NonNullable<PublicSimulationEvent["tributeEvents"]>[number]>;
+    finalPublicState?: NonNullable<SimulationSummary["finalPublicState"]>;
   };
   ```
 
@@ -208,9 +251,10 @@ Forbidden in Task 5A:
     throw new Error("D1_REPLAY_PROVENANCE_MISSING");
   }
   const publicEvents = summary.publicEvents ?? [];
-  const handCountChanges = publicEvents.map((event) => event.handCountChanges).filter(Boolean);
-  const trickEvents = publicEvents.map((event) => event.trick).filter(Boolean);
-  const tributeEvents = publicEvents.flatMap((event) => event.tributeEvents ?? []);
+  const isDefined = <T>(value: T | undefined): value is NonNullable<T> => value !== undefined;
+  const handCountChanges = publicEvents.map((event) => event.handCountChanges).filter(isDefined);
+  const trickEvents = publicEvents.map((event) => event.trick).filter(isDefined);
+  const tributeEvents = publicEvents.flatMap((event) => event.tributeEvents);
   ```
 
   The object built by `writeD1Replay` must contain the following stable separation:
@@ -245,13 +289,32 @@ Forbidden in Task 5A:
   } satisfies D1ReplayDocument;
   ```
 
-  The implementation must preserve the current D1 extension values and output path. It must not synthesize a new `PublicGameIdentity`, change `matchId`, alter `configHash`, change the existing map/filter/flatten/order extraction semantics, or change the random/provenance version. The test must compare `allocation`, `handCountChanges`, `trickEvents`, `tributeEvents`, `publicEvents`, `strategiesBySeat`, `strategyDescriptors`, `deterministicRandom`, `finishOrder`, `winnerTeam`, `teamScore`, `actionCount`, `publicTraceHash`, and `finalPublicStateHash` before and after the writer fix.
+  The implementation must preserve the current D1 extension values and output path. It must not synthesize a new `PublicGameIdentity`, change `matchId`, alter `configHash`, change the existing map/filter/flatten/order extraction semantics, or change the random/provenance version. For one fixed D1 summary, the test must deep-equal every field listed in the matrix, including `replayMode` and `durationMs` remaining omitted/undefined, `finalPublicState`, all D1 extension arrays, and the output directory/file name. The only permitted JSON differences are envelope `schemaVersion` and the newly present `rank`.
 
 - [ ] **Step 2: Tighten D1 validation to the corrected envelope.**
 
-  `validateD1Replay` must require `rank` and require `schemaVersion === "1"` for D1 replay documents. It must continue requiring all existing D1 extension fields, provenance fields, privacy checks, and hashes. Its public signature must be `validateD1Replay(value: unknown, options?: D1ReplayValidationOptions): value is D1ReplayDocument`; invalid documents throw stable codes before returning, and valid documents return `true`. `replayVersion` remains compared against an optional expected D1 version and remains `"d1-replay-v1"` in the runner.
+  Preserve the existing public runtime contract:
+
+  export function validateD1Replay(
+    replay: Record<string, unknown>,
+    options?: D1ReplayValidationOptions,
+  ): true;
+
+  It is a throw-on-invalid boolean validator: valid documents return the literal true, and invalid documents throw; it never returns false. Do not change this to an unknown-input type predicate solely for writer typing. The validator must require rank and require schemaVersion === "1" for D1 replay documents. It must continue requiring all existing D1 extension fields, provenance fields, privacy checks, and hashes. replayVersion remains compared against an optional expected D1 version and remains "d1-replay-v1" in the runner.
 
   Freeze these error codes: an invalid envelope uses `D1_REPLAY_SCHEMA_MISMATCH`; a missing required field uses `PROVENANCE_MISSING:<field>`; a writer summary without `allocation` or `randomProvenance` uses `D1_REPLAY_PROVENANCE_MISSING`. Do not classify malformed old documents as a migration success.
+
+  Preserve the existing validator callers and their return/error handling:
+
+  | Caller | Uses return value? | Depends on throw? | JSON boundary |
+  |---|---:|---:|---|
+  | scripts/replayD1TopKBenchmark.ts:9 replayD1Directory | no | yes; invalid file aborts directory replay | parses external replay JSON then validates |
+  | scripts/replayD1TopKBenchmark.ts:14 replayD1Match | no | yes; invalid document aborts match replay | receives caller-provided document |
+  | tests/benchmark/d1ReplayValidation.ts:33 validateReplaySet | no | yes; counts privacy then rethrows | receives parsed replay records |
+  | tests/benchmark/d1ReplayValidation.ts:68 writeD1Replay | no | yes; refuses to write invalid output | validates writer-created object before write |
+  | tests/benchmark/d1ReplayValidation.test.ts:11-25 | yes for valid cases; exception assertions for invalid cases | yes | test fixtures only |
+
+  validateD1RawResultV2 has a separate boolean/throw-on-invalid contract and callers only assert true or expected exceptions in tests/benchmark/d1ReplayValidation.test.ts; do not change it in Task 5A.
 
 - [ ] **Step 3: Run the writer and validator GREEN tests.**
 
@@ -278,12 +341,20 @@ Forbidden in Task 5A:
 - [ ] **Step 1: Run D1-focused regression.**
 
   ```bash
-  npx vitest run tests/benchmark/d1ReplayValidation.test.ts tests/benchmark/d1ReplayWriterCompatibility.test.ts tests/benchmark/d1Runner.test.ts tests/benchmark/d1CliArgs.test.ts tests/benchmark/d1ExecutionProvenance.test.ts tests/benchmark/d1Manifest.test.ts tests/benchmark/d1CalibrationReadiness.test.ts tests/benchmark/d1CalibrationReview.test.ts tests/benchmark/reporting.test.ts tests/benchmark/cli.test.ts tests/benchmark/reproducibility.test.ts --testTimeout=120000 --reporter=verbose
+  npx vitest run tests/benchmark/d1ReplayValidation.test.ts tests/benchmark/d1ReplayWriterCompatibility.test.ts tests/benchmark/d1Runner.test.ts tests/benchmark/d1CliArgs.test.ts tests/benchmark/d1ExecutionProvenance.test.ts tests/benchmark/d1Manifest.test.ts tests/benchmark/d1CalibrationReadiness.test.ts tests/benchmark/reporting.test.ts tests/benchmark/cli.test.ts tests/benchmark/reproducibility.test.ts --testTimeout=120000 --reporter=verbose
   ```
 
-  Expected: all D1 writer, validator, runner, provenance, manifest, calibration-readiness, generic writer, and generic replay tests pass. Record exact file/test counts, exit code, duration, natural exit, and stderr. The existing `d1CalibrationReview.test.ts` external-evidence case remains subject to the missing-artifact gate above; no local artifact may be generated to force GREEN.
+  This is Gate A, the local D1 compatibility gate. Expected: all D1 writer, validator, runner, provenance, manifest, calibration-readiness, generic writer, and generic replay tests pass. Record exact file/test counts, exit code, duration, natural exit, and stderr. Gate A does not include the external archive inventory test.
 
-- [ ] **Step 2: Run D0 and general regression.**
+- [ ] **Step 2: Run Gate B, the external calibration-evidence gate separately.**
+
+  ```bash
+  npx vitest run tests/benchmark/d1CalibrationReview.test.ts --testTimeout=120000 --reporter=verbose
+  ```
+
+  If the required external archive is mounted and the file passes, record its path, approval relationship, exact file/test count, exit code, duration, natural exit, and stderr. If the archive is absent and the test fails with the known `ENOENT` inventory error, stop this gate with `D2A1_TASK5A_EXTERNAL_EVIDENCE_BLOCKED`. Do not generate calibration artifacts, run calibration, modify approval JSON, weaken the test, or call Task 5A finally approved. Gate B does not block Task 1/Task 2 implementation and review, but it blocks the final Task 5A approval.
+
+- [ ] **Step 3: Run D0 and general regression.**
 
   ```bash
   npx vitest run tests/ai/keepCurrentByteLock.test.ts tests/benchmark/keepCurrentLock.test.ts tests/server/apiCanonicalIdentity.test.ts tests/ui/productionIdentityLifecycle.test.tsx --testTimeout=120000 --reporter=verbose
@@ -299,7 +370,7 @@ Forbidden in Task 5A:
   npx tsx scripts/generateD0KeepCurrentFixtures.ts --source-worktree "../d0-fixture-ai-benchmark" --source-commit "e2a20e18f8e5c0871db38ad69426262e43766ce1" --output "tests/ai/fixtures/d0KeepCurrentCases.json" --generator-version "d0-fixture-v1" --check-only
   ```
 
-- [ ] **Step 3: Verify browser and repository boundaries.**
+- [ ] **Step 4: Verify browser and repository boundaries.**
 
   Run:
 
@@ -316,7 +387,7 @@ Forbidden in Task 5A:
 
   Expected: `writeD1Replay` has one caller and `replayD1Match` is the D1 replay consumer; generic `replayMatch` callers remain limited to ordinary benchmark paths. No browser/server identity import appears; no D1 replay artifact or frozen evidence changes; the worktree is clean.
 
-- [ ] **Step 4: Commit and review boundaries.**
+- [ ] **Step 5: Commit and review boundaries.**
 
   The implementation must have no more than two implementation commits: characterization tests and writer contract fix. No commit may modify `tests/benchmark/contracts.ts`, `tests/benchmark/d1ProvenanceV2.ts`, D0/D1 fixtures, approval files, artifacts, or hash baselines.
 
