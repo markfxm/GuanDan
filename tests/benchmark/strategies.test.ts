@@ -1,8 +1,8 @@
-import { createRoom } from "../../src/game/room";
+import { createLegacyBenchmarkRoom } from "../../src/game/room";
 import { createBenchmarkObservation, toLegacyObservation } from "./observation";
 import { getStrategy } from "./strategies";
 
-const observation = createBenchmarkObservation(createRoom({ rank: "10", seed: 17 }), 0);
+const observation = createBenchmarkObservation(createLegacyBenchmarkRoom({ rank: "10", seed: 17 }), 0);
 
 it("replaces only the acting strategy runtime", () => {
   const strategy = getStrategy("legal-random");

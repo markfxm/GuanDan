@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createRoom, type RoomState, type Seat, type TrickPlay } from "../../src/game/room";
+import { createLegacyBenchmarkRoom, type RoomState, type Seat, type TrickPlay } from "../../src/game/room";
 import type { RoundSettlement, TributeState } from "../../src/game/settlement";
 import type { BenchmarkConfig } from "./contracts";
 import { canonicalJson } from "./contracts";
@@ -74,7 +74,7 @@ export function buildGamesForSeed(config: BenchmarkConfig, seed: number): Benchm
   const games: BenchmarkGameTask[] = [];
   for (const rotation of seats()) {
     for (const allocation of ["AB", "BA"] as const) {
-      const baseRoom = createRoom({ rank: canonicalConfig.rank, seed });
+      const baseRoom = createLegacyBenchmarkRoom({ rank: canonicalConfig.rank, seed });
       const room = rotateRoom(baseRoom, rotation);
       const matchup = `${canonicalConfig.strategyA}-vs-${canonicalConfig.strategyB}`;
       const matchId = canonicalJson({ matchup, allocation, configHash, rotation, seed });

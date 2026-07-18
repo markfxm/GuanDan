@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { createRoom } from "../../src/game/room";
+import { createLegacyBenchmarkRoom } from "../../src/game/room";
 import { createDeck, type Card, type GameRank } from "../../src/engine/cards";
 import { detectGroups } from "../../src/engine/groups";
 import {
@@ -161,7 +161,7 @@ function realHands(): StudySummary["realHands"] {
   const hands: Array<{ hand: Card[]; rank: GameRank; seed: number; seat: 0 | 1 | 2 | 3 }> = [];
   for (let seed = 5001; seed <= 5052; seed += 1) {
     const rank = RANKS[(seed - 5001) % RANKS.length];
-    const room = createRoom({ rank, seed });
+    const room = createLegacyBenchmarkRoom({ rank, seed });
     for (const seat of [0, 1, 2, 3] as const) {
       const hand = room.hands[seat];
       hands.push({ hand, rank, seed, seat });

@@ -1,5 +1,5 @@
 import { createAiPlanningDiagnostics, type AiPlanningDiagnostics } from "../src/ai/diagnostics/aiPlanningDiagnostics";
-import { createRoom, runAiStep } from "../src/game/room";
+import { createLegacyBenchmarkRoom, runAiStep } from "../src/game/room";
 
 export type SimulationSafetyCounters = {
   engineErrorCount: number;
@@ -49,7 +49,7 @@ export type SimulationSummary = {
 export function simulateUnifiedRooms(seeds: number[], actionLimit = 1000, options: { diagnostics?: boolean } = {}): SimulationSummary {
   const summary: Omit<SimulationSummary, "statistics"> = { completed: 0, exceededActionLimit: 0, engineErrors: 0, seeds, results: [] };
   for (const seed of seeds) {
-    const room = createRoom({ rank: "2", seed });
+    const room = createLegacyBenchmarkRoom({ rank: "2", seed });
     room.players[0].isAI = true;
     const diagnostics = options.diagnostics === true ? createAiPlanningDiagnostics() : undefined;
     const counters: SimulationSafetyCounters = { engineErrorCount: 0, illegalActionCount: 0, leadPassCount: 0, invalidFollowCount: 0, duplicateCardCount: 0, missingCardCount: 0, policyViolationCount: 0, runtimePlanMismatchCount: 0, exceededActionLimit: 0 };
@@ -100,7 +100,7 @@ function buildSeedResult(seed: number, finishOrder: number[], completed: boolean
   };
 }
 
-function countRuntimePlanMismatches(room: ReturnType<typeof createRoom>): number {
+function countRuntimePlanMismatches(room: ReturnType<typeof createLegacyBenchmarkRoom>): number {
   let mismatches = 0;
   for (const [seatKey, runtime] of Object.entries(room.aiRuntime)) {
     if (runtime === undefined || runtime.needsReplan) continue;

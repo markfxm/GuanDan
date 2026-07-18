@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createRoom, playCards } from "../../src/game/room";
+import { createLegacyBenchmarkRoom, playCards } from "../../src/game/room";
 
 describe("D2a keep-current isolation", () => {
   it("does not create a ledger or change legacy action state", () => {
-    const first = createRoom({ rank: "10", seed: 12 });
-    const second = createRoom({ rank: "10", seed: 12 });
+    const first = createLegacyBenchmarkRoom({ rank: "10", seed: 12 });
+    const second = createLegacyBenchmarkRoom({ rank: "10", seed: 12 });
     const cardId = first.hands[first.currentTurn][0]!.id;
     playCards(first, first.currentTurn, [cardId]);
     playCards(second, second.currentTurn, [cardId]);

@@ -1,11 +1,11 @@
 import { createDeck } from "../../src/engine/cards";
 import { canBeatPlay, classifyPlay } from "../../src/game/playRules";
-import { createRoom } from "../../src/game/room";
+import { createLegacyBenchmarkRoom } from "../../src/game/room";
 import { legalCandidates } from "./candidates";
 import { createBenchmarkObservation, toLegacyObservation, toProductionObservation } from "./observation";
 
 it("does not change an observation when hidden opponent cards are swapped", () => {
-  const firstRoom = createRoom({ rank: "10", seed: 42 });
+  const firstRoom = createLegacyBenchmarkRoom({ rank: "10", seed: 42 });
   const secondRoom = structuredClone(firstRoom);
   [secondRoom.hands[1], secondRoom.hands[3]] = [secondRoom.hands[3], secondRoom.hands[1]];
 
@@ -18,14 +18,14 @@ it("does not change an observation when hidden opponent cards are swapped", () =
 });
 
 it("derives public hand counts from the actual hands, not cached player fields", () => {
-  const room = createRoom({ rank: "10", seed: 42 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 42 });
   room.players.forEach((player) => { player.handCount = 999; });
   const observation = createBenchmarkObservation(room, 0);
   expect(observation.publicHandCounts).toEqual({ 0: 27, 1: 27, 2: 27, 3: 27 });
 });
 
 it("adapters expose only the public benchmark whitelist", () => {
-  const observation = createBenchmarkObservation(createRoom({ rank: "10", seed: 42 }), 0);
+  const observation = createBenchmarkObservation(createLegacyBenchmarkRoom({ rank: "10", seed: 42 }), 0);
   const production = toProductionObservation(observation);
   const legacy = toLegacyObservation(observation);
   const forbidden = ["partnerHand", "opponentHands", "hands", "initialHands", "deck", "seed"];
@@ -39,7 +39,7 @@ it("adapters expose only the public benchmark whitelist", () => {
 
 it("offers pass only while following and every play beats the public trick", () => {
   const deck = createDeck();
-  const room = createRoom({ rank: "10", seed: 42 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 42 });
   room.hands[0] = [
     deck.find((card) => card.id === "S3-1")!,
     deck.find((card) => card.id === "S6-1")!,

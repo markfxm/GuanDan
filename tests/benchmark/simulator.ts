@@ -2,7 +2,7 @@ import { createBenchmarkObservation } from "./observation";
 import { bindStrategyDiagnostics, getStrategy } from "./strategies";
 import type { GameAction, GameSummary, PublicTributeEvent, RandomReplayProvenance, StrategyAction } from "./contracts";
 import { finalPublicStateHash, publicTraceHash } from "./reporting";
-import { createRoom, playCards, passTurn, type RoomState, type Seat } from "../../src/game/room";
+import { createLegacyBenchmarkRoom, playCards, passTurn, type RoomState, type Seat } from "../../src/game/room";
 import type { BenchmarkGameTask } from "./rotations";
 import { CANDIDATE_ORDERING_VERSION, DECISION_INDEX_SEMANTICS, deriveRuntimeId, deriveStrategySeed, RANDOM_ALGORITHM_VERSION, STRATEGY_SEED_DERIVATION_VERSION } from "./random";
 import { createAiPlanningDiagnostics, type AiPlanningDiagnostics } from "../../src/ai/diagnostics/aiPlanningDiagnostics";
@@ -78,7 +78,7 @@ export type SimulationSummary = GameSummary & {
 
 export function simulateGame(task: BenchmarkGameTask, options: { diagnostics?: boolean; strategyRandomSeeds?: Partial<Record<Seat, string>> } = {}): SimulationSummary {
   const startedAt = performance.now();
-  const room = structuredClone(task.room ?? createRoom({ rank: task.config.rank, seed: task.seed }));
+  const room = structuredClone(task.room ?? createLegacyBenchmarkRoom({ rank: task.config.rank, seed: task.seed }));
   const strategiesBySeat = strategyMap(task);
   const runtimes: Partial<Record<Seat, unknown>> = {};
   const errors: SimulationError[] = [];

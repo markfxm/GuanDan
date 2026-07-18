@@ -1,4 +1,4 @@
-import { createRoom, type RoomState, type Seat } from "../../src/game/room";
+import { createLegacyBenchmarkRoom, type RoomState, type Seat } from "../../src/game/room";
 import type { BenchmarkConfig } from "./contracts";
 import { buildGamesForSeed, rotateRoom } from "./rotations";
 
@@ -23,7 +23,7 @@ it("creates eight stable games for one base seed", () => {
 });
 
 it("maps every seat by sigma rotation and preserves cards and references", () => {
-  const base = createRoom({ rank: "10", seed: 33 });
+  const base = createLegacyBenchmarkRoom({ rank: "10", seed: 33 });
   base.currentTurn = 1;
   base.leaderSeat = 2;
   base.trick = {
@@ -61,7 +61,7 @@ it("maps every seat by sigma rotation and preserves cards and references", () =>
 });
 
 it("preserves an already settled room's seat references", () => {
-  const room = createRoom({ rank: "10", seed: 2 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 2 });
   room.finishOrder = [0, 2, 1, 3];
   room.status = "finished";
   room.settlement = {
