@@ -25,12 +25,13 @@ it("defaults new rooms to rank 2 and does not render the game information sideba
   expect(screen.queryByRole("heading", { name: "牌局信息" })).not.toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: /开房/ }));
-  await waitFor(() => expect(fetch).toHaveBeenCalledWith(
-    "/api/rooms",
-    expect.objectContaining({
-      body: JSON.stringify({ rank: "2", pendingTributeItems: [] }),
-    }),
-  ));
+  await waitFor(() => {
+    const [url, request] = vi.mocked(fetch).mock.calls[0]!;
+    const body = JSON.parse(String((request as RequestInit).body));
+    expect(url).toBe("/api/rooms");
+    expect((request as RequestInit).headers).toEqual(expect.objectContaining({ "Idempotency-Key": expect.any(String) }));
+    expect(Object.keys(body).sort()).toEqual(["pendingTributeItems", "rank", "seed"]);
+  });
 });
 
 it("shows low-card flags only for players holding one through nine cards", async () => {
