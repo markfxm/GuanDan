@@ -1,3 +1,6 @@
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
+import { App } from "../../src/ui/App";
 import { createGameRoom, createRoomIntent, isCreateRoomHttpError, isCreateRoomLocalError, isCreateRoomUncertainError, isRetryableCreateRoomError } from "../../src/ui/api";
 import type { PublicRoom, TributeItem } from "../../src/ui/api";
 
@@ -56,6 +59,286 @@ function mockResponse(status: number, body: unknown, statusText = "Response") {
     json: async () => body,
   } as Response;
 }
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function mockAppCreateQueue(responses: Array<Promise<Response>>) {
+  const roomRequests: RequestInit[] = [];
+  let roomRequestIndex = 0;
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const path = typeof input === "string" ? input : input.toString();
+    if (path === "/api/plans") {
+      return Promise.resolve(mockResponse(200, { plans: [] }));
+    }
+
+    roomRequests.push((init ?? {}) as RequestInit);
+    return responses[roomRequestIndex++] ?? Promise.reject(new Error("unexpected room request"));
+  });
+  return { fetchSpy, roomRequests };
+}
+
+const finishedRoom: PublicRoom = {
+  ...validRoom,
+  status: "finished",
+  finishOrder: [0],
+  settlement: {
+    winningTeam: 0,
+    outcome: "single-win",
+    levelStep: 1,
+    currentRank: "2",
+    nextRank: "3",
+    tribute: { status: "none", items: [] },
+  },
+};
+
+function clickCreate() {
+  fireEvent.click(screen.getByRole("button", { name: /开房/ }));
+}
+
+function clickRetry() {
+  fireEvent.click(screen.getByRole("button", { name: /重试创建/ }));
+}
+
+function requestKey(request: RequestInit): string {
+  return (request.headers as Record<string, string>)["Idempotency-Key"]!;
+}
+
+it("uses the same intent key, descriptor, and body after a lost response retry", async () => {
+  mockCrypto("retry:key._~-", 123);
+  const first = deferred<Response>();
+  mockAppCreateQueue([first.promise, Promise.resolve(mockResponse(200, { room: validRoom }))]);
+
+  render(<App />);
+  clickCreate();
+  await act(async () => first.reject(new Error("network result lost")));
+
+  await waitFor(() => expect(screen.getByRole("button", { name: /重试创建/ })).toBeInTheDocument());
+  const firstRequest = vi.mocked(fetch).mock.calls.find(([input]) => input === "/api/rooms")![1] as RequestInit;
+  clickRetry();
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([input]) => input === "/api/rooms")).toHaveLength(2));
+  const secondRequest = vi.mocked(fetch).mock.calls.filter(([input]) => input === "/api/rooms")[1]![1] as RequestInit;
+
+  expect(requestKey(secondRequest)).toBe(requestKey(firstRequest));
+  expect(secondRequest.body).toBe(firstRequest.body);
+  expect(JSON.parse(String(secondRequest.body))).toEqual({
+    rank: "2",
+    seed: 123,
+    pendingTributeItems: [],
+  });
+  expect(vi.mocked(crypto.randomUUID)).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(crypto.getRandomValues)).toHaveBeenCalledTimes(1);
+});
+
+it("does not issue a second request or generate a second key on a pending double click", async () => {
+  mockCrypto("pending:key._~-", 234);
+  const first = deferred<Response>();
+  mockAppCreateQueue([first.promise]);
+
+  render(<App />);
+  clickCreate();
+  clickCreate();
+
+  expect(vi.mocked(fetch).mock.calls.filter(([input]) => input === "/api/rooms")).toHaveLength(1);
+  expect(vi.mocked(crypto.randomUUID)).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(crypto.getRandomValues)).toHaveBeenCalledTimes(1);
+  await act(async () => first.resolve(mockResponse(200, { room: validRoom })));
+});
+
+it("starts the next round with a new intent and key", async () => {
+  mockCrypto("first-round:key._~-", 345);
+  vi.mocked(crypto.randomUUID).mockReturnValueOnce("first-round:key._~-" as CanonicalUuid).mockReturnValueOnce("next-round:key._~-" as CanonicalUuid);
+  vi.mocked(crypto.getRandomValues).mockImplementationOnce(<T extends ArrayBufferView | null>(values: T): T => {
+    if (values instanceof Uint32Array) values[0] = 345;
+    return values;
+  }).mockImplementationOnce(<T extends ArrayBufferView | null>(values: T): T => {
+    if (values instanceof Uint32Array) values[0] = 456;
+    return values;
+  });
+  mockAppCreateQueue([
+    Promise.resolve(mockResponse(200, { room: finishedRoom })),
+    Promise.resolve(mockResponse(200, { room: validRoom })),
+  ]);
+
+  render(<App />);
+  clickCreate();
+  await waitFor(() => expect(screen.getByRole("button", { name: /进行下一局/ })).toBeInTheDocument());
+  fireEvent.click(screen.getByRole("button", { name: /进行下一局/ }));
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([input]) => input === "/api/rooms")).toHaveLength(2));
+
+  const requests = vi.mocked(fetch).mock.calls.filter(([input]) => input === "/api/rooms").map(([, init]) => init as RequestInit);
+  expect(requestKey(requests[1]!)).not.toBe(requestKey(requests[0]!));
+  expect(vi.mocked(crypto.randomUUID)).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(crypto.getRandomValues)).toHaveBeenCalledTimes(2);
+});
+
+it("clears a definite failure so the next normal create gets a new key", async () => {
+  mockCrypto("failed:key._~-", 567);
+  vi.mocked(crypto.randomUUID).mockReturnValueOnce("failed:key._~-" as CanonicalUuid).mockReturnValueOnce("new:key._~-" as CanonicalUuid);
+  const fetchSpy = mockAppCreateQueue([
+    Promise.resolve(mockResponse(409, { error: "IDEMPOTENCY_CONFLICT" }, "Conflict")),
+    Promise.resolve(mockResponse(200, { room: validRoom })),
+  ]).fetchSpy;
+
+  render(<App />);
+  clickCreate();
+  await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+  expect(screen.queryByRole("button", { name: /重试创建/ })).not.toBeInTheDocument();
+  clickCreate();
+  await waitFor(() => expect(fetchSpy.mock.calls.filter(([input]) => input === "/api/rooms")).toHaveLength(2));
+
+  const requests = fetchSpy.mock.calls.filter(([input]) => input === "/api/rooms").map(([, init]) => init as RequestInit);
+  expect(requestKey(requests[1]!)).not.toBe(requestKey(requests[0]!));
+});
+
+it("keeps one uncertain intent through retries and rerenders", async () => {
+  mockCrypto("rerender:key._~-", 678);
+  const second = deferred<Response>();
+  const third = deferred<Response>();
+  const first = deferred<Response>();
+  mockAppCreateQueue([first.promise, second.promise, third.promise]);
+
+  const app = render(<App />);
+  clickCreate();
+  await act(async () => first.reject(new Error("offline")));
+  await waitFor(() => expect(screen.getByRole("button", { name: /重试创建/ })).toBeInTheDocument());
+  clickRetry();
+  await act(async () => second.reject(new Error("still offline")));
+  await waitFor(() => expect(screen.getByRole("button", { name: /重试创建/ })).toBeInTheDocument());
+  app.rerender(<App />);
+  clickRetry();
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([input]) => input === "/api/rooms")).toHaveLength(3));
+
+  const requests = vi.mocked(fetch).mock.calls.filter(([input]) => input === "/api/rooms").map(([, init]) => init as RequestInit);
+  expect(new Set(requests.map(requestKey)).size).toBe(1);
+  expect(vi.mocked(crypto.randomUUID)).toHaveBeenCalledTimes(1);
+  await act(async () => third.resolve(mockResponse(200, { room: validRoom })));
+});
+
+it.each([408, 429, 500])("offers explicit retry for uncertain HTTP %s", async (status) => {
+  mockCrypto("http-" + status + ":key._~-", 789);
+  mockAppCreateQueue([
+    Promise.resolve(mockResponse(status, { error: "TRY_AGAIN" }, "Retryable")),
+    Promise.resolve(mockResponse(200, { room: validRoom })),
+  ]);
+
+  render(<App />);
+  clickCreate();
+  await waitFor(() => expect(screen.getByRole("button", { name: /重试创建/ })).toBeInTheDocument());
+  expect(vi.mocked(fetch).mock.calls.filter(([input]) => input === "/api/rooms")).toHaveLength(1);
+});
+
+it("does not replace an uncertain intent with a normal create", async () => {
+  mockCrypto("uncertain:key._~-", 890);
+  const first = deferred<Response>();
+  mockAppCreateQueue([first.promise, Promise.resolve(mockResponse(200, { room: validRoom }))]);
+
+  render(<App />);
+  clickCreate();
+  await act(async () => first.reject(new Error("offline")));
+  await waitFor(() => expect(screen.getByRole("button", { name: /重试创建/ })).toBeInTheDocument());
+  clickCreate();
+
+  expect(vi.mocked(fetch).mock.calls.filter(([input]) => input === "/api/rooms")).toHaveLength(1);
+});
+
+it("fails closed when key generation fails", async () => {
+  vi.spyOn(globalThis.crypto, "randomUUID").mockImplementation(() => {
+    throw new Error("crypto unavailable");
+  });
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+  render(<App />);
+  clickCreate();
+
+  await waitFor(() => expect(fetchSpy).not.toHaveBeenCalled());
+  expect(screen.getByRole("button", { name: /开房/ })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: /重试创建/ })).not.toBeInTheDocument();
+});
+
+it("does not enter pending when intent serialization fails", async () => {
+  mockCrypto("serialization:key._~-", 901);
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+  render(<App />);
+  const originalStringify = JSON.stringify;
+  vi.spyOn(JSON, "stringify").mockImplementation((value, replacer, space) => {
+    if (value && typeof value === "object" && Object.keys(value).sort().join("|") === "pendingTributeItems|rank|seed") {
+      throw new Error("serialization unavailable");
+    }
+    return originalStringify(value, replacer, space);
+  });
+  clickCreate();
+
+  await waitFor(() => expect(fetchSpy).not.toHaveBeenCalled());
+  expect(screen.getByRole("button", { name: /开房/ })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: /重试创建/ })).not.toBeInTheDocument();
+});
+
+it("does not generate an intent during StrictMode render or rerender", async () => {
+  mockCrypto("strict:key._~-", 902);
+  const response = Promise.resolve(mockResponse(200, { room: validRoom }));
+  mockAppCreateQueue([response]);
+  const { rerender } = render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+  rerender(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+
+  expect(vi.mocked(crypto.randomUUID)).not.toHaveBeenCalled();
+  clickCreate();
+  await waitFor(() => expect(vi.mocked(crypto.randomUUID)).toHaveBeenCalledTimes(1));
+});
+
+it("allows only one retry request when retry is double clicked", async () => {
+  mockCrypto("retry-double:key._~-", 903);
+  const first = deferred<Response>();
+  const retry = deferred<Response>();
+  mockAppCreateQueue([first.promise, retry.promise]);
+
+  render(<App />);
+  clickCreate();
+  await act(async () => first.reject(new Error("offline")));
+  await waitFor(() => expect(screen.getByRole("button", { name: /重试创建/ })).toBeInTheDocument());
+  clickRetry();
+  clickRetry();
+
+  expect(vi.mocked(fetch).mock.calls.filter(([input]) => input === "/api/rooms")).toHaveLength(2);
+  expect(vi.mocked(crypto.randomUUID)).toHaveBeenCalledTimes(1);
+  await act(async () => retry.resolve(mockResponse(200, { room: validRoom })));
+});
+
+it("does not write state after a pending request resolves post-unmount and does not restore its key", async () => {
+  mockCrypto("unmounted:key._~-", 904);
+  vi.mocked(crypto.randomUUID).mockReturnValueOnce("unmounted:key._~-" as CanonicalUuid).mockReturnValueOnce("remounted:key._~-" as CanonicalUuid);
+  const first = deferred<Response>();
+  const second = deferred<Response>();
+  const { roomRequests } = mockAppCreateQueue([first.promise, second.promise]);
+
+  const firstRender = render(<App />);
+  clickCreate();
+  const firstKey = requestKey(roomRequests[0]!);
+  firstRender.unmount();
+  await act(async () => first.resolve(mockResponse(200, { room: validRoom })));
+
+  render(<App />);
+  clickCreate();
+  await waitFor(() => expect(roomRequests).toHaveLength(2));
+  expect(requestKey(roomRequests[1]!)).not.toBe(firstKey);
+  await act(async () => second.resolve(mockResponse(200, { room: validRoom })));
+});
 
 it.each([0, 0xFFFFFFFF])("accepts crypto seed boundary %s", async (seed) => {
   mockCrypto(canonicalKey, seed);
