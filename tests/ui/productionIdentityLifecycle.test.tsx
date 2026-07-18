@@ -543,6 +543,14 @@ it.each([
   expect(fetch).toHaveBeenCalledTimes(1);
 });
 
+it("rejects a 2xx room that contains a forbidden identity field", async () => {
+  mockCrypto();
+  const leakedRoom = { ...validRoom, idempotencyKey: "leaked-key" };
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(mockResponse(200, { room: leakedRoom }));
+
+  await expect(createGameRoom(createRoomIntent("2"))).rejects.toSatisfy((error) => isCreateRoomUncertainError(error) && error.source === "response");
+});
+
 it.each([
   [400, "definite-failure"],
   [409, "definite-failure"],

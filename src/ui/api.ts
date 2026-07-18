@@ -279,6 +279,7 @@ function isRoomResponse(value: unknown): value is RoomResponse {
 
 function isPublicRoom(value: unknown): value is PublicRoom {
   if (!isRecord(value)) return false;
+  if (containsForbiddenPublicRoomKey(value)) return false;
   const room = value as Partial<PublicRoom>;
   return typeof room.id === "string" && room.id.length > 0
     && typeof room.rank === "string" && (RANKS as readonly string[]).includes(room.rank)
@@ -295,6 +296,33 @@ function isPublicRoom(value: unknown): value is PublicRoom {
     && room.humanSeat === 0
     && Array.isArray(room.humanHand)
     && Array.isArray(room.announcements) && room.announcements.every((entry) => typeof entry === "string");
+}
+
+const FORBIDDEN_PUBLIC_ROOM_KEYS = new Set([
+  "idempotencyKey",
+  "publicIdentity",
+  "publicLedger",
+  "publicEvents",
+  "identity",
+  "gameSequence",
+  "gameId",
+  "descriptorHash",
+  "sessionIdentity",
+]);
+
+function containsForbiddenPublicRoomKey(value: unknown, visited = new Set<object>()): boolean {
+  if (value === null || typeof value !== "object") return false;
+  if (visited.has(value)) return false;
+  visited.add(value);
+
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") continue;
+    if (FORBIDDEN_PUBLIC_ROOM_KEYS.has(key)) return true;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor !== undefined && "value" in descriptor && containsForbiddenPublicRoomKey(descriptor.value, visited)) return true;
+  }
+
+  return false;
 }
 
 function isPublicTrick(value: unknown): boolean {
@@ -381,15 +409,35 @@ export async function submitOpeningTribute(roomId: string, seat?: Seat, cardIds:
 }
 
 function normalizePublicRoom(room: PublicRoom): PublicRoom {
+  const safeRoom: PublicRoom = {
+    id: room.id,
+    rank: room.rank,
+    players: room.players,
+    currentTurn: room.currentTurn,
+    leaderSeat: room.leaderSeat,
+    currentTrickIndex: room.currentTrickIndex,
+    trick: room.trick,
+    finishOrder: room.finishOrder,
+    aiPlans: room.aiPlans,
+    playHistory: room.playHistory,
+    replayHands: room.replayHands,
+    status: room.status,
+    actionLog: room.actionLog,
+    humanSeat: room.humanSeat,
+    humanHand: room.humanHand,
+    announcements: room.announcements,
+    ...(room.settlement === undefined ? {} : { settlement: room.settlement }),
+    ...(room.openingTribute === undefined ? {} : { openingTribute: room.openingTribute }),
+  };
   const trick = room.trick ?? { leadSeat: room.currentTurn, passSeats: [], plays: [] };
 
   return {
-    ...room,
-    currentTrickIndex: typeof room.currentTrickIndex === "number" ? room.currentTrickIndex : 0,
-    aiPlans: room.aiPlans ?? {},
-    playHistory: Array.isArray(room.playHistory) ? room.playHistory : [],
-    replayHands: room.replayHands ?? {
-      0: room.humanHand ?? [],
+    ...safeRoom,
+    currentTrickIndex: typeof safeRoom.currentTrickIndex === "number" ? safeRoom.currentTrickIndex : 0,
+    aiPlans: safeRoom.aiPlans ?? {},
+    playHistory: Array.isArray(safeRoom.playHistory) ? safeRoom.playHistory : [],
+    replayHands: safeRoom.replayHands ?? {
+      0: safeRoom.humanHand ?? [],
       1: [],
       2: [],
       3: [],

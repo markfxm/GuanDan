@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { rebuildPublicLedger, type PublicLedgerReplayDocument } from "../../src/game/publicEventReplay";
 import { buildApi } from "../../src/server/api";
 import { createPublicIdentityProvider } from "../../src/server/publicIdentityProvider";
 import { PublicIdentityStore } from "../../src/server/publicIdentityStore";
@@ -179,6 +180,30 @@ describe("room idempotency and privacy boundary", () => {
     expect(JSON.stringify(privateRoom.publicLedger)).not.toContain(key);
     expect(JSON.stringify(privateRoom.publicEvents)).not.toContain(key);
     expect(JSON.stringify(publicRoom.replayHands)).not.toContain(key);
+
+    if (privateRoom.publicIdentity === undefined || privateRoom.publicLedger === undefined || privateRoom.publicEvents === undefined) {
+      throw new Error("TEST_PUBLIC_REPLAY_DATA_MISSING");
+    }
+    const replayDocument: PublicLedgerReplayDocument = {
+      schemaVersion: "d2-public-ledger-replay-v1",
+      initialState: {
+        identity: privateRoom.publicIdentity,
+        initialHandCounts: {
+          0: privateRoom.initialHands[0].length,
+          1: privateRoom.initialHands[1].length,
+          2: privateRoom.initialHands[2].length,
+          3: privateRoom.initialHands[3].length,
+        },
+        openingLeader: privateRoom.leaderSeat,
+        initialTrickIndex: 0,
+        openingTributePublicState: { status: privateRoom.openingTribute?.status ?? "none" },
+      },
+      events: privateRoom.publicEvents,
+      ledgerSnapshot: privateRoom.publicLedger,
+    };
+    const rebuilt = rebuildPublicLedger(replayDocument);
+    expect(JSON.stringify(replayDocument)).not.toContain(key);
+    expect(JSON.stringify(rebuilt.ledger)).not.toContain(key);
   });
 
   it("rejects identity and idempotency fields in the room body before allocation", async () => {
