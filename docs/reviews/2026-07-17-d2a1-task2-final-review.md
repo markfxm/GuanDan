@@ -121,28 +121,54 @@ The exact remediation commit still satisfies the focused Task 2 behavior covered
 - Browser bundle scan has zero SQLite native references locally.
 - `src/ui`, `src/game/room.ts`, benchmark production contracts, D2a event/ledger/replay contracts, D0/D1 artifacts and approvals were not modified in this review.
 
-## Decision
+## Historical decision before D0 tag publication
 
-**D2A1_TASK2_NOT_APPROVED**
-
-Reason:
+The earlier Ubuntu run failed before the formal gates because the remote repository did not contain the approved annotated tag `ai-benchmark-d0-baseline`. The D0 commit was reachable, but `git describe --tags --exact-match` failed in the isolated source worktree. This historical result was:
 
 ```text
-UBUNTU_FORMAL_NPM_TEST_GATE_FAILED
+D2A1_TASK2_NOT_APPROVED
+reason=UBUNTU_D0_TAG_MISSING
 ```
 
-Minimum blocker:
+The existing D0 tag was then published without changing production code, tests, workflow semantics, or benchmark artifacts.
 
-```text
-Linux npm test reaches tests/benchmark/keepCurrentLock.test.ts and fails because the D0 fixture source worktree is absent.
-```
+## Final corrected exact-commit gate
 
-Task 3 and D2b must not start from this state.
+After the approved D0 tag was available from `origin`, a new, non-retried workflow dispatch verified the exact Task 2 remediation commit:
 
-Separate infrastructure note:
+- Run: `29634368318`
+- Job: `88053940215`
+- URL: `https://github.com/markfxm/GuanDan/actions/runs/29634368318`
+- Workflow head: `main` at `37b329d37b35b53063573353f71f3987c71af18d`
+- Tested commit: `b2655c3f90dd58136467898dbb624175e77e2849`
+- Runner: Ubuntu/Linux x64 (`ubuntu-latest`)
+- Node: `22.22.2`
+- npm: `10.9.7`
+- Artifact: `8426576589`
+- Artifact digest: `sha256:a2609aa0569af0bc14e6ee89bfbd237101181b1a766cc3d28bc821acb6241c14`
 
-```text
-BENCHMARK_TEST_INFRASTRUCTURE_REPAIR_REQUIRED_BEFORE_TASK6
-```
+The job exited naturally with success. The uploaded `summary.json` reports:
 
-The prior non-hermetic calibration artifact issue remains a future benchmark infrastructure concern, but it is not the failing symptom in this corrected Task 2 gate.
+| Gate | Result |
+|---|---|
+| `npm ci` | PASS |
+| portability | PASS |
+| Task 1 focused | PASS; 3 files / 21 tests |
+| Task 2 focused | PASS; 4 files / 50 tests |
+| `npm test` | PASS; 63 files / 513 tests |
+| benchmark collected | `0` |
+| simulation collected | `0` |
+| performance collected | `0` |
+| `npx tsc --noEmit` | PASS |
+| `npm run build` | PASS |
+| D0 fixture check-only | PASS |
+| browser native SQLite references | `0` |
+| `formalExecutionAllowed` | `false` |
+
+The historical calibration-artifact and benchmark-infrastructure findings remain recorded above and are not silently erased; they were not part of this corrected Task 2 gate.
+
+## Final decision
+
+**D2A1_TASK2_APPROVED_FOR_TASK3**
+
+Task 3 and D2b may begin from the Task 2 implementation branch after this review commit. `formalExecutionAllowed` remains `false`.
