@@ -140,7 +140,11 @@ An existing call that includes `publicIdentity` continues to use `createRoom({ p
 - Create: `tests/benchmark/legacyD1Compatibility.test.ts` 闁炽儲鏀▁plicit legacy caller coverage, replay/provider separation, D0 check-only stability, and D1 output/schema/hash regression assertions.
 - Modify: only if required to replace an import/call identified in Task 2; no fixture/artifact/approval/trace/schema/hash file is modified.
 
-The new characterization test will use actual `createLegacyBenchmarkRoom`, `buildGamesForSeed`, `simulateGame`, and `replayMatch` paths. It will not mock the room factory, provider, store, ledger, or replay validator. It will recursively inspect generated public/replay objects for identity and private-key leakage where those objects expose nested data.
+The new characterization test will use actual `createLegacyBenchmarkRoom`, `buildGamesForSeed`, `simulateGame`, and `replayMatch` paths. It will construct a valid temporary `ReplayDocument` locally from a real simulation result, because the existing `writeD1Replay` output is not consumable by the current `ReplayDocument`/`replayMatch` contract. It will not mock the room factory, provider, store, ledger, replay validator, simulation result, or hash function. It will recursively inspect generated public/replay objects for identity and private-key leakage where those objects expose nested data.
+
+### Task 5 preflight blocker: `writeD1Replay` boundary
+
+The existing `writeD1Replay` helper is called by `scripts/runD1TopKBenchmark.ts`, which is a benchmark runner rather than production API/UI code. Its output currently writes `schemaVersion: "d1-replay-v1"` and omits `rank`, while `ReplayDocument` requires `schemaVersion: "1" | "2"` and `rank`, and `replayMatch` requires schema `"1"` for non-D0 documents. Therefore Task 4 does not certify or repair `writeD1Replay`; this incompatibility is recorded as a Task 5 preflight blocker. Task 4 must not normalize `"d1-replay-v1"`, add `rank` to that helper output, or modify the helper, replay production, schema, validator, fixture, artifact, approval, trace, or hash contracts.
 
 ## TDD execution tasks
 
@@ -191,20 +195,22 @@ The new characterization test will use actual `createLegacyBenchmarkRoom`, `buil
 
 ### Task 3: Characterize legacy isolation and preserve D0/D1/replay boundaries
 
-- [ ] Step 1 - write characterization tests. Create tests/benchmark/legacyD1Compatibility.test.ts using the actual createLegacyBenchmarkRoom, buildGamesForSeed, simulateGame, replayMatch, writeD1Replay, D1_RESULT_SCHEMA, D1_REPLAY_SCHEMA, ENGINE_VERSION, ROOM_RULES_VERSION, and getStrategy helpers.
+- [ ] Step 1 - write characterization tests. Create tests/benchmark/legacyD1Compatibility.test.ts using the actual createLegacyBenchmarkRoom, buildGamesForSeed, simulateGame, replayMatch, D1_RESULT_SCHEMA, D1_REPLAY_SCHEMA, ENGINE_VERSION, ROOM_RULES_VERSION, and getStrategy helpers. Do not use `writeD1Replay`; its current output is a recorded Task 5 preflight blocker, not a Task 4 dependency.
 
-  The file must include four tests: explicit legacy rooms have no publicIdentity/publicLedger/publicEvents; a temporary replay document is written with writeD1Replay, its schemaVersion is set to 1, replayMatch verifies it through buildGamesForSeed and simulateGame, and the replay source contains no provider/store import; the committed D0 fixture is byte-identical before and after the existing generator is invoked with --check-only; and a fixed D1 configuration/seed produces the existing D1 result schema plus 64-hex publicTraceHash and finalPublicStateHash values.
+  The file must include four tests: explicit legacy rooms have no publicIdentity/publicLedger/publicEvents; a real fixed-seed simulation is used to construct a local `ReplayDocument` that satisfies the current type, is written with JSON.stringify, and is verified by replayMatch through buildGamesForSeed and simulateGame while the replay source contains no provider/store import; the committed D0 fixture is byte-identical before and after the existing generator is invoked with --check-only; and a fixed D1 configuration/seed produces the existing D1 result schema plus 64-hex publicTraceHash and finalPublicStateHash values.
 
-  The replay test must use a temporary directory with try/finally cleanup and must assert matchId, publicTraceHash, finalPublicStateHash, and verified: true. The D0 test must use the existing source-worktree, source-commit, generator-version, and fixture path values already frozen in tests/benchmark/keepCurrentLock.test.ts. The D1 test must use existing schema/version constants, not a new artifact or modified fixture.
+  The replay test must use a temporary directory with try/finally cleanup, `const document = { ... } satisfies ReplayDocument`, JSON.stringify, and assert matchId, publicTraceHash, finalPublicStateHash, and verified: true. Its fields must come from the current `ReplayDocument` type and existing passing replay tests; no field may be invented. The D0 test must use the existing source-worktree, source-commit, generator-version, and fixture path values already frozen in tests/benchmark/keepCurrentLock.test.ts. The D1 test must use existing schema/version constants, not a new artifact or modified fixture.
 - [ ] **Step 2 闁炽儲鏁倁n characterization RED.**
 
       npx vitest run tests/benchmark/legacyD1Compatibility.test.ts --testTimeout=120000 --reporter=verbose
 
-  Expected: RED until the explicit callers and regression assertions are present. Any failure caused by a changed D0/D1 byte, trace, hash, schema, or replay contract is a Task 4 contract mismatch and must stop the implementation; no production compatibility exception is permitted.
+  Expected: the original RED proved that the `writeD1Replay` -> `replayMatch` assumption was wrong; that failure was a plan-assumption error, not a legacy-isolation regression. After this amendment the test uses a valid current `ReplayDocument`. Any failure in real replay verification, D0 bytes, D1 trace, hash, or schema remains a Task 4 contract mismatch and must stop the implementation; no production compatibility exception is permitted.
 
 - [ ] **Step 3 闁炽儲鏀癿plement only test-side characterization and exact caller assertions.** Use existing `tests/ai/fixtures/d0KeepCurrentCases.json`, `tests/benchmark/keepCurrentLock.test.ts` helpers, `tests/benchmark/d1ReplayValidation.ts`, and `tests/benchmark/contracts.ts`. Keep `scripts/generateD0KeepCurrentFixtures.ts`, all artifacts, and all server/ledger/replay production code unchanged.
 
 - [ ] **Step 4 闁炽儲鏁倁n focused GREEN verification.**
+
+  The focused GREEN verification uses `tests/benchmark/contracts.ts` as the authoritative `ReplayDocument` type and constructs `const document = { ... } satisfies ReplayDocument` locally from a real fixed-seed simulation result. It writes only to a temporary directory with `JSON.stringify`, passes that directory to the real `replayMatch`, and cleans it in `finally`. It does not use or modify `writeD1Replay`, and does not mock `replayMatch`, `buildGamesForSeed`, `simulateGame`, hash, validator, or provider/store. This verifies: fixed seed/config -> real simulation -> valid ReplayDocument -> replayMatch -> real buildGamesForSeed/simulateGame -> `verified: true`.
 
       npx vitest run tests/game/legacyRoomIsolation.test.ts tests/benchmark/legacyD1Compatibility.test.ts tests/game/roomPlanningArchitecture.test.ts tests/benchmark/d1ReplayValidation.test.ts tests/ai/keepCurrentByteLock.test.ts tests/benchmark/keepCurrentLock.test.ts --testTimeout=120000 --reporter=verbose
 
@@ -255,6 +261,8 @@ Expected final evidence:
 - If a browser build imports the legacy factory or any server store/native SQLite module, stop and fix the import boundary before approval.
 - If a canonical caller reaches the legacy factory, or a legacy caller reaches canonical provider/store allocation, stop and correct the caller classification.
 - If the explicit legacy wrapper would require changing `PublicRoom`, public ledger, public events, replay schema, D0/D1 artifacts, or server contracts, stop because that is outside Task 4.
+- If a valid, type-correct `ReplayDocument` still cannot be consumed by `replayMatch`, report a real replay contract mismatch and stop.
+- If passing the characterization requires modifying `writeD1Replay`, replay helper/production, schema, validator, fixture, artifact, approval, trace, or hash, stop and transfer the decision to Task 5; do not normalize `"d1-replay-v1"` or silently add `rank` in Task 4.
 
 ## Plan self-review
 
@@ -264,4 +272,4 @@ Expected final evidence:
 - TDD steps include concrete RED, GREEN, REFACTOR, verification, and commit boundaries; server production is absent from all commit boundaries.
 - Replay handling matches the current `ReplayDocument` contract: document `matchId`/provenance is authoritative, no synthetic `PublicGameIdentity` is introduced, and no provider/store is called.
 - D0/D1 fixture, artifact, approval, trace, schema, and hash preservation is checked only; no regeneration or contract rewrite is planned.
-- There are no unresolved design decisions, placeholder steps, implicit compatibility modes, or unassigned caller classes.
+- There are no unresolved Task 4 design decisions, placeholder steps, implicit compatibility modes, or unassigned caller classes; the pre-existing `writeD1Replay` incompatibility is explicitly assigned as a Task 5 preflight blocker.
