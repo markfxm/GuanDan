@@ -75,17 +75,31 @@ export type PublicRoom = Omit<RoomState, "hands" | "initialHands" | "publicIdent
 
 let nextRoomId = 1;
 
-export function createRoom({
-  publicIdentity,
-  rank,
-  seed = Date.now(),
-  pendingTributeItems = [],
-}: {
-  publicIdentity?: PublicGameIdentity;
+type CommonRoomCreationInput = Readonly<{
   rank: GameRank;
   seed?: number;
   pendingTributeItems?: TributeItem[];
-}): RoomState {
+}>;
+
+export type CanonicalRoomCreationInput = Readonly<{
+  rank: GameRank;
+  seed: number;
+  pendingTributeItems?: TributeItem[];
+  publicIdentity: PublicGameIdentity;
+}>;
+
+export type LegacyBenchmarkRoomCreationInput = CommonRoomCreationInput;
+
+type RoomIdentitySource =
+  | { kind: "canonical"; identity: PublicGameIdentity }
+  | { kind: "legacy-benchmark" };
+
+function createRoomInternal({
+  source,
+  rank,
+  seed = Date.now(),
+  pendingTributeItems = [],
+}: CommonRoomCreationInput & { source: RoomIdentitySource }): RoomState {
   const deck = shuffledDeck(seed);
   const hands = {
     0: deck.slice(0, 27),
@@ -126,7 +140,8 @@ export function createRoom({
     actionLog: ["房间已创建，AI 已补齐空位。"],
     playHistory: [],
   };
-  if (publicIdentity !== undefined) {
+  if (source.kind === "canonical") {
+    const publicIdentity = source.identity;
     room.publicIdentity = publicIdentity;
     room.publicLedger = createInitialPublicLedger({
       identity: publicIdentity,
@@ -156,6 +171,15 @@ export function createRoom({
     }
   }
   return room;
+}
+
+export function createRoom(input: CanonicalRoomCreationInput): RoomState {
+  if (input.publicIdentity === undefined) throw new Error("CANONICAL_ROOM_IDENTITY_REQUIRED");
+  return createRoomInternal({ ...input, source: { kind: "canonical", identity: input.publicIdentity } });
+}
+
+export function createLegacyBenchmarkRoom(input: LegacyBenchmarkRoomCreationInput): RoomState {
+  return createRoomInternal({ ...input, source: { kind: "legacy-benchmark" } });
 }
 
 export function getPublicRoom(
