@@ -244,8 +244,8 @@ export async function postCreateRoom(intent: CreateRoomIntent): Promise<RoomResp
 function generateIdempotencyKey(): string {
   try {
     const key = globalThis.crypto?.randomUUID?.();
-    if (typeof key !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(key)) {
-      throw new Error("invalid canonical UUID");
+    if (typeof key !== "string" || key.length < 1 || key.length > 128 || !/^[A-Za-z0-9._~:-]+$/.test(key)) {
+      throw new Error("invalid idempotency key");
     }
     return key;
   } catch (cause) {

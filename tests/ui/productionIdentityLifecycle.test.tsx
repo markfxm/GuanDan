@@ -31,8 +31,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function mockCrypto(key: CanonicalUuid = canonicalKey, seed = 123) {
-  vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(key);
+function mockCrypto(key: string = canonicalKey, seed = 123) {
+  vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(key as CanonicalUuid);
   vi.spyOn(globalThis.crypto, "getRandomValues").mockImplementation(<T extends ArrayBufferView | null>(values: T): T => {
     if (values instanceof Uint32Array) values[0] = seed;
     return values;
@@ -180,14 +180,29 @@ it("accepts normalizable legacy room fields without treating them as an invalid 
   expect(result.trick.plays).toEqual([]);
 });
 
+it("accepts any opaque key that satisfies the server header contract", async () => {
+  const serverCompatibleKey = "opaque:key._~-";
+  mockCrypto(serverCompatibleKey);
+  mockSuccess();
+
+  const intent = createRoomIntent("2");
+  await createGameRoom(intent);
+
+  expect(intent.idempotencyKey).toBe(serverCompatibleKey);
+  expect((vi.mocked(fetch).mock.calls[0]![1] as RequestInit).headers).toEqual({
+    "Content-Type": "application/json",
+    "Idempotency-Key": serverCompatibleKey,
+  });
+});
+
 it.each([
-  "not-a-uuid",
-  "00000000-0000-4000-0000-00000000000a",
-  "00000000-0000-4000-8000-00000000000A",
-])("rejects a non-canonical randomUUID result (%s) locally", async (key) => {
+  "",
+  "bad key/space",
+  "é",
+  "x".repeat(129),
+])("rejects a server-invalid randomUUID result (%s) locally", async (key) => {
   const fetchSpy = vi.spyOn(globalThis, "fetch");
-  mockCrypto(key as CanonicalUuid);
-  vi.mocked(crypto.randomUUID).mockReturnValue(key as CanonicalUuid);
+  mockCrypto(key);
 
   await expect(Promise.resolve().then(() => createRoomIntent("2"))).rejects.toSatisfy((error) => isCreateRoomLocalError(error) && error.source === "crypto");
   expect(fetchSpy).not.toHaveBeenCalled();
@@ -213,6 +228,13 @@ it("rejects descriptor failures locally without fetching", async () => {
 
   await expect(Promise.resolve().then(() => createRoomIntent("invalid" as never))).rejects.toSatisfy((error) => isCreateRoomLocalError(error) && error.source === "descriptor");
   await expect(Promise.resolve().then(() => createRoomIntent("2", [{ payer: 4, receiver: 0 } as never]))).rejects.toSatisfy((error) => isCreateRoomLocalError(error) && error.source === "descriptor");
+  const throwingItem = {
+    get payer(): never {
+      throw new Error("descriptor getter unavailable");
+    },
+    receiver: 0,
+  } as unknown as TributeItem;
+  await expect(Promise.resolve().then(() => createRoomIntent("2", [throwingItem]))).rejects.toSatisfy((error) => isCreateRoomLocalError(error) && error.source === "descriptor");
   expect(fetchSpy).not.toHaveBeenCalled();
 });
 
@@ -226,9 +248,10 @@ it("rejects serialization failures locally without fetching", async () => {
 });
 
 it.each([
-  ["invalid JSON", () => { throw new Error("invalid JSON"); }],
-  ["absent room", () => ({})],
-  ["malformed room", () => ({ room: { id: "room-1" } })],
+  ["invalid JSON", (): unknown => { throw new Error("invalid JSON"); }],
+  ["missing body", (): unknown => undefined],
+  ["absent room", (): unknown => ({})],
+  ["malformed room", (): unknown => ({ room: { id: "room-1" } })],
 ] as const)("classifies %s 2xx responses as uncertain response failures", async (_label, json) => {
   mockCrypto();
   vi.spyOn(globalThis, "fetch").mockResolvedValue({ ...mockResponse(200, undefined), json } as Response);
@@ -242,6 +265,7 @@ it.each([
   [409, "definite-failure"],
   [410, "definite-failure"],
   [422, "definite-failure"],
+  [302, "definite-failure"],
   [408, "uncertain"],
   [429, "uncertain"],
   [500, "uncertain"],
@@ -257,6 +281,19 @@ it.each([
       && (classification === "uncertain" ? isRetryableCreateRoomError(error) : !isRetryableCreateRoomError(error));
   });
   expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it("preserves HTTP status details in a definite error", async () => {
+  mockCrypto();
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(mockResponse(409, { error: "IDEMPOTENCY_CONFLICT" }, "Conflict"));
+
+  await expect(createGameRoom(createRoomIntent("2"))).rejects.toSatisfy((error) => {
+    return isCreateRoomHttpError(error)
+      && error.status === 409
+      && error.statusText === "Conflict"
+      && error.serverError === "IDEMPOTENCY_CONFLICT"
+      && !isRetryableCreateRoomError(error);
+  });
 });
 
 it("does not automatically retry a fetch rejection", async () => {
