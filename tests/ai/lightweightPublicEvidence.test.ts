@@ -200,7 +200,26 @@ describe("D2b lightweight public evidence characterization", () => {
     expect(evidence.hardPublicFacts.playedCardIds).toEqual(["C2-1"]);
     expect(evidence.hardPublicFacts.playedCardClasses).toEqual(["C2"]);
     expect(evidence.hardPublicFacts.remainingCardCounts.self).toBe(26);
-    expect(evidence.derivedSignals.recentActions).toMatchObject([{ kind: "play", seat: 0, relation: "self", publicCardIds: ["C2-1"] }]);
+    expect(evidence.hardPublicFacts.initiativeRelation).toBe("self");
+    expect(evidence.derivedSignals.recentPassStreakByRelation).toEqual({
+      self: 0,
+      partner: 0,
+      leftOpponent: 0,
+      rightOpponent: 0,
+    });
+    expect(evidence.derivedSignals.recentActions[0]).toMatchObject({
+      eventIndex: 0,
+      kind: "play",
+      seat: 0,
+      relation: "self",
+      trickIndex: 0,
+      publicStableKey: "play:C2-1",
+      publicCardIds: ["C2-1"],
+      patternType: "single",
+      groupType: "single",
+      handCountBefore: 27,
+      handCountAfter: 26,
+    });
   });
 
   it("derives a pass without changing public hand counts", () => {
@@ -210,9 +229,16 @@ describe("D2b lightweight public evidence characterization", () => {
     const ledger = apply(apply(initialLedger(), play), pass);
     const evidence = evidenceFor(ledger, events, 0);
 
-    expect(evidence.hardPublicFacts.remainingCardCounts).toEqual({ self: 26, partner: 26, leftOpponent: 27, rightOpponent: 27 });
+    expect(evidence.hardPublicFacts.remainingCardCounts).toEqual({ self: 26, partner: 27, leftOpponent: 27, rightOpponent: 27 });
     expect(evidence.hardPublicFacts.currentTrick.lastPlaySeat).toBe(0);
+    expect(evidence.hardPublicFacts.initiativeRelation).toBe("self");
     expect(evidence.derivedSignals.recentActions.map((action) => action.kind)).toEqual(["play", "pass"]);
+    expect(evidence.derivedSignals.recentPassStreakByRelation).toEqual({
+      self: 0,
+      partner: 0,
+      leftOpponent: 1,
+      rightOpponent: 0,
+    });
     expect(evidence.derivedSignals.recentActionTendencies.leftOpponent).toEqual({ playCount: 0, passCount: 1, lastActionKind: "pass" });
   });
 
@@ -224,7 +250,10 @@ describe("D2b lightweight public evidence characterization", () => {
     const ledger = apply(apply(apply(initialLedger(), play), pass), clear);
     const evidence = evidenceFor(ledger, events, 2);
 
+    expect(evidence.hardPublicFacts.initiativeRelation).toBe("partner");
     expect(evidence.derivedSignals.recentActions.map((action) => action.kind)).toEqual(["play", "pass", "trick-clear"]);
+    expect(evidence.derivedSignals.recentActionTendencies.partner.lastActionKind).toBe("play");
+    expect(evidence.derivedSignals.recentActionTendencies.rightOpponent.lastActionKind).toBe("pass");
     expect(evidence.hardPublicFacts.currentTrick.trickIndex).toBe(1);
     expect(evidence.hardPublicFacts.currentTrick.lastPlaySeat).toBeUndefined();
     expect(evidence.hardPublicFacts.currentTrick.passSeats).toEqual([]);
@@ -253,6 +282,13 @@ describe("D2b lightweight public evidence characterization", () => {
       { eventIndex: 0, kind: "tribute", cardId: "C3-1", fromSeat: 0, toSeat: 1 },
       { eventIndex: 1, kind: "return", cardId: "C4-1", fromSeat: 1, toSeat: 0 },
     ]);
+    expect(evidence.hardPublicFacts.publicTributeEvents).toEqual(["status=none"]);
+    expect(evidence.hardPublicFacts.remainingCardCounts).toEqual({
+      self: 27,
+      partner: 27,
+      leftOpponent: 27,
+      rightOpponent: 27,
+    });
     expect(evidence.hardPublicFacts.playedCardIds).toEqual([]);
     expect(evidence.derivedSignals.recentActions.map((action) => action.kind)).toEqual(["tribute", "return"]);
   });
