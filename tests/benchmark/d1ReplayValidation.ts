@@ -1,12 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
+import { RANKS, type GameRank } from "../../src/engine/cards";
+import type { ReplayDocument, StrategyDescriptor } from "./contracts";
 import { finalPublicStateHash as reportingFinalPublicStateHash, publicTraceHash as reportingPublicTraceHash } from "./reporting";
 import { D1_DIAGNOSTICS_SCHEMA, D1_RESULT_SCHEMA, validateD1ProvenanceHash } from "./d1ProvenanceV2";
+import type { PublicSimulationEvent, SimulationSummary } from "./simulator";
 
 export interface D1ReplayValidationOptions { expectedConfigHash?: string; expectedBenchmarkVersion?: string; expectedReplayVersion?: string; expectedEngineVersion?: string; expectedRoomRulesVersion?: string; }
 export function validateD1Replay(replay: Record<string, unknown>, options: D1ReplayValidationOptions = {}): true {
+  if (replay.schemaVersion !== "1") throw new Error("D1_REPLAY_SCHEMA_MISMATCH");
   if (containsPrivateKey(replay)) throw new Error("PRIVACY_HIDDEN_STATE");
   for (const key of ["schemaVersion", "replayVersion", "benchmarkVersion", "engineVersion", "roomRulesVersion", "configHash", "matchId", "seed", "rotation", "strategiesBySeat", "strategyDescriptors", "publicEvents", "handCountChanges", "trickEvents", "tributeEvents", "finishOrder", "teamScore", "deterministicRandom", "actionCount", "publicTraceHash", "finalPublicStateHash"]) if (!(key in replay)) throw new Error(`PROVENANCE_MISSING:${key}`);
+  if (!("rank" in replay)) throw new Error("PROVENANCE_MISSING:rank");
+  if (!isValidD1Rank(replay.rank)) throw new Error("D1_REPLAY_RANK_INVALID");
   if (options.expectedConfigHash !== undefined && replay.configHash !== options.expectedConfigHash) throw new Error("CONFIG_HASH_MISMATCH");
   if (options.expectedBenchmarkVersion !== undefined && replay.benchmarkVersion !== options.expectedBenchmarkVersion) throw new Error("VERSION_MISMATCH");
   for (const [key, expected] of [["replayVersion", options.expectedReplayVersion], ["engineVersion", options.expectedEngineVersion], ["roomRulesVersion", options.expectedRoomRulesVersion]] as const) if (expected !== undefined && replay[key] !== expected) throw new Error("VERSION_MISMATCH");
@@ -37,10 +43,29 @@ export function validateReplaySet(replays: Array<Record<string, unknown>>, expec
 }
 
 export function hashPublicEvents(events: unknown): string { return reportingPublicTraceHash(events); }
-export function writeD1Replay(summary: { matchId: string; seed: number; rotation: number; allocation?: string; rank: string; strategiesBySeat: Record<number, string>; finishOrder: number[]; winnerTeam: 0 | 1 | null; teamScore: Record<0 | 1, number>; actionCount: number; publicTraceHash: string; finalPublicStateHash: string; finalPublicState?: unknown; configHash: string; publicEvents?: unknown[]; randomProvenance?: unknown }, outputDir: string, versions: { benchmarkVersion: string; replayVersion: string; engineVersion: string; roomRulesVersion: string; strategyDescriptors: unknown[] }): string {
+export type D1ReplayDocument = ReplayDocument & {
+  allocation: NonNullable<SimulationSummary["allocation"]>;
+  handCountChanges: Array<NonNullable<PublicSimulationEvent["handCountChanges"]>>;
+  trickEvents: Array<NonNullable<PublicSimulationEvent["trick"]>>;
+  tributeEvents: Array<NonNullable<PublicSimulationEvent["tributeEvents"]>[number]>;
+  finalPublicState?: NonNullable<SimulationSummary["finalPublicState"]>;
+};
+
+const isDefined = <T>(value: T | undefined): value is NonNullable<T> => value !== undefined;
+function isValidD1Rank(value: unknown): value is GameRank {
+  return typeof value === "string" && (RANKS as readonly string[]).includes(value);
+}
+
+export function writeD1Replay(summary: SimulationSummary, outputDir: string, versions: { benchmarkVersion: string; replayVersion: string; engineVersion: string; roomRulesVersion: string; strategyDescriptors: StrategyDescriptor[] }): string {
+  const allocation = summary.allocation;
+  const randomProvenance = summary.randomProvenance;
+  if (allocation === undefined || randomProvenance === undefined) throw new Error("D1_REPLAY_PROVENANCE_MISSING");
   const publicEvents = summary.publicEvents ?? [];
+  const handCountChanges = publicEvents.map((event) => event.handCountChanges).filter(isDefined);
+  const trickEvents = publicEvents.map((event) => event.trick).filter(isDefined);
+  const tributeEvents = publicEvents.flatMap((event) => event.tributeEvents ?? []);
   const replay = {
-    schemaVersion: "d1-replay-v1",
+    schemaVersion: "1",
     replayVersion: versions.replayVersion,
     benchmarkVersion: versions.benchmarkVersion,
     engineVersion: versions.engineVersion,
@@ -49,22 +74,23 @@ export function writeD1Replay(summary: { matchId: string; seed: number; rotation
     configHash: summary.configHash,
     matchId: summary.matchId,
     seed: summary.seed,
+    rank: summary.rank,
     rotation: summary.rotation,
-    allocation: summary.allocation,
+    allocation,
     strategiesBySeat: orderedSeats(summary.strategiesBySeat),
     publicEvents,
-    handCountChanges: publicEvents.map((event) => (event as Record<string, unknown>).handCountChanges).filter(Boolean),
-    trickEvents: publicEvents.map((event) => (event as Record<string, unknown>).trick).filter(Boolean),
-    tributeEvents: publicEvents.flatMap((event) => Array.isArray((event as Record<string, unknown>).tributeEvents) ? (event as Record<string, unknown>).tributeEvents as unknown[] : []),
+    handCountChanges,
+    trickEvents,
+    tributeEvents,
     finishOrder: [...summary.finishOrder],
     winnerTeam: summary.winnerTeam,
     teamScore: { 0: summary.teamScore[0], 1: summary.teamScore[1] },
-    deterministicRandom: summary.randomProvenance ?? { algorithmVersion: "none", baseSeed: summary.seed, perSeatDerivedSeed: {} },
+    deterministicRandom: randomProvenance,
     actionCount: summary.actionCount,
     publicTraceHash: summary.publicTraceHash,
     finalPublicStateHash: summary.finalPublicStateHash,
     ...(summary.finalPublicState === undefined ? {} : { finalPublicState: summary.finalPublicState }),
-  };
+  } satisfies D1ReplayDocument;
   validateD1Replay(replay);
   const destination = path.join(outputDir, `${summary.matchId.replace(/[\\/:*?"<>|]/g, "_")}.json`); fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.writeFileSync(destination, `${JSON.stringify(replay, null, 2)}\n`, "utf8"); return destination;
 }

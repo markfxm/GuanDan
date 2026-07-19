@@ -28,7 +28,19 @@ type WriterCase = Readonly<{
   document: Record<string, unknown>;
 }>;
 
-function createWriterCase(outputRoot: string): WriterCase {
+type SimulationCase = Readonly<{
+  task: BenchmarkGameTask;
+  summary: SimulationSummary;
+  versions: {
+    benchmarkVersion: string;
+    replayVersion: string;
+    engineVersion: string;
+    roomRulesVersion: string;
+    strategyDescriptors: ReturnType<typeof strategyDescriptorsForExecution>;
+  };
+}>;
+
+function createSimulationCase(): SimulationCase {
   const task = buildGamesForSeed(d1Config, d1Config.seeds[0]!).find(
     (candidate) => candidate.rotation === 0 && candidate.allocation === "AB",
   );
@@ -45,15 +57,23 @@ function createWriterCase(outputRoot: string): WriterCase {
     }),
   };
   const summary = simulateGame(taskWithCanonicalMatchId);
-  const outputPath = writeD1Replay(summary, outputRoot, {
+  const versions = {
     benchmarkVersion: d1Config.benchmarkVersion,
     replayVersion: D1_REPLAY_SCHEMA,
     engineVersion: ENGINE_VERSION,
     roomRulesVersion: ROOM_RULES_VERSION,
     strategyDescriptors: strategyDescriptorsForExecution("task1-test-source"),
+  };
+  return { task: taskWithCanonicalMatchId, summary, versions };
+}
+
+function createWriterCase(outputRoot: string): WriterCase {
+  const { task, summary, versions } = createSimulationCase();
+  const outputPath = writeD1Replay(summary, outputRoot, {
+    ...versions,
   });
   const document = JSON.parse(readFileSync(outputPath, "utf8")) as Record<string, unknown>;
-  return { task: taskWithCanonicalMatchId, summary, outputRoot, outputPath, document };
+  return { task, summary, outputRoot, outputPath, document };
 }
 
 function withWriterCase(run: (value: WriterCase) => void): void {
@@ -167,5 +187,41 @@ describe("D1 replay writer compatibility", () => {
       expect(readFileSync(outputPath)).toEqual(outputBytesBefore);
       expect(readdirSync(outputRoot).sort()).toEqual(filesBefore);
     });
+  });
+
+  it("fails closed when allocation is missing before creating files", () => {
+    const { summary, versions } = createSimulationCase();
+    const outputRoot = mkdtempSync(path.join(os.tmpdir(), "d1-replay-writer-"));
+    try {
+      const summaryWithoutAllocation = jsonClone(summary);
+      delete summaryWithoutAllocation.allocation;
+      const inputBefore = jsonClone(summaryWithoutAllocation);
+
+      expect(() => writeD1Replay(summaryWithoutAllocation, outputRoot, versions)).toThrow(
+        "D1_REPLAY_PROVENANCE_MISSING",
+      );
+      expect(readdirSync(outputRoot)).toEqual([]);
+      expect(summaryWithoutAllocation).toEqual(inputBefore);
+    } finally {
+      rmSync(outputRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when random provenance is missing before creating files", () => {
+    const { summary, versions } = createSimulationCase();
+    const outputRoot = mkdtempSync(path.join(os.tmpdir(), "d1-replay-writer-"));
+    try {
+      const summaryWithoutRandomProvenance = jsonClone(summary);
+      delete summaryWithoutRandomProvenance.randomProvenance;
+      const inputBefore = jsonClone(summaryWithoutRandomProvenance);
+
+      expect(() => writeD1Replay(summaryWithoutRandomProvenance, outputRoot, versions)).toThrow(
+        "D1_REPLAY_PROVENANCE_MISSING",
+      );
+      expect(readdirSync(outputRoot)).toEqual([]);
+      expect(summaryWithoutRandomProvenance).toEqual(inputBefore);
+    } finally {
+      rmSync(outputRoot, { recursive: true, force: true });
+    }
   });
 });

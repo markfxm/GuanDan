@@ -13,6 +13,14 @@ describe("D1 replay validation", () => {
     expect(() => validateD1Replay({ ...replay(), strategyDescriptors: undefined })).toThrow(/PROVENANCE/);
   });
 
+  it("rejects invalid rank values while accepting a valid rank", () => {
+    expect(validateD1Replay(replay())).toBe(true);
+    expect(() => validateD1Replay({ ...replay(), rank: undefined })).toThrow("D1_REPLAY_RANK_INVALID");
+    expect(() => validateD1Replay({ ...replay(), rank: null })).toThrow("D1_REPLAY_RANK_INVALID");
+    expect(() => validateD1Replay({ ...replay(), rank: "" })).toThrow("D1_REPLAY_RANK_INVALID");
+    expect(() => validateD1Replay({ ...replay(), rank: "invalid-rank" })).toThrow("D1_REPLAY_RANK_INVALID");
+  });
+
   it("validates expected IDs, duplicates, hashes and versions as a set", () => {
     const first = replay();
     expect(() => validateReplaySet([first, { ...first }], ["m1", "m2"])).toThrow(/DUPLICATE|MISSING/);
