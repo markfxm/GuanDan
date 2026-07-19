@@ -179,6 +179,11 @@ function appendPublicPlay(ledger: HardPublicLedger, events: PublicActionEvent[],
   return apply(ledger, event);
 }
 
+function appendPublicEvent(ledger: HardPublicLedger, events: PublicActionEvent[], event: PublicActionEvent): HardPublicLedger {
+  events.push(event);
+  return apply(ledger, event);
+}
+
 describe("D2b lightweight public evidence characterization", () => {
   it("derives the empty new-hand public state without private input", () => {
     const evidence = evidenceFor(initialLedger(), [], 0);
@@ -305,18 +310,36 @@ describe("D2b lightweight public evidence characterization", () => {
   it("bounds the canonical recent window to the last 16 public events", () => {
     const events: PublicActionEvent[] = [];
     let ledger = initialLedger();
-    const cardIds = ["C2-1", "C2-2", "C3-1", "C3-2", "C4-1", "C4-2", "C5-1", "C5-2", "C6-1", "C6-2", "C7-1", "C7-2", "C8-1", "C8-2", "C9-1", "C9-2", "C10-1"];
-    for (let index = 0; index < cardIds.length; index += 1) {
-      ledger = appendPublicPlay(ledger, events, cardIds[index]!, (index % 4) as PublicSeat);
-    }
+    ledger = appendPublicPlay(ledger, events, "C2-1", 0);
+    ledger = appendPublicEvent(ledger, events, passEvent(ledger.nextEventIndex, 1, ledger.handCounts[1], ledger.currentTrick.trickIndex));
+    ledger = appendPublicPlay(ledger, events, "C2-2", 2);
+    ledger = appendPublicEvent(ledger, events, trickClearEvent(ledger.nextEventIndex, 2, ledger.currentTrick.trickIndex));
+    ledger = appendPublicPlay(ledger, events, "C3-1", 2);
+    ledger = appendPublicEvent(ledger, events, passEvent(ledger.nextEventIndex, 3, ledger.handCounts[3], ledger.currentTrick.trickIndex));
+    ledger = appendPublicEvent(ledger, events, trickClearEvent(ledger.nextEventIndex, 2, ledger.currentTrick.trickIndex));
+    ledger = appendPublicEvent(ledger, events, tributeEvent(ledger.nextEventIndex, "tribute", 0, 1, "C4-1"));
+    ledger = appendPublicEvent(ledger, events, tributeEvent(ledger.nextEventIndex, "return", 1, 0, "C5-1"));
+    ledger = appendPublicPlay(ledger, events, "C4-2", 1);
+    ledger = appendPublicEvent(ledger, events, passEvent(ledger.nextEventIndex, 0, ledger.handCounts[0], ledger.currentTrick.trickIndex));
+    ledger = appendPublicEvent(ledger, events, trickClearEvent(ledger.nextEventIndex, 1, ledger.currentTrick.trickIndex));
+    ledger = appendPublicPlay(ledger, events, "C5-2", 1);
+    ledger = appendPublicEvent(ledger, events, passEvent(ledger.nextEventIndex, 3, ledger.handCounts[3], ledger.currentTrick.trickIndex));
+    ledger = appendPublicEvent(ledger, events, trickClearEvent(ledger.nextEventIndex, 1, ledger.currentTrick.trickIndex));
+    ledger = appendPublicPlay(ledger, events, "C6-1", 3);
+    ledger = appendPublicEvent(ledger, events, passEvent(ledger.nextEventIndex, 0, ledger.handCounts[0], ledger.currentTrick.trickIndex));
 
     const evidence = evidenceFor(ledger, events, 0);
+    const retained = events.slice(-16);
 
     expect(events).toHaveLength(17);
     expect(evidence.derivedSignals.recentActions).toHaveLength(16);
-    expect(evidence.derivedSignals.recentActions[0]?.eventIndex).toBe(1);
-    expect(evidence.derivedSignals.recentActions.at(-1)?.eventIndex).toBe(16);
-    expect(evidence.derivedSignals.recentActions.map((action) => action.kind)).toEqual(new Array(16).fill("play"));
+    expect(evidence.derivedSignals.recentActions.map((action) => action.eventIndex)).toEqual(retained.map((event) => event.eventIndex));
+    expect(evidence.derivedSignals.recentActions.map((action) => action.kind)).toEqual(retained.map((event) => event.kind));
+    expect(evidence.derivedSignals.recentActions.map((action) => action.publicStableKey)).toEqual(retained.map((event) => event.publicStableKey));
+    expect(evidence.derivedSignals.recentActions.some((action) => action.kind === "trick-clear")).toBe(true);
+    expect(evidence.derivedSignals.recentActions.some((action) => action.kind === "tribute" || action.kind === "return")).toBe(true);
+    expect(evidence.derivedSignals.recentActions[0]?.eventIndex).toBe(retained[0]?.eventIndex);
+    expect(evidence.derivedSignals.recentActions.at(-1)?.eventIndex).toBe(retained.at(-1)?.eventIndex);
   });
 
   it("maps self, partner, left opponent and right opponent for every perspective seat", () => {
