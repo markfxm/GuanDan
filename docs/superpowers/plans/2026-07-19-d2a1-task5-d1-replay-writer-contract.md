@@ -240,7 +240,14 @@ Forbidden in Task 5A:
   };
   ```
 
-  `Seat`, `PublicSimulationEvent`, and `PublicTributeEvent` must be imported from their existing definitions in `src/game/room`, `tests/benchmark/simulator`, and `tests/benchmark/contracts`; do not replace these types with `unknown[]`.
+  The implementation must use only type-only imports for the types actually referenced above:
+
+  ```ts
+  import type { ReplayDocument, StrategyDescriptor } from "./contracts";
+  import type { PublicSimulationEvent, SimulationSummary } from "./simulator";
+  ```
+
+  Do not import `Seat` or `PublicTributeEvent`; they are not referenced by the final type. Do not replace the existing types with `unknown[]` or add runtime imports.
 
 - [ ] **Step 1: Implement the minimum envelope correction.**
 
@@ -254,7 +261,7 @@ Forbidden in Task 5A:
   const isDefined = <T>(value: T | undefined): value is NonNullable<T> => value !== undefined;
   const handCountChanges = publicEvents.map((event) => event.handCountChanges).filter(isDefined);
   const trickEvents = publicEvents.map((event) => event.trick).filter(isDefined);
-  const tributeEvents = publicEvents.flatMap((event) => event.tributeEvents);
+  const tributeEvents = publicEvents.flatMap((event) => event.tributeEvents ?? []);
   ```
 
   The object built by `writeD1Replay` must contain the following stable separation:
@@ -346,31 +353,39 @@ Forbidden in Task 5A:
 
   This is Gate A, the local D1 compatibility gate. Expected: all D1 writer, validator, runner, provenance, manifest, calibration-readiness, generic writer, and generic replay tests pass. Record exact file/test counts, exit code, duration, natural exit, and stderr. Gate A does not include the external archive inventory test.
 
-- [ ] **Step 2: Run Gate B, the external calibration-evidence gate separately.**
-
-  ```bash
-  npx vitest run tests/benchmark/d1CalibrationReview.test.ts --testTimeout=120000 --reporter=verbose
-  ```
-
-  If the required external archive is mounted and the file passes, record its path, approval relationship, exact file/test count, exit code, duration, natural exit, and stderr. If the archive is absent and the test fails with the known `ENOENT` inventory error, stop this gate with `D2A1_TASK5A_EXTERNAL_EVIDENCE_BLOCKED`. Do not generate calibration artifacts, run calibration, modify approval JSON, weaken the test, or call Task 5A finally approved. Gate B does not block Task 1/Task 2 implementation and review, but it blocks the final Task 5A approval.
-
-- [ ] **Step 3: Run D0 and general regression.**
+- [ ] **Step 2: Run D0 and general focused regression.**
 
   ```bash
   npx vitest run tests/ai/keepCurrentByteLock.test.ts tests/benchmark/keepCurrentLock.test.ts tests/server/apiCanonicalIdentity.test.ts tests/ui/productionIdentityLifecycle.test.tsx --testTimeout=120000 --reporter=verbose
+  ```
+
+- [ ] **Step 3: Run the complete local test suite.**
+
+  ```bash
   npm test
+  ```
+
+  `npm test` must complete naturally with exit 0; benchmark, simulation, performance, smoke, calibration, and formal workloads remain excluded from this gate. Record exact file/test counts, exit code, duration, natural exit, and stderr.
+
+- [ ] **Step 4: Run local typecheck, build, and diff validation.**
+
+  ```bash
   npx tsc --noEmit
   npm run build
   git diff --check
   ```
 
-  `npm test` must complete naturally with exit 0; benchmark, simulation, performance, smoke, calibration, and formal workloads remain excluded from this gate. The D0 fixture check-only command must run separately and compare before/after bytes:
+  Each command must exit 0. Do not treat a tool timeout as a test failure; report timeout separately and rerun with a sufficient outer limit.
+
+- [ ] **Step 5: Run the D0 fixture check-only gate.**
 
   ```bash
   npx tsx scripts/generateD0KeepCurrentFixtures.ts --source-worktree "../d0-fixture-ai-benchmark" --source-commit "e2a20e18f8e5c0871db38ad69426262e43766ce1" --output "tests/ai/fixtures/d0KeepCurrentCases.json" --generator-version "d0-fixture-v1" --check-only
   ```
 
-- [ ] **Step 4: Verify browser and repository boundaries.**
+  Compare fixture bytes before and after. Any byte drift is `D2A1_TASK5_FROZEN_EVIDENCE_DRIFT`; do not regenerate or repair the fixture in Task 5A.
+
+- [ ] **Step 6: Verify browser and repository boundaries.**
 
   Run:
 
@@ -387,7 +402,21 @@ Forbidden in Task 5A:
 
   Expected: `writeD1Replay` has one caller and `replayD1Match` is the D1 replay consumer; generic `replayMatch` callers remain limited to ordinary benchmark paths. No browser/server identity import appears; no D1 replay artifact or frozen evidence changes; the worktree is clean.
 
-- [ ] **Step 5: Commit and review boundaries.**
+- [ ] **Step 7: Run Gate B, the external calibration-evidence gate last.**
+
+  ```bash
+  npx vitest run tests/benchmark/d1CalibrationReview.test.ts --testTimeout=120000 --reporter=verbose
+  ```
+
+  Gate B runs only after Gate A, the D0/general focused regression, `npm test`, typecheck, build, D0 check-only, and repository/browser scans are complete. If the required external archive is mounted and the file passes, record its path, approval relationship, exact file/test count, exit code, duration, natural exit, and stderr. If the archive is absent and the test fails with the known `ENOENT` inventory error, classify the result as `D2A1_TASK5A_EXTERNAL_EVIDENCE_BLOCKED`; do not generate calibration artifacts, run calibration, modify approval JSON, weaken the test, or call Task 5A finally approved. Gate B does not block Task 1/Task 2 implementation, code review, or completion of local verification, but it blocks final approval.
+
+  Final status classification is frozen:
+
+  - All local gates pass and Gate B passes: `D2A1_TASK5A_COMPLETE_AWAITING_FINAL_REVIEW`.
+  - All local gates pass and Gate B is blocked by the known missing external evidence: `D2A1_TASK5A_LOCALLY_COMPLETE_EXTERNAL_EVIDENCE_BLOCKED`.
+  - The second status is not final approval.
+
+- [ ] **Step 8: Commit and review boundaries.**
 
   The implementation must have no more than two implementation commits: characterization tests and writer contract fix. No commit may modify `tests/benchmark/contracts.ts`, `tests/benchmark/d1ProvenanceV2.ts`, D0/D1 fixtures, approval files, artifacts, or hash baselines.
 
