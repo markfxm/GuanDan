@@ -15,7 +15,7 @@ export function validateD1Replay(replay: Record<string, unknown>, options: D1Rep
   for (const key of requiredD1ReplayFields) if (replay[key] === undefined) throw new Error(`PROVENANCE_MISSING:${key}`);
   if (!isValidD1Rank(replay.rank)) throw new Error("D1_REPLAY_RANK_INVALID");
   if (replay.allocation !== "AB" && replay.allocation !== "BA") throw new Error("D1_REPLAY_ALLOCATION_INVALID");
-  if (replay.winnerTeam !== 0 && replay.winnerTeam !== 1) throw new Error("D1_REPLAY_WINNER_TEAM_INVALID");
+  if (replay.winnerTeam !== 0 && replay.winnerTeam !== 1 && replay.winnerTeam !== null) throw new Error("D1_REPLAY_WINNER_TEAM_INVALID");
   if (options.expectedConfigHash !== undefined && replay.configHash !== options.expectedConfigHash) throw new Error("CONFIG_HASH_MISMATCH");
   if (options.expectedBenchmarkVersion !== undefined && replay.benchmarkVersion !== options.expectedBenchmarkVersion) throw new Error("VERSION_MISMATCH");
   for (const [key, expected] of [["replayVersion", options.expectedReplayVersion], ["engineVersion", options.expectedEngineVersion], ["roomRulesVersion", options.expectedRoomRulesVersion]] as const) if (expected !== undefined && replay[key] !== expected) throw new Error("VERSION_MISMATCH");

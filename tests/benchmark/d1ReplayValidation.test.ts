@@ -41,12 +41,21 @@ describe("D1 replay validation", () => {
     expect(() => validateD1Replay({ ...replay(), rank: "invalid-rank" })).toThrow("D1_REPLAY_RANK_INVALID");
   });
 
-  it("accepts only contract allocation and winner team values", () => {
+  it("accepts contract allocation and winner team values", () => {
     expect(validateD1Replay(replay())).toBe(true);
+    expect(validateD1Replay({ ...replay(), allocation: "BA" })).toBe(true);
+    expect(validateD1Replay({ ...replay(), winnerTeam: 0 })).toBe(true);
+    expect(validateD1Replay({ ...replay(), winnerTeam: 1 })).toBe(true);
+    expect(validateD1Replay({ ...replay(), winnerTeam: null })).toBe(true);
     expect(() => validateD1Replay({ ...replay(), allocation: "AA" })).toThrow("D1_REPLAY_ALLOCATION_INVALID");
     expect(() => validateD1Replay({ ...replay(), allocation: null })).toThrow("D1_REPLAY_ALLOCATION_INVALID");
-    expect(() => validateD1Replay({ ...replay(), winnerTeam: 2 })).toThrow("D1_REPLAY_WINNER_TEAM_INVALID");
-    expect(() => validateD1Replay({ ...replay(), winnerTeam: null })).toThrow("D1_REPLAY_WINNER_TEAM_INVALID");
+    const missingWinner = replay();
+    delete (missingWinner as Record<string, unknown>).winnerTeam;
+    expect(() => validateD1Replay(missingWinner)).toThrow("PROVENANCE_MISSING:winnerTeam");
+    expect(() => validateD1Replay({ ...replay(), winnerTeam: undefined })).toThrow("PROVENANCE_MISSING:winnerTeam");
+    for (const winnerTeam of [-1, 2, "", "0", false, {}, []]) {
+      expect(() => validateD1Replay({ ...replay(), winnerTeam })).toThrow("D1_REPLAY_WINNER_TEAM_INVALID");
+    }
   });
 
   it("fails closed for incomplete or invalid deterministic random provenance", () => {
@@ -57,6 +66,10 @@ describe("D1 replay validation", () => {
       { ...replay(), deterministicRandom: {} },
       { ...replay(), deterministicRandom: { ...random, randomAlgorithmVersion: "" } },
       { ...replay(), deterministicRandom: { ...random, baseSeed: Number.POSITIVE_INFINITY } },
+      { ...replay(), deterministicRandom: { ...random, baseSeed: Number.NaN } },
+      { ...replay(), deterministicRandom: { ...random, perSeatDerivedSeed: null } },
+      { ...replay(), deterministicRandom: { ...random, perSeatDerivedSeed: [] } },
+      { ...replay(), deterministicRandom: { ...random, perSeatDerivedSeed: { ...random.perSeatDerivedSeed, 0: Number.NaN } } },
       { ...replay(), deterministicRandom: { ...random, perSeatDerivedSeed: { ...random.perSeatDerivedSeed, 0: undefined } } },
       { ...replay(), deterministicRandom: { ...random, strategyVersionsBySeat: { ...random.strategyVersionsBySeat, 3: undefined } } },
     ];

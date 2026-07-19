@@ -153,6 +153,21 @@ describe("D1 replay writer compatibility", () => {
     });
   });
 
+  it("round-trips an unresolved winner team through the real D1 writer", () => {
+    const { summary, versions } = createSimulationCase();
+    const outputRoot = mkdtempSync(path.join(os.tmpdir(), "d1-replay-writer-"));
+    try {
+      const summaryWithUnresolvedWinner: SimulationSummary = { ...summary, winnerTeam: null };
+      const outputPath = writeD1Replay(summaryWithUnresolvedWinner, outputRoot, versions);
+      const document = JSON.parse(readFileSync(outputPath, "utf8")) as Record<string, unknown>;
+
+      expect(document.winnerTeam).toBeNull();
+      expect(validateD1Replay(document)).toBe(true);
+    } finally {
+      rmSync(outputRoot, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed for the old envelope without rewriting input or files", () => {
     withWriterCase(({ outputRoot, outputPath, document, task }) => {
       const legacyEnvelope: Record<string, unknown> = {
