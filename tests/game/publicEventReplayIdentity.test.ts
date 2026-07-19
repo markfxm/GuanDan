@@ -110,6 +110,8 @@ describe("standalone public-event replay identity boundary", () => {
     expect(document.initialState).toEqual(initialState);
     const reloaded = persistAndReload(document);
     expect(reloaded).toEqual(document);
+    expect(reloaded.events).toHaveLength(2);
+    expect(reloaded.events.map((event) => event.kind)).toEqual(["play", "pass"]);
     const rebuilt = rebuildPublicLedger(reloaded);
 
     expect(reloaded.events.map((event) => event.publicPayloadHash)).toEqual(document.events.map((event) => event.publicPayloadHash));
