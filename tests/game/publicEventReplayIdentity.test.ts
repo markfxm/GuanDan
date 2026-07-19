@@ -55,6 +55,47 @@ function persistAndReload(document: PublicLedgerReplayDocument): PublicLedgerRep
   }
 }
 
+function normalizeReplayKey(key: string): string {
+  return key.replace(/[-_\s]/g, "").toLowerCase();
+}
+
+const forbiddenReplayKeys = new Set([
+  "transportroomid",
+  "allocationkey",
+  "storepath",
+  "idempotencykey",
+  "installationidentity",
+  "identitystore",
+  "gamesequence",
+  "privatehand",
+  "initialhands",
+  "hands",
+  "deck",
+  "airuntime",
+  "provider",
+  "store",
+  "partnerhand",
+  "opponentshands",
+  "hiddeninitialhand",
+  "hiddenstate",
+  "particlebank",
+  "hypotheticalhands",
+]);
+
+function collectKeys(value: unknown, keys: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    for (const child of value) collectKeys(child, keys);
+    return keys;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, child] of Object.entries(value)) {
+      keys.push(key);
+      collectKeys(child, keys);
+    }
+  }
+  return keys;
+}
+
 describe("standalone public-event replay identity boundary", () => {
   it("persists a real canonical room public stream and verifies the final ledger hash", () => {
     const room = createCanonicalRoom();
@@ -84,5 +125,42 @@ describe("standalone public-event replay identity boundary", () => {
     const tampered = { ...reloaded, finalLedgerHash: "0".repeat(64) };
     const reloadedTampered = persistAndReload(tampered);
     expect(() => rebuildPublicLedger(reloadedTampered)).toThrow("REPLAY_FINAL_HASH_MISMATCH");
+  });
+
+  it("keeps the public replay path independent of provider and store modules", () => {
+    const replaySource = readFileSync(join(process.cwd(), "src/game/publicEventReplay.ts"), "utf8");
+    const ledgerSource = readFileSync(join(process.cwd(), "src/game/publicLedger.ts"), "utf8");
+    const eventSource = readFileSync(join(process.cwd(), "src/game/publicEvent.ts"), "utf8");
+    const source = `${replaySource}\n${ledgerSource}\n${eventSource}`;
+
+    expect(source).not.toMatch(
+      /(?:from\s+["'][^"']*(?:server|provider|store)(?:[\\/]|["'])|import\s*\(\s*["'][^"']*(?:server|provider|store)(?:[\\/]|["'])|PublicIdentityStore|createPublicIdentityProvider|publicIdentityStore|publicIdentityProvider|better-sqlite3|better_sqlite3\.node|node:sqlite|\bsqlite3\b|[\\/]server[\\/]|[\\/]provider[\\/]|[\\/]store[\\/])/i,
+    );
+  });
+
+  it("keeps allocation and hidden-state fields out of the saved public document", () => {
+    const room = createCanonicalRoom();
+    const initialState = structuredClone(captureInitialPublicState(room));
+    const playSeat = room.currentTurn;
+    const playedCard = room.hands[playSeat][0];
+    if (playedCard === undefined) throw new Error("TEST_CARD_MISSING");
+    playCards(room, playSeat, [playedCard.id]);
+    passTurn(room, room.currentTurn);
+    const document = toReplayDocument(initialState, room);
+    const reloaded = persistAndReload(document);
+    expect(reloaded).toEqual(document);
+    expect(Object.keys(reloaded).sort()).toEqual(["events", "finalLedgerHash", "initialState", "schemaVersion"]);
+    expect(Object.keys(reloaded.initialState).sort()).toEqual(["identity", "initialHandCounts", "initialTrickIndex", "openingLeader", "openingTributePublicState"]);
+    for (const key of collectKeys(reloaded)) {
+      expect(forbiddenReplayKeys.has(normalizeReplayKey(key))).toBe(false);
+    }
+    const serialized = JSON.stringify(reloaded);
+    expect(serialized).not.toContain("PublicIdentityStore");
+    expect(serialized).not.toContain("createPublicIdentityProvider");
+    expect(serialized).not.toContain("better-sqlite3");
+    expect(serialized).not.toContain("node:sqlite");
+    expect(reloaded.initialState.identity.gameId).toBe("task5:public-replay");
+    expect(reloaded.initialState.identity.roundIdentity).toBeDefined();
+    expect(reloaded.initialState.identity.handIdentity).toBeDefined();
   });
 });
