@@ -7,17 +7,20 @@ import { D1_DIAGNOSTICS_SCHEMA, D1_RESULT_SCHEMA, validateD1ProvenanceHash } fro
 import type { PublicSimulationEvent, SimulationSummary } from "./simulator";
 
 export interface D1ReplayValidationOptions { expectedConfigHash?: string; expectedBenchmarkVersion?: string; expectedReplayVersion?: string; expectedEngineVersion?: string; expectedRoomRulesVersion?: string; }
+const requiredD1ReplayFields = ["schemaVersion", "replayVersion", "benchmarkVersion", "engineVersion", "roomRulesVersion", "configHash", "matchId", "seed", "rank", "rotation", "allocation", "strategiesBySeat", "strategyDescriptors", "deterministicRandom", "publicEvents", "handCountChanges", "trickEvents", "tributeEvents", "finishOrder", "winnerTeam", "teamScore", "actionCount", "publicTraceHash", "finalPublicStateHash"] as const;
 export function validateD1Replay(replay: Record<string, unknown>, options: D1ReplayValidationOptions = {}): true {
+  if (replay.schemaVersion === undefined) throw new Error("PROVENANCE_MISSING:schemaVersion");
   if (replay.schemaVersion !== "1") throw new Error("D1_REPLAY_SCHEMA_MISMATCH");
   if (containsPrivateKey(replay)) throw new Error("PRIVACY_HIDDEN_STATE");
-  for (const key of ["schemaVersion", "replayVersion", "benchmarkVersion", "engineVersion", "roomRulesVersion", "configHash", "matchId", "seed", "rotation", "strategiesBySeat", "strategyDescriptors", "publicEvents", "handCountChanges", "trickEvents", "tributeEvents", "finishOrder", "teamScore", "deterministicRandom", "actionCount", "publicTraceHash", "finalPublicStateHash"]) if (!(key in replay)) throw new Error(`PROVENANCE_MISSING:${key}`);
-  if (!("rank" in replay)) throw new Error("PROVENANCE_MISSING:rank");
+  for (const key of requiredD1ReplayFields) if (replay[key] === undefined) throw new Error(`PROVENANCE_MISSING:${key}`);
   if (!isValidD1Rank(replay.rank)) throw new Error("D1_REPLAY_RANK_INVALID");
+  if (replay.allocation !== "AB" && replay.allocation !== "BA") throw new Error("D1_REPLAY_ALLOCATION_INVALID");
+  if (replay.winnerTeam !== 0 && replay.winnerTeam !== 1) throw new Error("D1_REPLAY_WINNER_TEAM_INVALID");
   if (options.expectedConfigHash !== undefined && replay.configHash !== options.expectedConfigHash) throw new Error("CONFIG_HASH_MISMATCH");
   if (options.expectedBenchmarkVersion !== undefined && replay.benchmarkVersion !== options.expectedBenchmarkVersion) throw new Error("VERSION_MISMATCH");
   for (const [key, expected] of [["replayVersion", options.expectedReplayVersion], ["engineVersion", options.expectedEngineVersion], ["roomRulesVersion", options.expectedRoomRulesVersion]] as const) if (expected !== undefined && replay[key] !== expected) throw new Error("VERSION_MISMATCH");
   if (!Array.isArray(replay.strategyDescriptors)) throw new Error("PROVENANCE_MISSING:strategyDescriptors");
-  if (replay.deterministicRandom === undefined || typeof replay.deterministicRandom !== "object") throw new Error("PROVENANCE_MISSING:deterministicRandom");
+  if (!isValidRandomProvenance(replay.deterministicRandom)) throw new Error("PROVENANCE_MISSING:deterministicRandom");
   if (typeof replay.publicTraceHash !== "string" || typeof replay.finalPublicStateHash !== "string") throw new Error("HASH_MISSING");
   return true;
 }
@@ -54,6 +57,22 @@ export type D1ReplayDocument = ReplayDocument & {
 const isDefined = <T>(value: T | undefined): value is NonNullable<T> => value !== undefined;
 function isValidD1Rank(value: unknown): value is GameRank {
   return typeof value === "string" && (RANKS as readonly string[]).includes(value);
+}
+function isValidRandomProvenance(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value.randomAlgorithmVersion) || !isNonEmptyString(value.strategySeedDerivationVersion) || !isNonEmptyString(value.candidateOrderingVersion) || !isNonEmptyString(value.decisionIndexSemantics)) return false;
+  if (typeof value.baseSeed !== "number" || !Number.isFinite(value.baseSeed)) return false;
+  return isCompleteSeatStringRecord(value.perSeatDerivedSeed) && isCompleteSeatStringRecord(value.strategyVersionsBySeat);
+}
+function isCompleteSeatStringRecord(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return [0, 1, 2, 3].every((seat) => Object.prototype.hasOwnProperty.call(value, seat) && isNonEmptyString(value[seat]));
+}
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 export function writeD1Replay(summary: SimulationSummary, outputDir: string, versions: { benchmarkVersion: string; replayVersion: string; engineVersion: string; roomRulesVersion: string; strategyDescriptors: StrategyDescriptor[] }): string {
