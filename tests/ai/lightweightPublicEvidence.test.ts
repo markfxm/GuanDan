@@ -819,4 +819,75 @@ describe("D2b lightweight public evidence characterization", () => {
     expect(importSources.some((sourcePath) => /room|planning|runtimeContracts|aiDecisionEngine|server|provider|store|particle|rollout|treatment/.test(sourcePath))).toBe(false);
     expect(forbiddenPrivateIdentifiers.filter((identifier) => identifiers.has(identifier))).toEqual([]);
   });
+
+  it("does not integrate lightweight evidence into the frozen production decision path", () => {
+    const frozenProductionFiles = [
+      "src/game/room.ts",
+      "src/ai/contracts.ts",
+      "src/ai/runtimeContracts.ts",
+      "src/ai/aiDecisionEngine.ts",
+      "src/ai/planning/handPlanner.ts",
+    ] as const;
+    const forbiddenIntegrationIdentifiers = [
+      "LightweightPublicEvidence",
+      "deriveLightweightPublicEvidence",
+      "assertLightweightPublicEvidencePrivacy",
+      "lightweightPublicEvidence",
+    ] as const;
+    const forbiddenIntegrationValues = new Set<string>(forbiddenIntegrationIdentifiers);
+    const violations: Array<{
+      file: string;
+      kind: "import" | "identifier" | "dynamic-import" | "require" | "string-literal";
+      value: string;
+    }> = [];
+
+    for (const file of frozenProductionFiles) {
+      const source = readFileSync(resolve(process.cwd(), file), "utf8");
+      const sourceFile = ts.createSourceFile(
+        file,
+        source,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS,
+      );
+      const identifiers = new Set<string>();
+
+      function stringArgumentValue(node: ts.Expression): string | undefined {
+        if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+        return undefined;
+      }
+
+      function visit(node: ts.Node): void {
+        if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+          const value = node.moduleSpecifier.text;
+          if (/lightweightPublicEvidence/.test(value)) violations.push({ file, kind: "import", value });
+        }
+        if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+          const value = node.arguments[0] ? stringArgumentValue(node.arguments[0]) : undefined;
+          if (value !== undefined && /lightweightPublicEvidence/.test(value)) {
+            violations.push({ file, kind: "dynamic-import", value });
+          }
+        }
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "require") {
+          const value = node.arguments[0] ? stringArgumentValue(node.arguments[0]) : undefined;
+          if (value !== undefined && /lightweightPublicEvidence/.test(value)) {
+            violations.push({ file, kind: "require", value });
+          }
+        }
+        if (ts.isIdentifier(node)) identifiers.add(node.text);
+        if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && forbiddenIntegrationValues.has(node.text)) {
+          violations.push({ file, kind: "string-literal", value: node.text });
+        }
+        ts.forEachChild(node, visit);
+      }
+
+      visit(sourceFile);
+
+      for (const identifier of forbiddenIntegrationIdentifiers) {
+        if (identifiers.has(identifier)) violations.push({ file, kind: "identifier", value: identifier });
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
 });
