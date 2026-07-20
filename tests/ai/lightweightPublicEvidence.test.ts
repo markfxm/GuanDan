@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { buildPublicGameIdentity, type PublicActionEvent, type PublicSeat } from "../../src/game/publicEvent";
 import { finalizePublicActionEvent, type PublicActionEventDraft } from "../../src/game/publicEventHash";
@@ -18,6 +20,29 @@ import {
 const identity = buildPublicGameIdentity("d2b:evidence", 0, 0, "benchmark-scenario");
 const nextHandIdentity = buildPublicGameIdentity("d2b:evidence", 1, 0, "benchmark-scenario");
 const initialCounts = { 0: 27, 1: 27, 2: 27, 3: 27 } as const;
+const evidencePrivacyViolation = "D2B_EVIDENCE_PRIVACY_VIOLATION";
+const forbiddenPrivacyKeys = [
+  "partnerHand",
+  "opponentsHands",
+  "hands",
+  "initialHands",
+  "deck",
+  "hiddenInitialHand",
+  "hiddenState",
+  "fullState",
+  "hypotheticalHands",
+  "ParticleBank",
+  "particles",
+  "provider",
+  "store",
+  "identityProvider",
+  "identityStore",
+  "providerIdentity",
+  "installationIdentity",
+  "idempotencyKey",
+  "gameSequence",
+  "roomTransportId",
+] as const;
 
 function initialLedger(openingLeader: PublicSeat = 0): HardPublicLedger {
   return createInitialPublicLedger({
@@ -173,6 +198,18 @@ function relationView(evidence: LightweightPublicEvidence) {
   };
 }
 
+function collectUnfrozenPaths(value: unknown, path = "$", seen = new Set<object>()): string[] {
+  if (value === null || typeof value !== "object") return [];
+  if (seen.has(value)) return [];
+  seen.add(value);
+
+  const paths = Object.isFrozen(value) ? [] : [path];
+  for (const [key, child] of Object.entries(value)) {
+    paths.push(...collectUnfrozenPaths(child, `${path}.${key}`, seen));
+  }
+  return paths;
+}
+
 function appendPublicPlay(ledger: HardPublicLedger, events: PublicActionEvent[], publicCardId: string, seat: PublicSeat): HardPublicLedger {
   const event = playEvent(ledger.nextEventIndex, seat, ledger.handCounts[seat], publicCardId, ledger.currentTrick.trickIndex);
   events.push(event);
@@ -182,6 +219,30 @@ function appendPublicPlay(ledger: HardPublicLedger, events: PublicActionEvent[],
 function appendPublicEvent(ledger: HardPublicLedger, events: PublicActionEvent[], event: PublicActionEvent): HardPublicLedger {
   events.push(event);
   return apply(ledger, event);
+}
+
+function expectPrivacyViolation(value: unknown): void {
+  let error: unknown;
+  try {
+    assertLightweightPublicEvidencePrivacy(value);
+  } catch (caught) {
+    error = caught;
+  }
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toBe(evidencePrivacyViolation);
+}
+
+function punctuatedUppercaseKey(key: string): string {
+  return key.toUpperCase().split("").join("-");
+}
+
+function expectDerivationFailurePreservesLedger(validLedger: HardPublicLedger, action: () => void): void {
+  const beforeJson = JSON.stringify(validLedger);
+  const beforeHash = canonicalPublicLedgerHash(validLedger);
+
+  expect(action).toThrow("D2B_PUBLIC_EVIDENCE");
+  expect(JSON.stringify(validLedger)).toBe(beforeJson);
+  expect(canonicalPublicLedgerHash(validLedger)).toBe(beforeHash);
 }
 
 describe("D2b lightweight public evidence characterization", () => {
@@ -393,25 +454,277 @@ describe("D2b lightweight public evidence characterization", () => {
     expect(JSON.stringify(ledger)).toBe(beforeBytes);
   });
 
+  it("emits complete deterministic public provenance", () => {
+    const event = playEvent(0, 0, 27, "C2-1");
+    const ledger = apply(initialLedger(), event);
+    const first = evidenceFor(ledger, [event], 0);
+    const second = evidenceFor(ledger, [event], 0);
+    const expectedFields = [
+      "identity/index",
+      "perspective/seatMap",
+      "remainingCardCounts",
+      "currentTrick",
+      "initiativeRelation",
+      "playedCardIds",
+      "playedCardClasses",
+      "publicTransfers",
+      "publicTributeEvents",
+      "finishOrder",
+      "recentActions",
+      "recentPassStreakByRelation",
+      "recentActionTendencies",
+      "provenance",
+    ];
+
+    expect(first.provenance).toHaveLength(14);
+    expect(first.provenance.map((row) => row.field)).toEqual(expectedFields);
+    expect(first.provenance.every((row) => row.hiddenStateRisk === "none")).toBe(true);
+    expect(first.provenance.every((row) => row.hashImpact === "none")).toBe(true);
+    expect(
+      first.provenance.every(
+        (row) => row.publicSource === "HardPublicLedger" || row.publicSource === "PublicActionEvent[]",
+      ),
+    ).toBe(true);
+    const provenanceSourceByField = Object.fromEntries(
+      first.provenance.map((row) => [row.field, row.publicSource]),
+    );
+    expect(provenanceSourceByField).toMatchObject({
+      "identity/index": "HardPublicLedger",
+      remainingCardCounts: "HardPublicLedger",
+      currentTrick: "HardPublicLedger",
+      initiativeRelation: "HardPublicLedger",
+      playedCardIds: "HardPublicLedger",
+      playedCardClasses: "HardPublicLedger",
+      publicTransfers: "HardPublicLedger",
+      publicTributeEvents: "HardPublicLedger",
+      finishOrder: "HardPublicLedger",
+      recentActions: "PublicActionEvent[]",
+      recentPassStreakByRelation: "PublicActionEvent[]",
+      recentActionTendencies: "PublicActionEvent[]",
+    });
+    expect(first.provenance.every((row) => row.field.length > 0 && row.derivation.length > 0)).toBe(true);
+    expect(second.provenance).toEqual(first.provenance);
+    expect(JSON.stringify(second.provenance)).toBe(JSON.stringify(first.provenance));
+  });
+
+  it("deep-freezes the complete evidence graph without aliasing inputs", () => {
+    const play = playEvent(0, 0, 27, "C2-1");
+    const pass = passEvent(1, 1, 27);
+    const tribute = tributeEvent(2, "tribute", 0, 1, "C3-1");
+    const returnEvent = tributeEvent(3, "return", 1, 0, "C4-1");
+    const events = [play, pass, tribute, returnEvent];
+    const ledger = apply(apply(apply(apply(initialLedger(), play), pass), tribute), returnEvent);
+    const inputFreezeStateBefore = {
+      ledger: Object.isFrozen(ledger),
+      currentTrick: Object.isFrozen(ledger.currentTrick),
+      passSeats: Object.isFrozen(ledger.currentTrick.passSeats),
+      events: Object.isFrozen(events),
+      event: Object.isFrozen(events[0]),
+    };
+
+    const evidence = evidenceFor(ledger, events, 0);
+    const playAction = evidence.derivedSignals.recentActions.find((action) => action.kind === "play");
+    const inputFreezeStateAfter = {
+      ledger: Object.isFrozen(ledger),
+      currentTrick: Object.isFrozen(ledger.currentTrick),
+      passSeats: Object.isFrozen(ledger.currentTrick.passSeats),
+      events: Object.isFrozen(events),
+      event: Object.isFrozen(events[0]),
+    };
+
+    expect(collectUnfrozenPaths(evidence)).toEqual([]);
+    expect(evidence.hardPublicFacts.currentTrick).not.toBe(ledger.currentTrick);
+    expect(evidence.hardPublicFacts.currentTrick.passSeats).not.toBe(ledger.currentTrick.passSeats);
+    expect(evidence.hardPublicFacts.playedCardIds).not.toBe(ledger.playedCardIds);
+    expect(evidence.hardPublicFacts.publicTransfers).not.toBe(ledger.revealedTransferEvents);
+    expect(evidence.hardPublicFacts.publicTributeEvents).not.toBe(ledger.publicTributeEvents);
+    expect(evidence.derivedSignals.recentActions).not.toBe(events);
+    expect(playAction?.publicCardIds).not.toBe(play.publicCardIds);
+    expect(evidence.hardPublicFacts.publicTransfers[0]).not.toBe(ledger.revealedTransferEvents[0]);
+    expect(inputFreezeStateAfter).toEqual(inputFreezeStateBefore);
+  });
+
   it("accepts valid evidence and rejects recursively injected private fields", () => {
     const event = playEvent(0, 0, 27, "C2-1");
     const evidence = evidenceFor(apply(initialLedger(), event), [event], 0);
 
     expect(() => assertLightweightPublicEvidencePrivacy(evidence)).not.toThrow();
-    expect(() => assertLightweightPublicEvidencePrivacy({ evidence, nested: { ParticleBank: {} } })).toThrow("D2B_EVIDENCE_PRIVACY_VIOLATION");
-    expect(() => assertLightweightPublicEvidencePrivacy({ evidence, nested: [{ hiddenState: true }] })).toThrow("D2B_EVIDENCE_PRIVACY_VIOLATION");
-    expect(() => assertLightweightPublicEvidencePrivacy({ evidence, nested: { providerIdentity: "private" } })).toThrow("D2B_EVIDENCE_PRIVACY_VIOLATION");
+    expectPrivacyViolation({ evidence, nested: { ParticleBank: {} } });
+    expectPrivacyViolation({ evidence, nested: [{ hiddenState: true }] });
+    expectPrivacyViolation({ evidence, nested: { providerIdentity: "private" } });
+  });
+
+  it("rejects every exact forbidden privacy key recursively", () => {
+    for (const forbiddenKey of forbiddenPrivacyKeys) {
+      expectPrivacyViolation({
+        safeEnvelope: [
+          {
+            nested: {
+              [forbiddenKey]: {
+                value: true,
+              },
+            },
+          },
+        ],
+      });
+    }
+  });
+
+  it("rejects normalized forbidden privacy key variants recursively", () => {
+    for (const forbiddenKey of forbiddenPrivacyKeys) {
+      expectPrivacyViolation({
+        safeEnvelope: [
+          {
+            nested: {
+              [punctuatedUppercaseKey(forbiddenKey)]: {
+                value: true,
+              },
+            },
+          },
+        ],
+      });
+    }
+  });
+
+  it("allows public identity keys and actual evidence through privacy scanning", () => {
+    const event = playEvent(0, 0, 27, "C2-1");
+    const evidence = evidenceFor(apply(initialLedger(), event), [event], 0);
+
+    expect(() =>
+      assertLightweightPublicEvidencePrivacy({
+        gameId: "g",
+        nested: [
+          {
+            roundIdentity: "r",
+            deeper: {
+              handIdentity: "h",
+            },
+          },
+        ],
+      }),
+    ).not.toThrow();
+    expect(() => assertLightweightPublicEvidencePrivacy(evidence)).not.toThrow();
+  });
+
+  it("does not scan ordinary string values for forbidden privacy words", () => {
+    expect(() =>
+      assertLightweightPublicEvidencePrivacy({
+        label: "provider",
+        note: "ParticleBank",
+      }),
+    ).not.toThrow();
+  });
+
+  it("handles cycles and still detects forbidden keys inside a cycle graph", () => {
+    const safeCycle: Record<string, unknown> = {};
+    safeCycle.self = safeCycle;
+
+    const unsafeCycle: Record<string, unknown> = {};
+    unsafeCycle.self = unsafeCycle;
+    unsafeCycle.nested = {
+      hiddenState: true,
+    };
+
+    expect(() => assertLightweightPublicEvidencePrivacy(safeCycle)).not.toThrow();
+    expectPrivacyViolation(unsafeCycle);
   });
 
   it("fails closed for inconsistent public identity, hash, index and recent-window input", () => {
     const event = playEvent(0, 0, 27, "C2-1");
     const ledger = apply(initialLedger(), event);
 
-    expect(() => deriveLightweightPublicEvidence({ ...ledger, handIdentity: nextHandIdentity.handIdentity }, [event], 0)).toThrow("D2B_PUBLIC_EVIDENCE");
-    expect(() => deriveLightweightPublicEvidence(ledger, [{ ...event, publicPayloadHash: "0".repeat(64) }], 0)).toThrow("D2B_PUBLIC_EVIDENCE");
-    expect(() => deriveLightweightPublicEvidence(ledger, [{ ...event, eventIndex: 4 }], 0)).toThrow("D2B_PUBLIC_EVIDENCE");
-    expect(() => deriveLightweightPublicEvidence(ledger, [], 0)).toThrow("D2B_PUBLIC_EVIDENCE");
-    expect(() => deriveLightweightPublicEvidence(ledger, [event, event], 0)).toThrow("D2B_PUBLIC_EVIDENCE");
+    expectDerivationFailurePreservesLedger(ledger, () => deriveLightweightPublicEvidence({ ...ledger, handIdentity: nextHandIdentity.handIdentity }, [event], 0));
+    expectDerivationFailurePreservesLedger(ledger, () => deriveLightweightPublicEvidence(ledger, [{ ...event, publicPayloadHash: "0".repeat(64) }], 0));
+    expectDerivationFailurePreservesLedger(ledger, () => deriveLightweightPublicEvidence(ledger, [{ ...event, eventIndex: 4 }], 0));
+    expectDerivationFailurePreservesLedger(ledger, () => deriveLightweightPublicEvidence(ledger, [], 0));
+    expectDerivationFailurePreservesLedger(ledger, () => deriveLightweightPublicEvidence(ledger, [event, event], 0));
+  });
+
+  it("fails closed for recent summary mismatch without mutating the valid ledger", () => {
+    const event = playEvent(0, 0, 27, "C2-1");
+    const ledger = apply(initialLedger(), event);
+    const malformedLedger = {
+      ...ledger,
+      recentActionSummaries: [
+        {
+          ...ledger.recentActionSummaries[0],
+          publicStableKey: "play:wrong-card",
+        },
+      ],
+    } as HardPublicLedger;
+
+    expectDerivationFailurePreservesLedger(ledger, () => deriveLightweightPublicEvidence(malformedLedger, [event], 0));
+  });
+
+  it("fails closed when ledger summaries and recent events are both truncated", () => {
+    const first = playEvent(0, 0, 27, "C2-1");
+    const second = passEvent(1, 1, 27);
+    const validLedger = apply(apply(initialLedger(), first), second);
+    const malformedLedger = {
+      ...validLedger,
+      recentActionSummaries: validLedger.recentActionSummaries.slice(-1),
+    } as HardPublicLedger;
+
+    expect(validLedger.lastAppliedEventIndex).toBe(1);
+    expect(validLedger.recentActionSummaries).toHaveLength(2);
+    expect(malformedLedger.recentActionSummaries).toHaveLength(1);
+    expect([second]).toHaveLength(malformedLedger.recentActionSummaries.length);
+    expectDerivationFailurePreservesLedger(
+      validLedger,
+      () => deriveLightweightPublicEvidence(malformedLedger, [second], 0),
+    );
+  });
+
+  it("fails closed for negative hand counts, duplicate public seats and invalid perspective", () => {
+    const event = playEvent(0, 0, 27, "C2-1");
+    const ledger = apply(initialLedger(), event);
+    const negativeHandCountLedger = {
+      ...ledger,
+      handCounts: {
+        ...ledger.handCounts,
+        1: -1,
+      },
+    } as HardPublicLedger;
+    const duplicatePassLedger = {
+      ...ledger,
+      currentTrick: {
+        ...ledger.currentTrick,
+        passSeats: [1, 1],
+      },
+    } as HardPublicLedger;
+
+    expectDerivationFailurePreservesLedger(ledger, () => deriveLightweightPublicEvidence(negativeHandCountLedger, [event], 0));
+    expectDerivationFailurePreservesLedger(ledger, () => deriveLightweightPublicEvidence(duplicatePassLedger, [event], 0));
+    expectDerivationFailurePreservesLedger(ledger, () => deriveLightweightPublicEvidence(ledger, [event], 4 as PublicSeat));
+  });
+
+  it("fails closed when a public transfer index exceeds the ledger tail", () => {
+    const tribute = tributeEvent(0, "tribute", 0, 1, "C3-1");
+    const returnEvent = tributeEvent(1, "return", 1, 0, "C4-1");
+    const validLedger = apply(apply(initialLedger(), tribute), returnEvent);
+    const malformedLedger = {
+      ...validLedger,
+      revealedTransferEvents: validLedger.revealedTransferEvents.map((transfer, index) =>
+        index === 1 ? { ...transfer, eventIndex: validLedger.lastAppliedEventIndex + 1 } : transfer,
+      ),
+    } as HardPublicLedger;
+
+    expect(() => deriveLightweightPublicEvidence(malformedLedger, [tribute, returnEvent], 0)).toThrow("D2B_PUBLIC_EVIDENCE");
+  });
+
+  it("fails closed when public transfer indexes are not strictly increasing", () => {
+    const tribute = tributeEvent(0, "tribute", 0, 1, "C3-1");
+    const returnEvent = tributeEvent(1, "return", 1, 0, "C4-1");
+    const validLedger = apply(apply(initialLedger(), tribute), returnEvent);
+    const malformedLedger = {
+      ...validLedger,
+      revealedTransferEvents: [
+        validLedger.revealedTransferEvents[1],
+        validLedger.revealedTransferEvents[0],
+      ],
+    } as HardPublicLedger;
+
+    expect(() => deriveLightweightPublicEvidence(malformedLedger, [tribute, returnEvent], 0)).toThrow("D2B_PUBLIC_EVIDENCE");
   });
 
   it("isolates a reset hand from the previous public event stream", () => {
@@ -440,11 +753,70 @@ describe("D2b lightweight public evidence characterization", () => {
   });
 
   it("keeps the evidence module within the public-only source boundary", () => {
-    const source = readFileSync(new URL("../../src/ai/belief/lightweightPublicEvidence.ts", import.meta.url), "utf8");
+    const source = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/ai/belief/lightweightPublicEvidence.ts",
+      ),
+      "utf8",
+    );
+    const sourceFile = ts.createSourceFile(
+      "lightweightPublicEvidence.ts",
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const importSources: string[] = [];
+    const identifiers = new Set<string>();
+    const forbiddenPrivateIdentifiers = [
+      "RoomState",
+      "hands",
+      "initialHands",
+      "deck",
+      "AiRuntimeState",
+      "HandPlanner",
+      "generateHandPlans",
+      "ParticleBank",
+      "particles",
+      "rollout",
+      "treatment",
+      "server",
+      "provider",
+      "store",
+    ] as const;
+    let sideEffectImportCount = 0;
+    let dynamicImportCount = 0;
+    let requireCallCount = 0;
 
-    expect(source).toMatch(/from\s+["']\.\.\/\.\.\/game\/publicEvent["']/);
-    expect(source).toMatch(/from\s+["']\.\.\/\.\.\/game\/publicEventHash["']/);
-    expect(source).toMatch(/from\s+["']\.\.\/\.\.\/game\/publicLedger["']/);
-    expect(source).not.toMatch(/RoomState|hands|initialHands|deck|AiRuntimeState|HandPlanner|generateHandPlans|ParticleBank|particles|rollout|treatment|server|provider|store/);
+    function visit(node: ts.Node): void {
+      if (ts.isImportDeclaration(node)) {
+        if (ts.isStringLiteral(node.moduleSpecifier)) {
+          importSources.push(node.moduleSpecifier.text);
+        }
+        if (node.importClause === undefined) sideEffectImportCount += 1;
+      }
+      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        dynamicImportCount += 1;
+      }
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "require") {
+        requireCallCount += 1;
+      }
+      if (ts.isIdentifier(node)) identifiers.add(node.text);
+      ts.forEachChild(node, visit);
+    }
+
+    visit(sourceFile);
+
+    expect([...new Set(importSources)].sort()).toEqual([
+      "../../game/publicEvent",
+      "../../game/publicEventHash",
+      "../../game/publicLedger",
+    ].sort());
+    expect(sideEffectImportCount).toBe(0);
+    expect(dynamicImportCount).toBe(0);
+    expect(requireCallCount).toBe(0);
+    expect(importSources.some((sourcePath) => /room|planning|runtimeContracts|aiDecisionEngine|server|provider|store|particle|rollout|treatment/.test(sourcePath))).toBe(false);
+    expect(forbiddenPrivateIdentifiers.filter((identifier) => identifiers.has(identifier))).toEqual([]);
   });
 });
