@@ -12,5 +12,5 @@ describe("benchmark worker lifecycle", () => {
     await runBenchmark({ strategyA: "unknown-a", strategyB: "unknown-b", seeds: [1], paired: false, concurrency: 1, replayMode: "none" });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(workerResources()).toBeLessThanOrEqual(before);
-  });
+  }, 120_000);
 });

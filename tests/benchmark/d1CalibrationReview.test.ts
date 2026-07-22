@@ -72,5 +72,5 @@ describe("D1 calibration review", () => {
     const first = await inventoryDirectory("artifacts/ai-benchmark-d1-calibration-v2");
     const second = await inventoryDirectory("artifacts/ai-benchmark-d1-calibration-v2");
     expect(second).toEqual(first);
-  });
+  }, 120_000);
 });

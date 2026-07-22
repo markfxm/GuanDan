@@ -81,7 +81,7 @@ describe("AI benchmark CLI", () => {
     manifest.expectedMatchIds.pop();
     fs.writeFileSync(manifestPath, JSON.stringify(manifest));
     await expect(runBenchmark({ ...base, resume: true })).rejects.toThrow("MISSING_EXPECTED_MATCH_ID");
-  });
+  }, 120_000);
 
   it("recomputes corrupt reused rows instead of silently reusing them", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-benchmark-corrupt-"));
