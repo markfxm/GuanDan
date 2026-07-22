@@ -7,6 +7,9 @@ import { decideAiAction } from "../ai/aiDecisionEngine";
 import type { AiPlanningDiagnostics } from "../ai/diagnostics/aiPlanningDiagnostics";
 import { canBeatPlay, classifyPlay } from "./playRules";
 import { settleRound, type RoundSettlement, type TributeItem, type TributeState } from "./settlement";
+import { buildPublicGameIdentity, type PublicActionEventDraft, type PublicGameIdentity } from "./publicEvent";
+import { finalizePublicActionEvent } from "./publicEventHash";
+import { applyPublicEvent, createInitialPublicLedger, type HardPublicLedger } from "./publicLedger";
 
 export type Seat = 0 | 1 | 2 | 3;
 
@@ -58,9 +61,12 @@ export type RoomState = {
   status: "playing" | "finished";
   actionLog: string[];
   playHistory: TrickPlay[];
+  publicIdentity?: PublicGameIdentity;
+  publicLedger?: HardPublicLedger;
+  publicEvents?: ReturnType<typeof finalizePublicActionEvent>[];
 };
 
-export type PublicRoom = Omit<RoomState, "hands" | "initialHands"> & {
+export type PublicRoom = Omit<RoomState, "hands" | "initialHands" | "publicIdentity" | "publicLedger" | "publicEvents"> & {
   humanSeat: Seat;
   humanHand: Card[];
   replayHands: Record<Seat, Card[]>;
@@ -69,15 +75,31 @@ export type PublicRoom = Omit<RoomState, "hands" | "initialHands"> & {
 
 let nextRoomId = 1;
 
-export function createRoom({
-  rank,
-  seed = Date.now(),
-  pendingTributeItems = [],
-}: {
+type CommonRoomCreationInput = Readonly<{
   rank: GameRank;
   seed?: number;
   pendingTributeItems?: TributeItem[];
-}): RoomState {
+}>;
+
+export type CanonicalRoomCreationInput = Readonly<{
+  rank: GameRank;
+  seed: number;
+  pendingTributeItems?: TributeItem[];
+  publicIdentity: PublicGameIdentity;
+}>;
+
+export type LegacyBenchmarkRoomCreationInput = CommonRoomCreationInput;
+
+type RoomIdentitySource =
+  | { kind: "canonical"; identity: PublicGameIdentity }
+  | { kind: "legacy-benchmark" };
+
+function createRoomInternal({
+  source,
+  rank,
+  seed = Date.now(),
+  pendingTributeItems = [],
+}: CommonRoomCreationInput & { source: RoomIdentitySource }): RoomState {
   const deck = shuffledDeck(seed);
   const hands = {
     0: deck.slice(0, 27),
@@ -89,7 +111,7 @@ export function createRoom({
   const openingTribute = resolveOpeningTribute(hands, pendingTributeItems, rank);
   const openingLeader = openingTribute?.status === "pending" ? openingTribute.activeSeat ?? 0 : randomOpeningLeader(seed);
 
-  return {
+  const room: RoomState = {
     id: `room-${nextRoomId++}`,
     rank,
     players: [0, 1, 2, 3].map((seat) => ({
@@ -118,6 +140,46 @@ export function createRoom({
     actionLog: ["房间已创建，AI 已补齐空位。"],
     playHistory: [],
   };
+  if (source.kind === "canonical") {
+    const publicIdentity = source.identity;
+    room.publicIdentity = publicIdentity;
+    room.publicLedger = createInitialPublicLedger({
+      identity: publicIdentity,
+      initialHandCounts: { 0: hands[0].length, 1: hands[1].length, 2: hands[2].length, 3: hands[3].length },
+      openingLeader,
+      initialTrickIndex: 0,
+      openingTributePublicState: { status: openingTribute?.status ?? "none" },
+    });
+    room.publicEvents = [];
+    if (openingTribute?.status === "anti-tribute") {
+      const antiTribute = finalizePublicActionEvent({
+        schemaVersion: "d2-public-event-v2",
+        gameId: publicIdentity.gameId,
+        roundIdentity: publicIdentity.roundIdentity,
+        handIdentity: publicIdentity.handIdentity,
+        eventIndex: room.publicLedger.nextEventIndex,
+        kind: "anti-tribute",
+        seat: openingLeader,
+        publicStableKey: "anti-tribute:anti-tribute",
+        trickIndex: 0,
+        reasonCode: "anti-tribute",
+      } as PublicActionEventDraft);
+      const result = applyPublicEvent(room.publicLedger, antiTribute);
+      if (!result.ok) throw new Error(result.error);
+      room.publicLedger = result.ledger;
+      room.publicEvents = [antiTribute];
+    }
+  }
+  return room;
+}
+
+export function createRoom(input: CanonicalRoomCreationInput): RoomState {
+  if (input.publicIdentity === undefined) throw new Error("CANONICAL_ROOM_IDENTITY_REQUIRED");
+  return createRoomInternal({ ...input, source: { kind: "canonical", identity: input.publicIdentity } });
+}
+
+export function createLegacyBenchmarkRoom(input: LegacyBenchmarkRoomCreationInput): RoomState {
+  return createRoomInternal({ ...input, source: { kind: "legacy-benchmark" } });
 }
 
 export function getPublicRoom(
@@ -128,7 +190,7 @@ export function getPublicRoom(
   if (options.ensurePlans !== false) {
     ensureAiPlans(room);
   }
-  const { hands: _hands, initialHands: _initialHands, ...publicState } = room;
+  const { hands: _hands, initialHands: _initialHands, publicIdentity: _publicIdentity, publicLedger: _publicLedger, publicEvents: _publicEvents, ...publicState } = room;
 
   return {
     ...publicState,
@@ -169,6 +231,13 @@ function toLegacyAiPlanState(seat: Seat, plan: HandPlan): AiPlanState {
 }
 
 export function playCards(room: RoomState, seat: Seat, cardIds: string[]): void {
+  if (room.publicIdentity !== undefined && room.publicLedger !== undefined && room.publicEvents !== undefined) {
+    return playCardsWithPublicLedger(room, seat, cardIds);
+  }
+  playCardsLegacy(room, seat, cardIds);
+}
+
+function playCardsLegacy(room: RoomState, seat: Seat, cardIds: string[]): void {
   assertActiveTurn(room, seat);
   assertNoOpeningTribute(room);
   const selected = selectCards(room.hands[seat], cardIds);
@@ -201,6 +270,13 @@ export function playCards(room: RoomState, seat: Seat, cardIds: string[]): void 
 }
 
 export function passTurn(room: RoomState, seat: Seat): void {
+  if (room.publicIdentity !== undefined && room.publicLedger !== undefined && room.publicEvents !== undefined) {
+    return passTurnWithPublicLedger(room, seat);
+  }
+  passTurnLegacy(room, seat);
+}
+
+function passTurnLegacy(room: RoomState, seat: Seat): void {
   assertActiveTurn(room, seat);
   assertNoOpeningTribute(room);
   if (room.trick.lastPlay === undefined) {
@@ -224,6 +300,126 @@ export function passTurn(room: RoomState, seat: Seat): void {
     room.actionLog.unshift(`${playerName(room, leadSeat)} 接风。`);
   } else {
     room.currentTurn = nextPlayableSeat(room, seat);
+  }
+}
+
+function playCardsWithPublicLedger(room: RoomState, seat: Seat, cardIds: string[]): void {
+  const draft = structuredClone(room);
+  const beforeHandCount = room.hands[seat].length;
+  playCardsLegacy(draft, seat, cardIds);
+  const play = draft.playHistory.at(-1);
+  if (play?.action !== "play" || play.group === undefined || room.publicIdentity === undefined || room.publicLedger === undefined || room.publicEvents === undefined) throw new Error("D2A_PUBLIC_PLAY_EVENT_MISSING");
+  const eventDrafts: PublicActionEventDraft[] = [{
+    schemaVersion: "d2-public-event-v2",
+    gameId: room.publicIdentity.gameId,
+    roundIdentity: room.publicIdentity.roundIdentity,
+    handIdentity: room.publicIdentity.handIdentity,
+    eventIndex: room.publicLedger.nextEventIndex,
+    kind: "play",
+    seat,
+    publicStableKey: `play:${[...cardIds].sort().join(",")}`,
+    publicCardIds: [...cardIds],
+    patternType: play.group.type,
+    groupType: play.group.type,
+    handCountBefore: beforeHandCount,
+    handCountAfter: draft.hands[seat].length,
+    trickIndex: play.trickIndex ?? room.currentTrickIndex,
+    usedWildcardCount: play.group.wildcards.length,
+    usedBomb: play.group.type === "bomb" || play.group.type === "straight-flush" || play.group.type === "joker-bomb",
+  } as PublicActionEventDraft];
+  for (const finishedSeat of draft.finishOrder.slice(room.finishOrder.length)) {
+    const finishReason = finishedSeat === seat && draft.hands[finishedSeat].length === 0 ? "hand-empty" : "round-settlement";
+    eventDrafts.push({
+      schemaVersion: "d2-public-event-v2",
+      gameId: room.publicIdentity.gameId,
+      roundIdentity: room.publicIdentity.roundIdentity,
+      handIdentity: room.publicIdentity.handIdentity,
+      eventIndex: room.publicLedger.nextEventIndex + eventDrafts.length,
+      kind: "finish",
+      seat: finishedSeat,
+      publicStableKey: `finish:${room.finishOrder.length + eventDrafts.length}:${finishReason}`,
+      trickIndex: play.trickIndex ?? room.currentTrickIndex,
+      finishPosition: room.finishOrder.length + eventDrafts.length,
+      remainingHandCount: draft.hands[finishedSeat].length,
+      finishReason,
+    } as PublicActionEventDraft);
+  }
+  commitPublicTransition(room, draft, eventDrafts);
+}
+
+function passTurnWithPublicLedger(room: RoomState, seat: Seat): void {
+  const draft = structuredClone(room);
+  passTurnLegacy(draft, seat);
+  if (JSON.stringify(draft.finishOrder) !== JSON.stringify(room.finishOrder)) throw new Error("D2A_FINISH_EVENT_PENDING");
+  const pass = draft.playHistory.at(-1);
+  if (pass?.action !== "pass" || room.publicIdentity === undefined || room.publicLedger === undefined || room.publicEvents === undefined) throw new Error("D2A_PUBLIC_PASS_EVENT_MISSING");
+  const eventDrafts: PublicActionEventDraft[] = [{
+    schemaVersion: "d2-public-event-v2",
+    gameId: room.publicIdentity.gameId,
+    roundIdentity: room.publicIdentity.roundIdentity,
+    handIdentity: room.publicIdentity.handIdentity,
+    eventIndex: room.publicLedger.nextEventIndex,
+    kind: "pass",
+    seat,
+    publicStableKey: "pass:v2",
+    handCountBefore: room.hands[seat].length,
+    handCountAfter: room.hands[seat].length,
+    trickIndex: pass.trickIndex ?? room.currentTrickIndex,
+  } as PublicActionEventDraft];
+  if (draft.currentTrickIndex !== room.currentTrickIndex) {
+    eventDrafts.push({
+      schemaVersion: "d2-public-event-v2",
+      gameId: room.publicIdentity.gameId,
+      roundIdentity: room.publicIdentity.roundIdentity,
+      handIdentity: room.publicIdentity.handIdentity,
+      eventIndex: room.publicLedger.nextEventIndex + 1,
+      kind: "trick-clear",
+      seat,
+      publicStableKey: `trick-clear:${room.currentTrickIndex}:${draft.currentTrickIndex}`,
+      trickIndex: room.currentTrickIndex,
+      leadSeat: draft.trick.leadSeat,
+    } as PublicActionEventDraft);
+  }
+  commitPublicTransition(room, draft, eventDrafts);
+}
+
+function commitPublicTransition(room: RoomState, draft: RoomState, eventDrafts: readonly PublicActionEventDraft[]): void {
+  if (room.publicLedger === undefined || room.publicEvents === undefined) throw new Error("D2A_PUBLIC_LEDGER_MISSING");
+  const finalizedEvents = eventDrafts.map((eventDraft) => finalizePublicActionEvent(eventDraft));
+  let nextLedger = room.publicLedger;
+  for (const event of finalizedEvents) {
+    const result = applyPublicEvent(nextLedger, event);
+    if (!result.ok) throw new Error(result.error);
+    nextLedger = result.ledger;
+  }
+  crossCheckTransition(draft, nextLedger, finalizedEvents);
+  room.players = structuredClone(draft.players);
+  room.hands = structuredClone(draft.hands);
+  room.initialHands = structuredClone(draft.initialHands);
+  room.currentTurn = draft.currentTurn;
+  room.leaderSeat = draft.leaderSeat;
+  room.trick = structuredClone(draft.trick);
+  room.currentTrickIndex = draft.currentTrickIndex;
+  room.finishOrder = structuredClone(draft.finishOrder);
+  room.openingTribute = structuredClone(draft.openingTribute);
+  room.settlement = structuredClone(draft.settlement);
+  room.aiPlans = structuredClone(draft.aiPlans);
+  room.aiRuntime = structuredClone(draft.aiRuntime);
+  room.status = draft.status;
+  room.actionLog = structuredClone(draft.actionLog);
+  room.playHistory = structuredClone(draft.playHistory);
+  room.publicLedger = nextLedger;
+  room.publicEvents = [...room.publicEvents, ...finalizedEvents];
+}
+
+function crossCheckTransition(room: RoomState, ledger: HardPublicLedger, events: readonly ReturnType<typeof finalizePublicActionEvent>[]): void {
+  if (ledger.handCounts[0] !== room.hands[0].length || ledger.handCounts[1] !== room.hands[1].length || ledger.handCounts[2] !== room.hands[2].length || ledger.handCounts[3] !== room.hands[3].length) throw new Error("D2A_LEDGER_ROOM_MISMATCH");
+  if (ledger.currentTrick.trickIndex !== room.currentTrickIndex) throw new Error("D2A_LEDGER_TRICK_MISMATCH");
+  const lastEvent = events.at(-1);
+  if (lastEvent?.kind === "trick-clear") {
+    if (ledger.currentTrick.leadSeat !== room.trick.leadSeat || ledger.currentTrick.passSeats.length !== 0 || ledger.currentTrick.lastPlaySeat !== undefined) throw new Error("D2A_LEDGER_TRICK_MISMATCH");
+  } else if (room.trick.lastPlaySeat !== undefined && ledger.currentTrick.lastPlaySeat !== room.trick.lastPlaySeat) {
+    throw new Error("D2A_LEDGER_TRICK_MISMATCH");
   }
 }
 
@@ -337,6 +533,58 @@ function emptyAiRuntime(): AiRuntimeState {
 }
 
 export function advanceOpeningTribute(room: RoomState, seat?: Seat, cardIds: string[] = []): void {
+  if (room.publicIdentity !== undefined && room.publicLedger !== undefined && room.publicEvents !== undefined) {
+    return advanceOpeningTributeWithPublicLedger(room, seat, cardIds);
+  }
+  advanceOpeningTributeLegacy(room, seat, cardIds);
+}
+
+function advanceOpeningTributeWithPublicLedger(room: RoomState, seat?: Seat, cardIds: string[] = []): void {
+  const draft = structuredClone(room);
+  const phase = room.openingTribute?.phase;
+  advanceOpeningTributeLegacy(draft, seat, cardIds);
+  const eventDrafts = buildTransferEventDrafts(room, draft, phase);
+  commitPublicTransition(room, draft, eventDrafts);
+}
+
+function buildTransferEventDrafts(room: RoomState, draft: RoomState, phase: TributeState["phase"]): PublicActionEventDraft[] {
+  if (room.publicIdentity === undefined || room.publicLedger === undefined) return [];
+  const changes = { 0: 0, 1: 0, 2: 0, 3: 0 } as Record<Seat, number>;
+  let fromSeat: Seat | undefined;
+  let toSeat: Seat | undefined;
+  let cardId: string | undefined;
+  for (const candidate of [0, 1, 2, 3] as const) {
+    const before = new Set(room.hands[candidate].map((card) => card.id));
+    const after = new Set(draft.hands[candidate].map((card) => card.id));
+    const removed = [...before].filter((id) => !after.has(id));
+    const added = [...after].filter((id) => !before.has(id));
+    changes[candidate] = draft.hands[candidate].length - room.hands[candidate].length;
+    if (removed.length === 1) {
+      fromSeat = candidate;
+      cardId = removed[0];
+    }
+    if (added.length === 1) toSeat = candidate;
+  }
+  if (fromSeat === undefined || toSeat === undefined || cardId === undefined || fromSeat === toSeat) return [];
+  const kind = phase === "return" ? "return" : "tribute";
+  return [{
+    schemaVersion: "d2-public-event-v2",
+    gameId: room.publicIdentity.gameId,
+    roundIdentity: room.publicIdentity.roundIdentity,
+    handIdentity: room.publicIdentity.handIdentity,
+    eventIndex: room.publicLedger.nextEventIndex,
+    kind,
+    seat: fromSeat,
+    publicCardIds: [cardId],
+    fromSeat,
+    toSeat,
+    handCountChanges: changes,
+    publicStableKey: `${kind}:${fromSeat}:${toSeat}:${cardId}`,
+    trickIndex: room.publicLedger.currentTrick.trickIndex,
+  } as PublicActionEventDraft];
+}
+
+function advanceOpeningTributeLegacy(room: RoomState, seat?: Seat, cardIds: string[] = []): void {
   const tribute = room.openingTribute;
   if (tribute === undefined || tribute.status !== "pending") {
     return;

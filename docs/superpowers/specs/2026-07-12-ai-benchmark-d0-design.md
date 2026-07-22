@@ -130,7 +130,7 @@ Three 200-seed matchups require `3 × 200 × 8 = 4,800` raw games, `2,400` paire
 
 The existing fixed-seed all-unified artifact measures 100 games at mean 5.76 s/game (median 5.02 s, p95 11.88 s) on this workspace. A conservative sequential planning estimate is approximately 6–8 hours for the 4,800-game formal baseline plus replay I/O; the two weak-baseline comparisons may be faster, but D0 schedules against the conservative bound. Smoke runs are estimated at roughly 35–50 minutes sequentially. These are planning estimates, not benchmark claims.
 
-`--batch 1-50`, `--resume`, and `--skip-existing` use a manifest keyed by `configHash`. A batch file contains its complete seed interval, expected eight match IDs per seed, completed summaries, and hashes. Resume may reuse only a completed record with the same config hash and matching replay/hash requirements. Merge rejects different configuration hashes, duplicate match IDs, missing expected IDs, inconsistent strategy descriptors, or incomplete base-seed blocks. A deterministic merge test proves four 50-seed batches equal one 200-seed one-shot result.
+`--batch 1-50`, `--resume`, and `--skip-existing` use a manifest keyed by `configHash`. A batch file contains its complete seed interval, `expectedMatchIds`, explicit `completedMatchIds`, completed summaries, and public/final hashes. Resume may reuse only a completed record with the same config hash and matching replay/hash requirements. Merge rejects different configuration hashes, duplicate match IDs, missing expected IDs, inconsistent strategy descriptors, or incomplete base-seed blocks. A deterministic merge test proves four 50-seed batches equal one 200-seed one-shot result.
 
 ## CPU concurrency
 

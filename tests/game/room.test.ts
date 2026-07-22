@@ -1,10 +1,10 @@
-import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, type Seat } from "../../src/game/room";
+import { advanceOpeningTribute, createLegacyBenchmarkRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, type Seat } from "../../src/game/room";
 import { createDeck, isHeartRankWild, rankStrength, type Card, type GameRank, type Rank, type Suit } from "../../src/engine/cards";
 import { measurePlanQuality } from "../../src/engine/planQuality";
 import { classifyPlay } from "../../src/game/playRules";
 
 it("creates a four-seat room with AI filled empty seats and 27 cards per player", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
 
   expect(room.players).toHaveLength(4);
   expect(room.players.filter((player) => player.isAI)).toHaveLength(3);
@@ -13,7 +13,7 @@ it("creates a four-seat room with AI filled empty seats and 27 cards per player"
 });
 
 it("creates scored AI hand plans that consume each AI hand exactly once", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const publicRoom = getPublicRoom(room, 0);
 
   expect(Object.keys(publicRoom.aiPlans).sort()).toEqual(["1", "2", "3"]);
@@ -27,7 +27,7 @@ it("creates scored AI hand plans that consume each AI hand exactly once", () => 
 });
 
 it("does not build AI plans while serializing a public room", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
 
   const publicRoom = getPublicRoom(room, 0, { ensurePlans: false });
 
@@ -36,7 +36,7 @@ it("does not build AI plans while serializing a public room", () => {
 });
 
 it("keeps existing AI hand plans when a trick ends", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("3", "spades"),
     suited("3", "clubs"),
@@ -65,7 +65,7 @@ it("keeps existing AI hand plans when a trick ends", () => {
 });
 
 it("refreshes only the active AI plan when it no longer covers that hand", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   const activeHand = [suited("3", "spades"), suited("4", "clubs")];
   const untouchedPlan = { seat: 2 as Seat, name: "untouched", score: 1, groups: [] };
   const lastPlay = {
@@ -93,7 +93,7 @@ it("refreshes only the active AI plan when it no longer covers that hand", () =>
 });
 
 it("keeps a natural bomb before choosing an overlapping plate in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("8", "spades"),
     suited("8", "clubs"),
@@ -113,7 +113,7 @@ it("keeps a natural bomb before choosing an overlapping plate in AI plans", () =
 });
 
 it("keeps an ordinary four-card bomb when the overlapping straight lacks four loose singles", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("3", "spades"),
     suited("3", "clubs"),
@@ -135,7 +135,7 @@ it("keeps an ordinary four-card bomb when the overlapping straight lacks four lo
 });
 
 it("uses the heart-rank wildcard for a straight while retaining a natural bomb in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("10", "spades"),
     suited("J", "clubs"),
@@ -156,7 +156,7 @@ it("uses the heart-rank wildcard for a straight while retaining a natural bomb i
 });
 
 it("splits one bomb card into a straight when it removes four loose singles", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("3", "spades"),
     suited("3", "clubs"),
@@ -182,7 +182,7 @@ it("splits one bomb card into a straight when it removes four loose singles", ()
 });
 
 it("uses one card from a five-card bomb for a straight and retains four as a bomb", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("3", "spades"),
     suited("3", "clubs"),
@@ -203,7 +203,7 @@ it("uses one card from a five-card bomb for a straight and retains four as a bom
 });
 
 it("uses two cards from a six-card bomb for straights and retains four as a bomb", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("3", "spades"),
     suited("3", "clubs"),
@@ -232,7 +232,7 @@ it("uses two cards from a six-card bomb for straights and retains four as a bomb
 });
 
 it("keeps a natural straight flush intact in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   const straightFlushCards = [
     suited("3", "spades"),
     suited("4", "spades"),
@@ -253,7 +253,7 @@ it("keeps a natural straight flush intact in AI plans", () => {
 });
 
 it("selects the strict lexicographic optimum for the screenshot hand in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     joker("BJ"),
     suited("A", "spades"),
@@ -304,7 +304,7 @@ it("selects the strict lexicographic optimum for the screenshot hand in AI plans
 });
 
 it("finds the bounded-beam optimum for mixed straight and pair covers in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("J", "clubs"),
     suited("J", "diamonds"),
@@ -327,7 +327,7 @@ it("finds the bounded-beam optimum for mixed straight and pair covers in AI plan
 });
 
 it("uses fallback score after the first four quality fields tie in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("3", "clubs"),
     suited("7", "clubs", 2),
@@ -358,7 +358,7 @@ it("uses fallback score after the first four quality fields tie in AI plans", ()
 });
 
 it("uses the lowest available pair as the full-house kicker in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("4", "clubs"),
     suited("4", "diamonds"),
@@ -381,7 +381,7 @@ it("uses the lowest available pair as the full-house kicker in AI plans", () => 
 });
 
 it("does not break a high triple as a full-house kicker when a natural pair is available in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("Q", "spades"),
     suited("Q", "clubs"),
@@ -406,7 +406,7 @@ it("does not break a high triple as a full-house kicker when a natural pair is a
 });
 
 it("does not create a full-house by splitting another natural triple in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("Q", "spades"),
     suited("Q", "clubs"),
@@ -425,7 +425,7 @@ it("does not create a full-house by splitting another natural triple in AI plans
 });
 
 it("keeps a natural plate and consecutive-pairs before forming an overlapping full-house in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     joker("BJ"),
     suited("A", "diamonds"),
@@ -459,7 +459,7 @@ it("keeps a natural plate and consecutive-pairs before forming an overlapping fu
 });
 
 it("keeps a low plate and low consecutive-pairs instead of leaving loose low singles in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     joker("SJ"),
     joker("SJ", 2),
@@ -493,7 +493,7 @@ it("keeps a low plate and low consecutive-pairs instead of leaving loose low sin
 });
 
 it("keeps a natural high full-house as one tail hand before a bomb in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("A", "spades"),
     suited("A", "hearts"),
@@ -518,12 +518,12 @@ it("keeps a natural high full-house as one tail hand before a bomb in AI plans",
 });
 
 it("randomizes the opening leader for the first deal", () => {
-  expect(createRoom({ rank: "10", seed: 1 }).currentTurn).toBe(0);
-  expect(createRoom({ rank: "10", seed: 2 }).currentTurn).toBe(1);
+  expect(createLegacyBenchmarkRoom({ rank: "10", seed: 1 }).currentTurn).toBe(0);
+  expect(createLegacyBenchmarkRoom({ rank: "10", seed: 2 }).currentTurn).toBe(1);
 });
 
 it("records each player action in the current trick until the trick resets", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const card = room.hands[0][0];
   playCards(room, 0, [card.id]);
 
@@ -548,7 +548,7 @@ it("records each player action in the current trick until the trick resets", () 
 });
 
 it("keeps a full play history for replay after the current trick resets", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const card = room.hands[0][0];
 
   playCards(room, 0, [card.id]);
@@ -568,7 +568,7 @@ it("keeps a full play history for replay after the current trick resets", () => 
 });
 
 it("keeps every recorded play traceable to that seat's replay hand", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
 
   runAiUntilHumanTurn(room, 0);
   if (room.currentTurn === 0 && room.status === "playing") {
@@ -595,7 +595,7 @@ it("keeps every recorded play traceable to that seat's replay hand", () => {
 });
 
 it("publishes replay hands and trick indexes for perspective replay", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const northOriginalHand = room.hands[2].map((card) => card.id);
   const card = room.hands[0][0];
 
@@ -610,7 +610,7 @@ it("publishes replay hands and trick indexes for perspective replay", () => {
 });
 
 it("plays a legal human card and advances to the next seat", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const card = room.hands[0][0];
 
   playCards(room, 0, [card.id]);
@@ -621,7 +621,7 @@ it("plays a legal human card and advances to the next seat", () => {
 });
 
 it("rotates turns counterclockwise from south to east to north to west", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const card = room.hands[0][0];
 
   playCards(room, 0, [card.id]);
@@ -633,7 +633,7 @@ it("rotates turns counterclockwise from south to east to north to west", () => {
 });
 
 it("runs exactly one AI action when stepping", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const card = room.hands[0][0];
   playCards(room, 0, [card.id]);
 
@@ -647,7 +647,7 @@ it("runs exactly one AI action when stepping", () => {
 });
 
 it("normalizes a finished AI seat before attempting to plan or lead", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [];
   room.finishOrder = [1];
   room.currentTurn = 1;
@@ -660,7 +660,7 @@ it("normalizes a finished AI seat before attempting to plan or lead", () => {
 });
 
 it("advances past an AI that cannot beat a south A full-house while playing rank 5", () => {
-  const room = createRoom({ rank: "5", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "5", seed: 1 });
   const southFullHouse = [
     suited("A", "spades"),
     suited("A", "clubs"),
@@ -694,7 +694,7 @@ it("advances past an AI that cannot beat a south A full-house while playing rank
 });
 
 it("runs AI seats until the human needs to act", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   room.currentTurn = 1;
 
   runAiUntilHumanTurn(room);
@@ -704,7 +704,7 @@ it("runs AI seats until the human needs to act", () => {
 });
 
 it("settles round when three players have finished and appends the remaining seat", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   room.finishOrder = [0, 2];
   const lastCard = room.hands[1][0];
   room.hands[1] = [lastCard];
@@ -719,7 +719,7 @@ it("settles round when three players have finished and appends the remaining sea
 });
 
 it("settles immediately when partners finish first and second", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   room.finishOrder = [0];
   const lastCard = room.hands[2][0];
   room.hands[2] = [lastCard];
@@ -737,7 +737,7 @@ it("settles immediately when partners finish first and second", () => {
 });
 
 it("checks anti-tribute only after the next room is dealt", () => {
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank: "K",
     seed: 11,
     pendingTributeItems: [
@@ -752,7 +752,7 @@ it("checks anti-tribute only after the next room is dealt", () => {
 });
 
 it("waits for the opening tribute flow after the next deal when anti-tribute does not apply", () => {
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank: "K",
     seed: 1,
     pendingTributeItems: [{ payer: 3, receiver: 0 }],
@@ -766,10 +766,10 @@ it("waits for the opening tribute flow after the next deal when anti-tribute doe
 
 it("reveals the tribute card before a human receiver chooses a return card", () => {
   const rank: GameRank = "K";
-  const baseRoom = createRoom({ rank, seed: 1 });
+  const baseRoom = createLegacyBenchmarkRoom({ rank, seed: 1 });
   const tributeCard = strongestTributeCard(baseRoom.hands[3], rank);
 
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank,
     seed: 1,
     pendingTributeItems: [{ payer: 3, receiver: 0 }],
@@ -794,7 +794,7 @@ it("reveals the tribute card before a human receiver chooses a return card", () 
 
 it("allows a human receiver to choose a legal return card instead of the automatic minimum", () => {
   const rank: GameRank = "K";
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank,
     seed: 1,
     pendingTributeItems: [{ payer: 3, receiver: 0 }],
@@ -825,7 +825,7 @@ it("allows a human receiver to choose a legal return card instead of the automat
 
 it("allows a human receiver to return a single 10", () => {
   const rank: GameRank = "K";
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank,
     seed: 1,
     pendingTributeItems: [{ payer: 3, receiver: 0 }],
@@ -846,7 +846,7 @@ it("allows a human receiver to return a single 10", () => {
 
 it("uses post-tribute hands as the replay starting point", () => {
   const rank: GameRank = "K";
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank,
     seed: 1,
     pendingTributeItems: [{ payer: 3, receiver: 0 }],
@@ -867,7 +867,7 @@ it("uses post-tribute hands as the replay starting point", () => {
 
 it("refreshes AI hand plans after opening tribute changes hands", () => {
   const rank: GameRank = "K";
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank,
     seed: 1,
     pendingTributeItems: [{ payer: 3, receiver: 0 }],
@@ -885,14 +885,14 @@ it("refreshes AI hand plans after opening tribute changes hands", () => {
 
 it("assigns double tribute cards by strength and lets the strongest tribute payer lead", () => {
   const rank: GameRank = "K";
-  const baseRoom = createRoom({ rank, seed: 1 });
+  const baseRoom = createLegacyBenchmarkRoom({ rank, seed: 1 });
   const firstPayerCard = strongestTributeCard(baseRoom.hands[1], rank);
   const secondPayerCard = strongestTributeCard(baseRoom.hands[3], rank);
   const strongerPayer = tributeCardStrength(firstPayerCard, rank) > tributeCardStrength(secondPayerCard, rank) ? 1 : 3;
   const strongestCard = strongerPayer === 1 ? firstPayerCard : secondPayerCard;
   const secondCard = strongerPayer === 1 ? secondPayerCard : firstPayerCard;
 
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank,
     seed: 1,
     pendingTributeItems: [

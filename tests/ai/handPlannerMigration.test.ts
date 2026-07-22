@@ -3,7 +3,7 @@ import { generateFastHandPlans } from "../../src/ai/planning/handPlanner";
 import { generateRapidHandPlan } from "../../src/ai/planning/handPlanner";
 import { analyzeHand } from "../../src/ai/analysis/handAnalyzer";
 import { evaluatePowerGroupUse, isLegalBombReduction } from "../../src/ai/policy/powerGroupPolicy";
-import { createRoom, getPublicRoom } from "../../src/game/room";
+import { createLegacyBenchmarkRoom, getPublicRoom } from "../../src/game/room";
 import { measurePlanQuality } from "../../src/engine/planQuality";
 import { classifyPlay } from "../../src/game/playRules";
 import { readFileSync } from "node:fs";
@@ -20,7 +20,7 @@ it("compares legacy room planning with deterministic fast HandPlanner without re
     suited("6", "spades"), suited("6", "clubs"), suited("6", "hearts"), suited("6", "diamonds"), suited("6", "spades", 2),
     suited("7", "clubs"), suited("8", "hearts"), suited("9", "diamonds"), suited("10", "spades"),
   ];
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = hand;
   room.initialHands[1] = [...hand];
   room.aiPlans = {};

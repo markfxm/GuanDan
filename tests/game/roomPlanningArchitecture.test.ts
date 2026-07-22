@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { createRoom, getPublicRoom } from "../../src/game/room";
+import { createLegacyBenchmarkRoom, getPublicRoom } from "../../src/game/room";
 
 it("routes public-room planning through PlanManager and exposes a compatible plan view", () => {
-  const room = createRoom({ rank: "2", seed: 9 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 9 });
   const publicRoom = getPublicRoom(room, 0);
 
   expect(room.aiRuntime[1]?.candidatePlans.length).toBeGreaterThan(0);

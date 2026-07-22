@@ -10,9 +10,9 @@ function snapshot(room: any) {
 }
 
 it("keeps the unified observation unchanged when hidden opponent cards change", async () => {
-  const { createRoom, runAiStep } = await import("../../src/game/room");
-  const first = createRoom({ rank: "10", seed: 12 });
-  const second = createRoom({ rank: "10", seed: 12 });
+  const { createLegacyBenchmarkRoom, runAiStep } = await import("../../src/game/room");
+  const first = createLegacyBenchmarkRoom({ rank: "10", seed: 12 });
+  const second = createLegacyBenchmarkRoom({ rank: "10", seed: 12 });
   for (const room of [first, second]) { room.currentTurn = 1; room.trick = { leadSeat: 1, passSeats: [], plays: [] }; }
   [second.hands[0], second.hands[2]] = [second.hands[2], second.hands[0]];
   const seen: any[] = [];
@@ -33,8 +33,8 @@ it("keeps the unified observation unchanged when hidden opponent cards change", 
 
 it("commits unified runtime only after a successful room action", async () => {
   decideAiAction.mockClear();
-  const { createRoom, runAiStep } = await import("../../src/game/room");
-  const room = createRoom({ rank: "10", seed: 7 });
+  const { createLegacyBenchmarkRoom, runAiStep } = await import("../../src/game/room");
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 7 });
   room.currentTurn = 1;
   room.trick = { leadSeat: 1, passSeats: [], plays: [] };
   const group = (await import("../../src/game/playRules")).classifyPlay([room.hands[1][0]!], room.rank)!;
@@ -54,8 +54,8 @@ it("commits unified runtime only after a successful room action", async () => {
 });
 
 it("does not commit room state when the selected unified plan is missing", async () => {
-  const { createRoom, runAiStep } = await import("../../src/game/room");
-  const room = createRoom({ rank: "10", seed: 9 }); room.currentTurn = 1; room.trick = { leadSeat: 1, passSeats: [], plays: [] };
+  const { createLegacyBenchmarkRoom, runAiStep } = await import("../../src/game/room");
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 9 }); room.currentTurn = 1; room.trick = { leadSeat: 1, passSeats: [], plays: [] };
   const group = (await import("../../src/game/playRules")).classifyPlay([room.hands[1][0]!], room.rank)!;
   const before = snapshot(room);
   decideAiAction.mockReturnValue({ action: { type: "play", group }, runtime: { activePlanId: "missing", candidatePlans: [], generatedTurn: 0, configVersion: "test", needsReplan: false }, selectedPlanId: "missing", score: { total: 0, components: {} }, candidateCount: 1, consideredActions: 1, elapsedMs: 0, reasonCodes: [] });
@@ -64,10 +64,10 @@ it("does not commit room state when the selected unified plan is missing", async
 });
 
 it("rejects duplicate and foreign unified card ids without committing runtime", async () => {
-  const { createRoom, runAiStep } = await import("../../src/game/room");
+  const { createLegacyBenchmarkRoom, runAiStep } = await import("../../src/game/room");
   const { classifyPlay } = await import("../../src/game/playRules");
   for (const cards of [[roomCard("S3-1"), roomCard("S3-1")], [roomCard("S3-1")]]) {
-    const room = createRoom({ rank: "10", seed: 10 }); room.currentTurn = 1; room.trick = { leadSeat: 1, passSeats: [], plays: [] };
+    const room = createLegacyBenchmarkRoom({ rank: "10", seed: 10 }); room.currentTurn = 1; room.trick = { leadSeat: 1, passSeats: [], plays: [] };
     const group = { ...classifyPlay([room.hands[1][0]!], room.rank)!, cards };
     const runtime = { activePlanId: "plan", candidatePlans: [{ id: "plan", groups: [group], metrics: { hardViolations: 0, protectionLoss: 0, estimatedTurns: 1, lowSingleCount: 0, retainedControl: 0, wildcardFlexibility: 0, responseCoverage: 0, leadFlexibility: 0, fallbackScore: 0 } }], generatedTurn: 0, configVersion: "test", needsReplan: false };
     const before = snapshot(room);
@@ -80,8 +80,8 @@ it("rejects duplicate and foreign unified card ids without committing runtime", 
 function roomCard(id: string) { return { id, kind: "suited" as const, rank: "3" as const, suit: "spades" as const, copy: 1 as const }; }
 
 it("does not commit runtime when unified returns a lead pass", async () => {
-  const { createRoom, runAiStep } = await import("../../src/game/room");
-  const room = createRoom({ rank: "10", seed: 8 });
+  const { createLegacyBenchmarkRoom, runAiStep } = await import("../../src/game/room");
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 8 });
   room.currentTurn = 1;
   room.trick = { leadSeat: 1, passSeats: [], plays: [] };
   const before = structuredClone({ hands: room.hands, trick: room.trick, history: room.playHistory, runtime: room.aiRuntime, plans: room.aiPlans });
@@ -94,9 +94,9 @@ it("does not commit runtime when unified returns a lead pass", async () => {
 });
 
 it("does not commit runtime for an invalid classified unified group or a non-beating follow", async () => {
-  const { createRoom, runAiStep } = await import("../../src/game/room");
+  const { createLegacyBenchmarkRoom, runAiStep } = await import("../../src/game/room");
   for (const mode of ["invalid", "non-beating"] as const) {
-    const room = createRoom({ rank: "10", seed: 14 }); room.currentTurn = 1;
+    const room = createLegacyBenchmarkRoom({ rank: "10", seed: 14 }); room.currentTurn = 1;
     const invalidCards = [room.hands[1][0]!, room.hands[1].find((card) => card.rank !== room.hands[1][0]?.rank)!];
     const highCard = createDeck().find((card) => card.id === "Joker-BJ-2")!;
     room.trick = mode === "invalid" ? { leadSeat: 1, passSeats: [], plays: [] } : { leadSeat: 0, lastPlaySeat: 0, lastPlay: classifyPlay([highCard], room.rank)!, passSeats: [], plays: [] };
@@ -111,8 +111,8 @@ it("does not commit runtime for an invalid classified unified group or a non-bea
 });
 
 it("commits runtime after a legal follow pass and keeps other seats isolated", async () => {
-  const { createRoom, runAiStep } = await import("../../src/game/room");
-  const room = createRoom({ rank: "10", seed: 15 }); room.currentTurn = 1;
+  const { createLegacyBenchmarkRoom, runAiStep } = await import("../../src/game/room");
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 15 }); room.currentTurn = 1;
   room.trick = { leadSeat: 0, lastPlaySeat: 0, lastPlay: classifyPlay([room.hands[0][0]!], room.rank)!, passSeats: [], plays: [] };
   const group = classifyPlay([room.hands[1][0]!], room.rank)!;
   const runtime = { activePlanId: "plan", candidatePlans: [{ id: "plan", groups: [group], metrics: { hardViolations: 0, protectionLoss: 0, estimatedTurns: 1, lowSingleCount: 0, retainedControl: 0, wildcardFlexibility: 0, responseCoverage: 0, leadFlexibility: 0, fallbackScore: 0 } }], generatedTurn: 0, configVersion: "test", needsReplan: false };

@@ -1,0 +1,148 @@
+{
+  "schemaVersion": "d1-calibration-approval-v2",
+  "approvedCodeCommit": "ad1d72b6715338b470a062da7b28bc9284babb1f",
+  "executionSourceCommit": "ad1d72b6715338b470a062da7b28bc9284babb1f",
+  "approvedCodeTreeHash": "83fea4dad453ac34dbab3f9dafe77774f2de7709cf0b14e2278926a4266ed39e",
+  "experimentExecutionCommit": "ad1d72b6715338b470a062da7b28bc9284babb1f",
+  "approvalToolingCommit": null,
+  "calibrationConfigHash": "85eea871df216bf68671f998852dd9aeea88b40d18ab3eb4fb0c501e41448844",
+  "smokeConfigHashes": [
+    "7dea3fefa5649b6f07b33296bd85d9b245c088108b9b259500ea3a0ca7dc8955"
+  ],
+  "provenanceHashes": [
+    "fc64a9de43b9dd7364f7c1376d16db3fa4b4bf0532582966ca8fd58c163287b4"
+  ],
+  "strategyDescriptors": [
+    {
+      "id": "legacy-reference",
+      "implementationVersion": "legacy-reference-v1",
+      "configHash": "d0-v1",
+      "sourceCommit": "ad1d72b6715338b470a062da7b28bc9284babb1f",
+      "candidatePolicy": "production-policy"
+    },
+    {
+      "id": "legal-greedy",
+      "implementationVersion": "legal-greedy-v1",
+      "configHash": "d0-v1",
+      "sourceCommit": "ad1d72b6715338b470a062da7b28bc9284babb1f",
+      "candidatePolicy": "legal-only"
+    },
+    {
+      "id": "legal-random",
+      "implementationVersion": "legal-random-v1",
+      "configHash": "d0-v1",
+      "sourceCommit": "ad1d72b6715338b470a062da7b28bc9284babb1f",
+      "candidatePolicy": "legal-only"
+    },
+    {
+      "id": "unified-current",
+      "implementationVersion": "production-ai-v1",
+      "configHash": "d0-v1",
+      "sourceCommit": "ad1d72b6715338b470a062da7b28bc9284babb1f",
+      "candidatePolicy": "production-policy",
+      "mode": "keep-current",
+      "behaviorBaselineCommit": "e2a20e18f8e5c0871db38ad69426262e43766ce1",
+      "behaviorBaselineTag": "ai-benchmark-d0-baseline",
+      "keepCurrentLockFixtureHash": "fixture-not-loaded"
+    },
+    {
+      "id": "unified-d1-topk-switch",
+      "implementationVersion": "dynamic-topk-v1",
+      "configHash": "d1-topk-v1",
+      "sourceCommit": "ad1d72b6715338b470a062da7b28bc9284babb1f",
+      "candidatePolicy": "production-policy",
+      "mode": "dynamic-topk-v1",
+      "behaviorBaselineCommit": "e2a20e18f8e5c0871db38ad69426262e43766ce1",
+      "behaviorBaselineTag": "ai-benchmark-d0-baseline",
+      "keepCurrentLockFixtureHash": "fixture-not-loaded"
+    }
+  ],
+  "calibrationReportSha256": "3b3120e7836cb38c0747661be85aeb11e7473d6b16b63f9999d3f3b8b10b58f7",
+  "calibrationReportLocation": "artifacts/ai-benchmark-d1-calibration-v2-85eea871df216bf68671f998852dd9aeea88b40d18ab3eb4fb0c501e41448844.json",
+  "artifactInventoryHash": "e38443d03229f1528f2bd4ce96c1151154348e96d8c11aea189e32159ee87d1d",
+  "bootstrap": {
+    "blockUnit": "base-seed",
+    "iterations": 10000,
+    "seed": 20260714
+  },
+  "frozenConstants": {
+    "K": 5,
+    "minimumScoreDelta": 6,
+    "cooldownDecisionIndices": 2,
+    "recentReturnMultiplier": 2,
+    "recentReturnWindow": 3,
+    "status": "observed"
+  },
+  "candidateBehaviorCaps": null,
+  "candidateMargins": null,
+  "diagnostics": {
+    "dynamicDecisionDenominator": 76752,
+    "forcedSwitchCount": 0,
+    "strategicSwitchCount": 0,
+    "suppressedStrategicDecisionCount": 0,
+    "strategicConsiderationDenominator": 0,
+    "strategicSwitchDenominator": 0,
+    "recentStrategicReturnSwitchCount": 0,
+    "tieKeptActiveCount": 0,
+    "rates": {
+      "forcedSwitchRate": {
+        "numerator": 0,
+        "denominator": 76752,
+        "rate": 0
+      },
+      "strategicSwitchRate": {
+        "numerator": 0,
+        "denominator": 76752,
+        "rate": 0
+      },
+      "switchSuppressionRate": {
+        "numerator": 0,
+        "denominator": 0,
+        "rate": null
+      },
+      "AToBToARate": {
+        "numerator": 0,
+        "denominator": 0,
+        "rate": null
+      }
+    },
+    "candidateCount": {
+      "count": 76752,
+      "min": 1,
+      "max": 1,
+      "mean": 1,
+      "p50": 1,
+      "p95": 1,
+      "greaterThanOneDecisions": 0,
+      "validChallengerDecisions": null,
+      "validChallengerStatus": "not-observable"
+    },
+    "reasonCounts": {
+      "keep-current": 76752,
+      "strategic-switch": 0,
+      "forced-switch": 0,
+      "forced-missing": 0,
+      "forced-incomplete": 0,
+      "forced-policy": 0,
+      "forced-illegal-group": 0,
+      "forced-structural-invalid": 0,
+      "replan-required": 0,
+      "no-valid-plan": 0,
+      "migration-required": 0,
+      "cooldown-suppressed": 0,
+      "hysteresis-suppressed": 0,
+      "tie-kept-active": 0
+    },
+    "migrationCount": null,
+    "sidecarCreatedCount": null,
+    "sidecarWithoutSwitchDecisionCount": null,
+    "diagnosticsIntegrity": "valid",
+    "exposureReason": "A-candidate-count-one"
+  },
+  "structuralReadiness": "passed",
+  "behavioralExposure": "unexercised",
+  "statisticalReadiness": "not-applicable-because-unexercised",
+  "formalApprovalRecommendation": "do-not-approve",
+  "formalExecutionAllowed": false,
+  "calibrationReportFileSha256": "64e08dd1bf5a044246d6316b418d0b2bea68826d51a6562c7ae0d00bd7678e39"
+}

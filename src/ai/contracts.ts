@@ -1,6 +1,7 @@
 import type { Card, GameRank } from "../engine/cards";
 import type { CardGroup, GroupType } from "../engine/groups";
 import type { AiPlanningDiagnostics } from "./diagnostics/aiPlanningDiagnostics";
+import type { D1PlanSelectionState } from "./runtimeContracts";
 
 export type AiAction = { type: "pass" } | { type: "play"; group: CardGroup };
 
@@ -97,6 +98,7 @@ export type AiRuntimeState = {
   generatedTurn: number;
   configVersion: string;
   needsReplan: boolean;
+  planSelectionState?: D1PlanSelectionState;
 };
 
 export type AiDecision = {

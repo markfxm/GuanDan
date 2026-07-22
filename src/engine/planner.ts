@@ -10,6 +10,46 @@ export type Plan = {
   groups: CardGroup[];
 };
 
+export type PlannerExpansionTerminationReason = "completed" | "budget-exhausted" | "exhausted-frontier";
+
+export type PlannerExpansionStats = {
+  expandedStates: number;
+  generatedChildren: number;
+  acceptedChildren: number;
+  duplicateChildren: number;
+  completedPlans: number;
+  budgetExceeded: boolean;
+  terminationReasons: Record<PlannerExpansionTerminationReason, number>;
+};
+
+export type PlannerExpansionObserver = {
+  readonly maxExpandedStates: number;
+  readonly stats: PlannerExpansionStats;
+};
+
+export function createPlannerExpansionObserver(maxExpandedStates: number): PlannerExpansionObserver {
+  if (!Number.isInteger(maxExpandedStates) || maxExpandedStates < 0) {
+    throw new Error("maxExpandedStates must be a non-negative integer.");
+  }
+
+  return {
+    maxExpandedStates,
+    stats: {
+      expandedStates: 0,
+      generatedChildren: 0,
+      acceptedChildren: 0,
+      duplicateChildren: 0,
+      completedPlans: 0,
+      budgetExceeded: false,
+      terminationReasons: {
+        completed: 0,
+        "budget-exhausted": 0,
+        "exhausted-frontier": 0,
+      },
+    },
+  };
+}
+
 type ArchetypeDefinition = {
   id: PlanArchetype;
   name: string;
@@ -146,18 +186,50 @@ const ARCHETYPES: ArchetypeDefinition[] = [
   },
 ];
 
-export function generatePlans(cards: Card[], gameRank: GameRank, count = 5): Plan[] {
-  return ARCHETYPES.slice(0, Math.max(0, count)).map((archetype) => ({
-    id: archetype.id,
-    name: archetype.name,
-    groups: buildPlanGroups(cards, gameRank, archetype),
-  }));
+export function generatePlans(
+  cards: Card[],
+  gameRank: GameRank,
+  count = 5,
+  observer?: PlannerExpansionObserver,
+): Plan[] {
+  const plannerCards = observer === undefined
+    ? cards
+    : [...cards].sort((left, right) => left.id.localeCompare(right.id));
+  const sharedCandidates = observer === undefined ? undefined : detectGroups(plannerCards, gameRank);
+  const plans: Plan[] = [];
+  for (const archetype of ARCHETYPES.slice(0, Math.max(0, count))) {
+    const groups = buildPlanGroups(plannerCards, gameRank, archetype, observer, sharedCandidates);
+    if (groups === undefined) {
+      if (observer?.stats.budgetExceeded) {
+        observer.stats.terminationReasons["budget-exhausted"] += 1;
+        break;
+      }
+      throw new Error(INCOMPLETE_PLAN_ERROR);
+    }
+
+    plans.push({ id: archetype.id, name: archetype.name, groups });
+    if (observer !== undefined) observer.stats.terminationReasons.completed += 1;
+  }
+
+  if (observer !== undefined && plans.length === 0 && !observer.stats.budgetExceeded) {
+    observer.stats.terminationReasons["exhausted-frontier"] += 1;
+  }
+  return plans;
 }
 
-function buildPlanGroups(cards: Card[], gameRank: GameRank, archetype: ArchetypeDefinition): CardGroup[] {
-  const candidates = detectGroups(cards, gameRank);
-  const selected = selectBestCover(cards, candidates, gameRank, archetype);
+function buildPlanGroups(
+  cards: Card[],
+  gameRank: GameRank,
+  archetype: ArchetypeDefinition,
+  observer?: PlannerExpansionObserver,
+  sharedCandidates?: CardGroup[],
+): CardGroup[] | undefined {
+  const candidates = sharedCandidates ?? detectGroups(cards, gameRank);
+  const selected = selectBestCover(cards, candidates, gameRank, archetype, observer);
 
+  if (selected === undefined) {
+    return undefined;
+  }
   assertCompletePlan(cards, selected);
 
   return selected;
@@ -206,7 +278,8 @@ function selectBestCover(
   candidates: CardGroup[],
   gameRank: GameRank,
   archetype: ArchetypeDefinition,
-): CardGroup[] {
+  observer?: PlannerExpansionObserver,
+): CardGroup[] | undefined {
   if (cards.length > 30) {
     throw new Error("Plan generation supports hands of 30 cards or fewer.");
   }
@@ -269,7 +342,23 @@ function selectBestCover(
     exactSelectionMask: bigint,
     bombStates: ProtectedBombState[],
   ): CoverResult | undefined => {
+    const memoKey = protectedStateKey(usedMask, exactSelectionMask, bombStates);
+    const cached = memo.get(memoKey);
+    if (cached !== undefined || memo.has(memoKey)) {
+      if (observer !== undefined) observer.stats.duplicateChildren += 1;
+      return cached;
+    }
+
+    if (observer !== undefined) {
+      if (observer.stats.expandedStates >= observer.maxExpandedStates) {
+        observer.stats.budgetExceeded = true;
+        return undefined;
+      }
+      observer.stats.expandedStates += 1;
+    }
+
     if (usedMask === fullMask) {
+      if (observer !== undefined) observer.stats.completedPlans += 1;
       return {
         groups: [],
         score: 0,
@@ -285,17 +374,12 @@ function selectBestCover(
       };
     }
 
-    const memoKey = protectedStateKey(usedMask, exactSelectionMask, bombStates);
-    const cached = memo.get(memoKey);
-    if (cached !== undefined || memo.has(memoKey)) {
-      return cached;
-    }
-
     const nextCardIndex = firstOpenCardIndex(usedMask, cards.length);
     const remainingCards = cards.filter((_, index) => (usedMask & (1 << index)) === 0);
     let best: CoverResult | undefined;
 
     for (const entry of entriesByFirstOpenCard[nextCardIndex]) {
+      if (observer !== undefined) observer.stats.generatedChildren += 1;
       if ((entry.mask & usedMask) !== 0) {
         continue;
       }
@@ -309,9 +393,14 @@ function selectBestCover(
       }
 
       const tail = search(usedMask | entry.mask, exactSelectionMask | entry.exactSelectionMask, nextBombStates);
+      if (observer?.stats.budgetExceeded) {
+        return undefined;
+      }
       if (tail === undefined) {
         continue;
       }
+
+      if (observer !== undefined) observer.stats.acceptedChildren += 1;
 
       const candidate = {
         groups: [entry.group, ...tail.groups],
@@ -329,6 +418,9 @@ function selectBestCover(
 
   const result = search(0, 0n, protectedStates);
   if (result === undefined) {
+    if (observer?.stats.budgetExceeded) {
+      return undefined;
+    }
     throw new Error(INCOMPLETE_PLAN_ERROR);
   }
 

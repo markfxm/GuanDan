@@ -1,0 +1,86 @@
+{
+  "allocationLifecycle": {
+    "allocatedAfterRestart": "retryFromSavedDescriptor",
+    "roomCommittedWithoutSnapshot": "ROOM_STATE_UNAVAILABLE_AFTER_RESTART",
+    "sameGameIdInitialRoomForbidden": true,
+    "states": [
+      "allocated",
+      "room-committed"
+    ]
+  },
+  "approvedStoreTechnology": "better-sqlite3",
+  "approvedStoreVersion": "12.11.1",
+  "decisionStatus": "APPROVED_FOR_IMPLEMENTATION",
+  "developmentEnvironment": {
+    "architecture": "x64",
+    "nodeVersion": "24.x",
+    "os": "Windows"
+  },
+  "evidenceArtifactId": 8384974836,
+  "evidenceArtifactSha256": "a291ee8433688989d8c58223db4786014fdc88d3061a239089e7dd06bc426b97",
+  "formalExecutionAllowed": false,
+  "gameIdDerivationVersion": "d2a-public-game-id-v1",
+  "githubActionsJobId": 87700224446,
+  "githubActionsRunId": 29521740862,
+  "idempotencyKeyContract": {
+    "allowedAscii": "A-Za-z0-9._~:-",
+    "caseSensitive": true,
+    "conflictStatus": 409,
+    "header": "Idempotency-Key",
+    "inLedger": false,
+    "inPublicIdentity": false,
+    "inPublicRoom": false,
+    "inReplay": false,
+    "maxLength": 128,
+    "minLength": 1,
+    "missingOrInvalidStatus": 400,
+    "trim": "reject"
+  },
+  "identitySourceContractVersion": "d2a1-installation-identity-v1",
+  "installationIdentity": {
+    "forbiddenSources": [
+      "RoomState.id",
+      "nextRoomId",
+      "Date.now",
+      "performance.now",
+      "workerId",
+      "outputDir",
+      "objectAddress",
+      "hiddenHands",
+      "deckOrder"
+    ],
+    "generatedOnFirstInitialization": true,
+    "persistBeforeAllocation": true,
+    "source": "persistent-installation-store",
+    "survivesRestart": true
+  },
+  "packageInstall": "npm ci",
+  "pragmaSettings": {
+    "busyTimeoutMs": 5000,
+    "foreignKeys": "ON",
+    "journalMode": "WAL",
+    "safeIntegers": true,
+    "synchronous": "FULL",
+    "transactionMode": "BEGIN IMMEDIATE"
+  },
+  "productionArchitecture": "x64",
+  "productionNodeVersion": "22.22.2",
+  "productionOs": "Ubuntu/Linux",
+  "restartRoomSemantics": {
+    "allocated": "retryFromSavedDescriptor",
+    "roomCommittedWithoutSnapshot": "ROOM_STATE_UNAVAILABLE_AFTER_RESTART",
+    "replayRequiresProvider": false,
+    "sameGameIdNewInitialRoom": false,
+    "transportIdMayChangeAfterRestart": true
+  },
+  "sourceContractStatus": "APPROVED",
+  "storeTechnologyGateVersion": "d2a1-store-technology-v2",
+  "ubuntuPrebuiltStatus": "UNVERIFIED",
+  "unsupportedEnvironments": [
+    "Linux ARM64",
+    "Windows ARM64",
+    "macOS",
+    "Node < 22",
+    "Other unverified Node majors"
+  ]
+}

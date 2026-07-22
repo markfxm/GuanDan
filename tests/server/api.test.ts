@@ -1,14 +1,29 @@
 import { buildApi } from "../../src/server/api";
 import { createDeck } from "../../src/engine/cards";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createPublicIdentityProvider } from "../../src/server/publicIdentityProvider";
+import { PublicIdentityStore } from "../../src/server/publicIdentityStore";
 
 async function withApp(run: (app: ReturnType<typeof buildApi>) => Promise<void>) {
-  const app = buildApi();
+  const directory = mkdtempSync(join(tmpdir(), "d2a1-api-test-"));
+  const provider = createPublicIdentityProvider(new PublicIdentityStore(join(directory, "identity.sqlite"), { installationIdentity: "00000000-0000-4000-8000-000000000001" }));
+  const app = buildApi(provider);
 
   try {
     await run(app);
   } finally {
     await app.close();
+    provider.close();
+    rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
+}
+
+let roomRequestCounter = 0;
+function roomHeaders(): { "Idempotency-Key": string } {
+  roomRequestCounter += 1;
+  return { "Idempotency-Key": `api-test-${roomRequestCounter}` };
 }
 
 it("deals 27 cards", async () => {
@@ -51,7 +66,7 @@ it("returns scored plans for an in-progress partial hand", async () => {
 
 it("creates and returns a local playable room", async () => {
   await withApp(async (app) => {
-    const created = await app.inject({ method: "POST", url: "/api/rooms", payload: { rank: "10", seed: 1 } });
+    const created = await app.inject({ method: "POST", url: "/api/rooms", headers: roomHeaders(), payload: { rank: "10", seed: 1 } });
     expect(created.statusCode).toBe(200);
     expect(created.json().room.humanHand).toHaveLength(27);
     expect(created.json().room.players).toHaveLength(4);
@@ -68,6 +83,7 @@ it("evaluates opening tribute after creating the next room", async () => {
     const created = await app.inject({
       method: "POST",
       url: "/api/rooms",
+      headers: roomHeaders(),
       payload: {
         rank: "K",
         seed: 11,
@@ -91,6 +107,7 @@ it("advances opening tribute through API and accepts a human return card", async
     const created = await app.inject({
       method: "POST",
       url: "/api/rooms",
+      headers: roomHeaders(),
       payload: {
         rank: "K",
         seed: 1,
@@ -128,7 +145,7 @@ it("advances opening tribute through API and accepts a human return card", async
 
 it("plays, passes, and advances AI through room APIs", async () => {
   await withApp(async (app) => {
-    const created = await app.inject({ method: "POST", url: "/api/rooms", payload: { rank: "10", seed: 1 } });
+    const created = await app.inject({ method: "POST", url: "/api/rooms", headers: roomHeaders(), payload: { rank: "10", seed: 1 } });
     const room = created.json().room;
     const cardId = room.humanHand[0].id;
 

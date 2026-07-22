@@ -4,6 +4,8 @@ import type { AiRuntimeState, PlanningBudget } from "../contracts";
 import { analyzeHand, stableHandKey } from "../analysis/handAnalyzer";
 import { generateFastHandPlans } from "./handPlanner";
 import { evaluatePlan, comparePlans } from "./planEvaluator";
+import { selectActivePlan, type PlanValidation, type SelectorConstants, type SelectorScore } from "./planSelector";
+import type { PlanSelectionContext, PlanSelectionResult } from "./planSelectionContracts";
 import type { CardGroup } from "../../engine/groups";
 import { getDetectGroupsCallCount } from "../../engine/groups";
 import type { AiPlanningDiagnostics } from "../diagnostics/aiPlanningDiagnostics";
@@ -146,3 +148,37 @@ function hasValidActivePlan(runtime: AiRuntimeState, hand: Card[], gameRank: Gam
 function sameCards(left: CardGroup, right: CardGroup): boolean { return left.cards.length === right.cards.length && left.cards.every((card) => right.cards.some((other) => other.id === card.id)); }
 function overlaps(left: CardGroup, right: CardGroup): boolean { return left.cards.some((card) => right.cards.some((other) => other.id === card.id)); }
 function covers(hand: Card[], groups: CardGroup[]): boolean { const ids = groups.flatMap((group) => group.cards.map((card) => card.id)).sort(); const handIds = hand.map((card) => card.id).sort(); return ids.length === handIds.length && ids.every((id, index) => id === handIds[index]); }
+
+export type DynamicPlanManagerInput = Readonly<{
+  runtime: AiRuntimeState;
+  context: PlanSelectionContext;
+  candidates: readonly import("../contracts").HandPlan[];
+  activePlanId?: string;
+  decisionIndex: number;
+  constants: SelectorConstants;
+  staticPlanQualityById?: Readonly<Record<string, number>>;
+  validatePlan: (plan: import("../contracts").HandPlan, context: PlanSelectionContext) => PlanValidation;
+  evaluatePlan: (plan: import("../contracts").HandPlan, context: PlanSelectionContext) => SelectorScore;
+}>;
+
+export function applyDynamicPlanSelection(input: DynamicPlanManagerInput): { runtime: AiRuntimeState; result: PlanSelectionResult } {
+  const result = selectActivePlan({
+    context: input.context,
+    candidates: input.candidates,
+    activePlanId: input.activePlanId,
+    state: input.runtime.planSelectionState ?? {
+      version: "d1-topk-runtime-v1",
+      planSwitchCount: 0,
+      fullReplanCount: 0,
+      recentStrategicPlanFamilyIds: [],
+      planIdentityById: {},
+    },
+    decisionIndex: input.decisionIndex,
+    constants: input.constants,
+    staticPlanQualityById: input.staticPlanQualityById,
+    validatePlan: input.validatePlan,
+    evaluatePlan: input.evaluatePlan,
+  });
+  if (result.state === undefined || result.selectedPlanId === undefined) return { runtime: input.runtime, result };
+  return { runtime: { ...input.runtime, activePlanId: result.selectedPlanId, planSelectionState: result.state }, result };
+}

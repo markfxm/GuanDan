@@ -1,7 +1,7 @@
 import { createDeck } from "../../src/engine/cards";
 import { getDetectGroupsCallCount, resetDetectGroupsCallCount } from "../../src/engine/groups";
 import { chooseAiAction } from "../helpers/legacyAiReference";
-import { createRoom, getPublicRoom, runAiStep } from "../../src/game/room";
+import { createLegacyBenchmarkRoom, getPublicRoom, runAiStep } from "../../src/game/room";
 import { getCreateHandAnalysisCallCount, resetCreateHandAnalysisCallCount } from "../../src/game/protectedGroups";
 
 function percentile(values: number[], ratio: number): number {
@@ -19,7 +19,7 @@ function measureSamples(sample: () => void, count = 10): { median: number; p95: 
 }
 
 it("records a fresh rank-2 AI lead hot-path bound", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.currentTurn = 1;
   room.trick = { leadSeat: 1, passSeats: [], plays: [] };
   room.aiPlans = {};
@@ -34,7 +34,7 @@ it("records a fresh rank-2 AI lead hot-path bound", () => {
 }, 20_000);
 
 it("replans after the hand changes and preserves complete coverage", () => {
-  const room = createRoom({ rank: "2", seed: 2 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 2 });
   room.currentTurn = 1;
   room.trick = { leadSeat: 1, passSeats: [], plays: [] };
   room.aiPlans = {};
@@ -65,7 +65,7 @@ it("records a fixed-input legacy AI hot-path baseline", () => {
   });
 
   const planningTiming = measureSamples(() => {
-    const room = createRoom({ rank: "2", seed: 17 });
+    const room = createLegacyBenchmarkRoom({ rank: "2", seed: 17 });
     getPublicRoom(room, 0);
   }, 10);
 
@@ -92,7 +92,7 @@ it("records a fixed-input legacy AI hot-path baseline", () => {
 
 it("produces a deterministic fixed-seed AI replay prefix", () => {
   const replay = (seed: number) => {
-    const room = createRoom({ rank: "2", seed });
+    const room = createLegacyBenchmarkRoom({ rank: "2", seed });
     room.players[0].isAI = true;
     for (let step = 0; step < 16 && room.status === "playing"; step += 1) {
       runAiStep(room);
