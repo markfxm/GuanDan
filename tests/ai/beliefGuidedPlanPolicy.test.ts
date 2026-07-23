@@ -197,7 +197,7 @@ function inputFor(
     expectedEvidenceSnapshot: snapshotFor(evidence),
     candidatePlans,
     mode: "shadow",
-    quotaConfig: defaultQuotaConfig,
+    quotaConfig: { ...defaultQuotaConfig },
     ...overrides,
   };
 }
@@ -659,5 +659,382 @@ describe("D2c plan priority and quota Task 1 RED characterization", () => {
     for (const identifier of forbiddenIdentifiers) {
       expect(source).not.toMatch(new RegExp(`\\b${identifier}\\b`));
     }
+  });
+});
+
+describe("D2c Task 3 malformed-input hardening", () => {
+  const expectDisabled = (
+    input: D2cPlanPolicyInput,
+    reason: D2cFallbackReason,
+  ): void => {
+    const result = deriveD2cPlanPriorityQuota(input);
+    expect(result.kind).toBe("disabled");
+    if (result.kind !== "disabled") throw new Error("D2C_EXPECTED_DISABLED_RESULT");
+    expect(result.fallbackReason).toBe(reason);
+    expect(result.annotations).toEqual([]);
+    expect(result.familyPriority).toEqual([]);
+    expect(result.familyQuotas).toEqual([]);
+  };
+
+  const malformedEvidenceInput = (
+    mutate: (evidence: Record<string, unknown>) => void,
+  ): D2cPlanPolicyInput => {
+    const evidence = structuredClone(evidenceWith()) as unknown as Record<string, unknown>;
+    mutate(evidence);
+    const typedEvidence = evidence as unknown as LightweightPublicEvidence;
+    return inputFor([candidate("malformed-evidence")], {
+      evidence: typedEvidence,
+      expectedEvidenceSnapshot: snapshotFor(typedEvidence),
+    });
+  };
+
+  it("fails closed for negative and fractional public evidence counts", () => {
+    const cases: D2cPlanPolicyInput[] = [
+      malformedEvidenceInput((evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        const counts = facts.remainingCardCounts as Record<string, unknown>;
+        counts.leftOpponent = -1;
+      }),
+      malformedEvidenceInput((evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        const counts = facts.remainingCardCounts as Record<string, unknown>;
+        counts.leftOpponent = 1.5;
+      }),
+      malformedEvidenceInput((evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        const streaks = signals.recentPassStreakByRelation as Record<string, unknown>;
+        streaks.leftOpponent = -1;
+      }),
+      malformedEvidenceInput((evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        const tendencies = signals.recentActionTendencies as Record<string, unknown>;
+        const left = tendencies.leftOpponent as Record<string, unknown>;
+        left.playCount = 1.5;
+      }),
+    ];
+
+    for (const input of cases) expectDisabled(input, "invalid-evidence");
+  });
+
+  it("fails closed for malformed expected evidence snapshot fields", () => {
+    const evidence = evidenceWith();
+    const cases: D2cEvidenceSnapshotRef[] = [
+      { ...snapshotFor(evidence), gameId: "" },
+      { ...snapshotFor(evidence), roundIdentity: "" },
+      { ...snapshotFor(evidence), handIdentity: "" },
+      { ...snapshotFor(evidence), eventIndex: -1 },
+      { ...snapshotFor(evidence), eventIndex: 1.5 },
+      { ...snapshotFor(evidence), eventIndex: Number.NaN },
+    ];
+
+    for (const expectedEvidenceSnapshot of cases) {
+      expectDisabled(
+        inputFor([candidate("malformed-snapshot")], { expectedEvidenceSnapshot }),
+        "invalid-evidence",
+      );
+    }
+  });
+
+  it("distinguishes stale snapshot identity and event mismatches", () => {
+    const evidence = evidenceWith();
+    const snapshot = snapshotFor(evidence);
+    const cases: D2cEvidenceSnapshotRef[] = [
+      { ...snapshot, eventIndex: snapshot.eventIndex + 1 },
+      { ...snapshot, eventIndex: snapshot.eventIndex - 1 },
+      { ...snapshot, gameId: "other-game" },
+      { ...snapshot, roundIdentity: "other-round" },
+      { ...snapshot, handIdentity: "other-hand" },
+    ];
+
+    for (const expectedEvidenceSnapshot of cases) {
+      expectDisabled(
+        inputFor([candidate("stale-snapshot")], { expectedEvidenceSnapshot }),
+        "stale-evidence",
+      );
+    }
+  });
+
+  it("fails closed for malformed candidate wrappers and protected group identifiers", () => {
+    const valid = inputFor([candidate("wrapper")]);
+    const cases: D2cPlanPolicyInput[] = [
+      { ...valid, candidatePlans: {} as unknown as readonly D2cPlanCandidate[] },
+      { ...valid, candidatePlans: [{ protectedGroupIds: [] } as unknown as D2cPlanCandidate] },
+      { ...valid, candidatePlans: [{ plan: { id: "wrapper", groups: [], metrics: undefined }, protectedGroupIds: [] } as unknown as D2cPlanCandidate] },
+      { ...valid, candidatePlans: [{ plan: { id: "wrapper", groups: {}, metrics: defaultMetrics }, protectedGroupIds: [] } as unknown as D2cPlanCandidate] },
+      { ...valid, candidatePlans: [{ plan: candidate("wrapper").plan, protectedGroupIds: {} } as unknown as D2cPlanCandidate] },
+      { ...valid, candidatePlans: [candidate("wrapper", {}, [""])] },
+      { ...valid, candidatePlans: [candidate("wrapper", {}, ["same", "same"]) ] },
+    ];
+    const expectedReasons: D2cFallbackReason[] = [
+      "invalid-family-annotation",
+      "invalid-family-annotation",
+      "invalid-family-annotation",
+      "invalid-family-annotation",
+      "invalid-family-annotation",
+      "invalid-family-annotation",
+      "invalid-family-annotation",
+    ];
+
+    cases.forEach((input, index) => expectDisabled(input, expectedReasons[index]));
+  });
+
+  it("fails closed for non-finite metrics without rejecting finite fractional metrics", () => {
+    const metricNames = [
+      "estimatedTurns",
+      "lowSingleCount",
+      "retainedControl",
+      "responseCoverage",
+      "leadFlexibility",
+      "protectionLoss",
+    ] as const;
+    const nonFiniteValues = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
+
+    for (const metricName of metricNames) {
+      for (const value of nonFiniteValues) {
+        expectDisabled(
+          inputFor([candidate(`non-finite-${metricName}`, { [metricName]: value })]),
+          "invalid-family-annotation",
+        );
+      }
+    }
+
+    expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("finite-fractional", {
+        estimatedTurns: 1.0000001,
+        protectionLoss: 0.0000004,
+      })])),
+    );
+  });
+
+  it("fails closed for duplicate empty and prototype-sensitive stable plan keys", () => {
+    expectDisabled(inputFor([candidate("")]), "missing-plan-key");
+    expectDisabled(
+      inputFor([candidate("duplicate"), candidate("duplicate")]),
+      "duplicate-plan-key",
+    );
+
+    for (const id of ["__proto__", "constructor", "prototype"]) {
+      const result = expectShadow(deriveD2cPlanPriorityQuota(inputFor([candidate(id)])));
+      expect(Object.getPrototypeOf(result.annotations)).toBeNull();
+      expect(Object.prototype.polluted).toBeUndefined();
+      expect(Object.prototype.hasOwnProperty.call(result.annotations, id)).toBe(true);
+      expect(result.annotations[id]?.stablePlanKey).toBe(id);
+    }
+  });
+
+  it("maps every malformed quota configuration to invalid-quota-config", () => {
+    const malformedConfigs: D2cQuotaConfig[] = [
+      { ...defaultQuotaConfig, schemaVersion: "unknown" as D2cQuotaConfig["schemaVersion"] },
+      { ...defaultQuotaConfig, maxPlanFamilies: 0 },
+      { ...defaultQuotaConfig, maxPlanFamilies: 6 },
+      { ...defaultQuotaConfig, maxPlanFamilies: 1.5 },
+      { ...defaultQuotaConfig, maxPlanExpansions: -1 },
+      { ...defaultQuotaConfig, maxPlanExpansions: 6 },
+      { ...defaultQuotaConfig, maxPlanExpansions: 1.5 },
+      { ...defaultQuotaConfig, minQuotaPerFamily: 0 },
+      { ...defaultQuotaConfig, maxQuotaPerFamily: 0 },
+      { ...defaultQuotaConfig, minQuotaPerFamily: 3, maxQuotaPerFamily: 2 },
+      { ...defaultQuotaConfig, maxPlanExpansions: 1, minQuotaPerFamily: 2 },
+      { ...defaultQuotaConfig, maxPlanFamilies: Number.NaN },
+      { ...defaultQuotaConfig, maxPlanExpansions: Number.POSITIVE_INFINITY },
+    ];
+
+    for (const quotaConfig of malformedConfigs) {
+      expectDisabled(
+        inputFor([candidate("malformed-quota")], { quotaConfig }),
+        "invalid-quota-config",
+      );
+    }
+
+    const zeroBudget = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("zero-budget")], {
+        quotaConfig: { ...defaultQuotaConfig, maxPlanExpansions: 0 },
+      })),
+    );
+    expect(zeroBudget.familyPriority.length).toBeGreaterThan(0);
+    expect(zeroBudget.familyQuotas).toEqual([]);
+    expect(zeroBudget.diagnostics.quotaTotal).toBe(0);
+  });
+
+  it("fails closed for an unknown runtime mode", () => {
+    expectDisabled(
+      inputFor([candidate("unknown-mode")], { mode: "active" as PlanPruningMode }),
+      "unknown-mode",
+    );
+  });
+
+  it("fails closed for an unknown policy input schema", () => {
+    expectDisabled(
+      inputFor([candidate("unknown-input-schema")], {
+        schemaVersion: "d2c-plan-policy-input-v2" as D2cPlanPolicyInput["schemaVersion"],
+      }),
+      "invalid-evidence",
+    );
+  });
+});
+
+describe("D2c Task 3 immutability", () => {
+  const visitFrozen = (value: unknown, seen = new Set<object>()): void => {
+    if (value === null || typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    expect(Object.isFrozen(value)).toBe(true);
+    for (const child of Object.values(value)) visitFrozen(child, seen);
+  };
+
+  it("deep-freezes every node of shadow and disabled results", () => {
+    const shadow = deriveD2cPlanPriorityQuota(inputFor([candidate("shadow-freeze")]));
+    const disabled = deriveD2cPlanPriorityQuota(inputFor([candidate("disabled-freeze")], {
+      mode: "disabled",
+    }));
+    visitFrozen(shadow);
+    visitFrozen(disabled);
+  });
+
+  it("rejects or neutralizes mutation attempts across the complete result graph", () => {
+    const result = expectShadow(deriveD2cPlanPriorityQuota(inputFor([candidate("mutation")] )));
+    const before = JSON.stringify(result);
+    const annotation = result.annotations.mutation as unknown as {
+      ownerFamily: string;
+      familyIds: string[];
+      priority: number[];
+    };
+    const attempts = [
+      () => ((result as unknown as { kind: string }).kind = "disabled"),
+      () => ((result.diagnostics as unknown as { quotaTotal: number }).quotaTotal = 999),
+      () => (annotation.ownerFamily = "other"),
+      () => (annotation.familyIds[0] = "other"),
+      () => (annotation.priority[0] = -1),
+      () => ((result.familyPriority[0]?.candidatePlanKeys as string[])[0] = "other"),
+      () => ((result.familyQuotas[0] as unknown as { quota: number }).quota = 999),
+      () => ((result.annotations as unknown as Record<string, unknown>).dynamic = {}),
+    ];
+
+    for (const attempt of attempts) {
+      try {
+        attempt();
+      } catch (error) {
+        expect(error).toBeInstanceOf(TypeError);
+      }
+    }
+    expect(JSON.stringify(result)).toBe(before);
+  });
+
+  it("never mutates or retains candidate evidence plan or metric references", () => {
+    const input = inputFor([candidate("detached")]);
+    const before = {
+      evidence: JSON.stringify(input.evidence),
+      snapshot: JSON.stringify(input.expectedEvidenceSnapshot),
+      candidates: JSON.stringify(input.candidatePlans),
+      plan: JSON.stringify(input.candidatePlans[0]?.plan),
+      metrics: JSON.stringify(input.candidatePlans[0]?.plan.metrics),
+      quota: JSON.stringify(input.quotaConfig),
+    };
+    const result = expectShadow(deriveD2cPlanPriorityQuota(input));
+    const resultBeforeMutation = JSON.stringify(result);
+    const mutableEvidence = input.evidence as unknown as {
+      hardPublicFacts: { remainingCardCounts: Record<string, number> };
+    };
+    mutableEvidence.hardPublicFacts.remainingCardCounts.leftOpponent = 99;
+    const mutableCandidate = input.candidatePlans[0] as unknown as {
+      protectedGroupIds: string[];
+      plan: { groups: CardGroup[]; metrics: { estimatedTurns: number } };
+    };
+    mutableCandidate.protectedGroupIds.push("later");
+    mutableCandidate.plan.metrics.estimatedTurns = 99;
+    mutableCandidate.plan.groups.push(testGroup("pair", [
+      testCard("S2-1", "spades"),
+      testCard("H2-1", "hearts"),
+    ]));
+    (input.quotaConfig as unknown as { maxPlanExpansions: number }).maxPlanExpansions = 0;
+
+    expect(JSON.stringify(result)).toBe(resultBeforeMutation);
+    expect(JSON.stringify(input.evidence)).not.toBe(before.evidence);
+    expect(JSON.stringify(input.expectedEvidenceSnapshot)).toBe(before.snapshot);
+    expect(JSON.stringify(input.candidatePlans)).not.toBe(before.candidates);
+    expect(JSON.stringify(input.candidatePlans[0]?.plan)).not.toBe(before.plan);
+    expect(JSON.stringify(input.candidatePlans[0]?.plan.metrics)).not.toBe(before.metrics);
+    expect(JSON.stringify(input.quotaConfig)).not.toBe(before.quota);
+  });
+});
+
+describe("D2c Task 3 determinism and output privacy", () => {
+  const permutations = <T>(values: readonly T[]): T[][] => {
+    if (values.length === 0) return [[]];
+    const result: T[][] = [];
+    values.forEach((value, index) => {
+      const rest = [...values.slice(0, index), ...values.slice(index + 1)];
+      for (const suffix of permutations(rest)) result.push([value, ...suffix]);
+    });
+    return result;
+  };
+
+  it("produces identical bytes for all candidate permutations", () => {
+    const candidates = [
+      candidate("perm-a"),
+      candidate("perm-b", { responseCoverage: 0, leadFlexibility: 0, estimatedTurns: 2 }),
+      candidate("perm-c", { protectionLoss: 0.0000004 },),
+      candidate("perm-d", { estimatedTurns: 0.5, responseCoverage: 2 }),
+    ];
+    const expected = JSON.stringify(
+      deriveD2cPlanPriorityQuota(inputFor(candidates)),
+    );
+    for (const permutation of permutations(candidates)) {
+      const result = deriveD2cPlanPriorityQuota(inputFor(permutation));
+      expect(JSON.stringify(result)).toBe(expected);
+    }
+  });
+
+  it("produces identical bytes across repeated calls without retaining state", () => {
+    const input = inputFor([
+      candidate("repeat-a"),
+      candidate("repeat-b", { estimatedTurns: 0.5 }),
+      candidate("repeat-c", { responseCoverage: 0, leadFlexibility: 0, estimatedTurns: 2 }),
+      candidate("repeat-d", { responseCoverage: 2 }),
+    ]);
+    const expected = JSON.stringify(deriveD2cPlanPriorityQuota(input));
+    for (let index = 0; index < 10; index += 1) {
+      expect(JSON.stringify(deriveD2cPlanPriorityQuota(input))).toBe(expected);
+    }
+  });
+
+  it("fails closed for normalized forbidden output keys at any nesting level", () => {
+    for (const id of [
+      "hiddenState",
+      "Hidden_State",
+      "hidden-state",
+      "HIDDEN STATE",
+      "privateRuntime",
+      "partnerHand",
+      "opponentsHands",
+      "initialHands",
+      "idempotencyKey",
+      "identityStore",
+      "rolloutState",
+      "particles",
+    ]) {
+      const result = deriveD2cPlanPriorityQuota(inputFor([candidate(id)]));
+      expect(result.kind).toBe("disabled");
+      if (result.kind !== "disabled") throw new Error("D2C_EXPECTED_DISABLED_RESULT");
+      expect(result.fallbackReason).toBe("privacy-violation");
+      expect(result.annotations).toEqual([]);
+      expect(result.familyPriority).toEqual([]);
+      expect(result.familyQuotas).toEqual([]);
+      expect(JSON.stringify(result)).not.toContain(id);
+    }
+  });
+});
+
+describe("D2c Task 3 source boundary", () => {
+  it("keeps Task 3 hardening inside the frozen source and privacy boundary", () => {
+    const source = sourceFile();
+    expect(source).not.toMatch(/Math\.random/);
+    expect(source).not.toMatch(/Date\.now/);
+    expect(source).not.toMatch(/performance\.now/);
+    expect(source).not.toMatch(/localeCompare/);
+    expect(source).not.toMatch(/Intl\.Collator/);
+    expect(source).not.toMatch(/\beval\s*\(/);
+    expect(source).not.toMatch(/\bFunction\s*\(/);
+    expect(source).not.toMatch(/JSON\.parse\(\s*JSON\.stringify\(/);
+    expect(source).not.toMatch(/from\s+["'][^"']+\/["']/);
   });
 });
