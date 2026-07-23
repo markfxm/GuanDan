@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import type { Card } from "../../src/engine/cards";
+import type { Card, Suit } from "../../src/engine/cards";
 import type { CardGroup } from "../../src/engine/groups";
 import type { HandPlan } from "../../src/ai/contracts";
 import type { LightweightPublicEvidence } from "../../src/ai/belief/lightweightPublicEvidence";
@@ -144,7 +144,7 @@ function candidate(
   return { plan, protectedGroupIds };
 }
 
-function testCard(id: string, suit: Card["suit"]): Card {
+function testCard(id: string, suit: Suit): Card {
   return { id, kind: "suited", rank: "2", suit, copy: 1 };
 }
 
