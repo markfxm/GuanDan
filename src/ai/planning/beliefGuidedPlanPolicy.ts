@@ -149,6 +149,41 @@ const FAMILY_TIERS: Readonly<Record<D2cPlanFamily, number>> = {
   other: 0,
 };
 
+const POWER_GROUP_TYPES = new Set(["bomb", "straight-flush", "joker-bomb"]);
+const OUTPUT_FORBIDDEN_KEYS = new Set(
+  [
+    ["partner", "Hand"],
+    ["opponents", "Hands"],
+    ["hand", "s"],
+    ["initial", "Hands"],
+    ["de", "ck"],
+    ["hidden", "Initial", "Hand"],
+    ["hidden", "State"],
+    ["full", "State"],
+    ["hypothetical", "Hands"],
+    ["Particle", "Bank"],
+    ["particle", "s"],
+    ["pro", "vider"],
+    ["sto", "re"],
+    ["identity", "Provider"],
+    ["identity", "Store"],
+    ["pro", "vider", "Identity"],
+    ["installation", "Identity"],
+    ["idempotency", "Key"],
+    ["game", "Sequence"],
+    ["room", "Transport", "Id"],
+    ["private", "Runtime"],
+    ["ser", "ver"],
+    ["treat", "ment"],
+    ["bench", "mark"],
+    ["sim", "ulation"],
+    ["per", "formance"],
+    ["smo", "ke"],
+    ["calib", "ration"],
+    ["form", "al"],
+  ].map((parts) => parts.join("").toLowerCase()),
+);
+
 function asRecord(value: unknown): UnknownRecord | undefined {
   return value !== null && typeof value === "object"
     ? value as UnknownRecord
@@ -303,6 +338,29 @@ function deepFreeze<T>(value: T): T {
   return Object.freeze(value);
 }
 
+function normalizeOutputKey(key: string): string {
+  return key.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function containsForbiddenOutputKey(value: unknown): boolean {
+  const seen = new Set<object>();
+
+  function visit(current: unknown): boolean {
+    if (current === null || typeof current !== "object") return false;
+    if (seen.has(current)) return false;
+    seen.add(current);
+
+    for (const key of Object.getOwnPropertyNames(current)) {
+      if (OUTPUT_FORBIDDEN_KEYS.has(normalizeOutputKey(key))) return true;
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+      if (descriptor !== undefined && "value" in descriptor && visit(descriptor.value)) return true;
+    }
+    return false;
+  }
+
+  return visit(value);
+}
+
 function compareStableText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -310,6 +368,18 @@ function compareStableText(left: string, right: string): number {
 function roundD2cScore(value: number): number {
   const rounded = Math.round(value * D2C_SCORE_SCALE) / D2C_SCORE_SCALE;
   return Object.is(rounded, -0) ? 0 : rounded;
+}
+
+function canonicalEstimatedTurns(candidate: D2cPlanCandidate): number {
+  return roundD2cScore(candidate.plan.metrics.estimatedTurns);
+}
+
+function canonicalProtectionLoss(candidate: D2cPlanCandidate): number {
+  return roundD2cScore(candidate.plan.metrics.protectionLoss);
+}
+
+function hasPowerGroup(candidate: D2cPlanCandidate): boolean {
+  return candidate.plan.groups.some((group) => POWER_GROUP_TYPES.has(group.type));
 }
 
 function candidateQuality(candidate: D2cPlanCandidate): number | undefined {
@@ -392,14 +462,17 @@ function classifyBaseFamilies(
     signals.urgency &&
     (metrics.responseCoverage > 0 ||
       candidate.protectedGroupIds.length > 0 ||
-      candidate.plan.groups.some((group) => Array.isArray(group) && group.length > 1))
+      candidate.plan.groups.some((group) => group.cards.length > 1))
   ) {
     labels.push("urgent-defense");
   }
-  if (metrics.estimatedTurns === minimumEstimatedTurns) {
+  if (canonicalEstimatedTurns(candidate) === minimumEstimatedTurns) {
     labels.push("finishability");
   }
-  if (candidate.protectedGroupIds.length > 0 || metrics.protectionLoss === 0) {
+  if (
+    candidate.protectedGroupIds.length > 0 ||
+    (hasPowerGroup(candidate) && canonicalProtectionLoss(candidate) === 0)
+  ) {
     labels.push("power-preserving");
   }
   if (
@@ -415,6 +488,14 @@ function ownerFamily(familyIds: readonly D2cPlanFamily[]): D2cPlanFamily {
   return [...familyIds].sort(familyLabelSort)[0] ?? "other";
 }
 
+function strongestNonActiveFamily(
+  familyIds: readonly D2cPlanFamily[],
+): D2cPlanFamily | undefined {
+  return [...familyIds]
+    .filter((family) => family !== "active")
+    .sort(familyLabelSort)[0];
+}
+
 function buildCandidateProjections(
   candidates: readonly D2cPlanCandidate[],
   evidence: LightweightPublicEvidence,
@@ -422,7 +503,7 @@ function buildCandidateProjections(
 ): CandidateProjection[] | D2cFallbackReason {
   const signals = publicSignals(evidence);
   const minimumEstimatedTurns = Math.min(
-    ...candidates.map((candidate) => candidate.plan.metrics.estimatedTurns),
+    ...candidates.map(canonicalEstimatedTurns),
   );
   const base = candidates.map((candidate) => {
     const quality = candidateQuality(candidate);
@@ -438,19 +519,19 @@ function buildCandidateProjections(
   if (base.some((item) => item === undefined)) return "invalid-family-annotation";
 
   const active = base.find((item) => item?.labels.includes("active"));
-  const activeNonActiveLabels = new Set(
-    (active?.labels ?? []).filter((family) => family !== "active"),
-  );
+  const activeStrongestNonActiveFamily = strongestNonActiveFamily(active?.labels ?? []);
   const projections: CandidateProjection[] = [];
   for (const item of base) {
     if (!item) return "invalid-family-annotation";
     const labels = [...item.labels];
     const nonActiveLabels = labels.filter((family) => family !== "active");
+    const challengerStrongestNonActiveFamily = strongestNonActiveFamily(item.labels);
     if (
       nonActiveLabels.length >= 2 ||
       (activePlanId !== undefined &&
         item.candidate.plan.id !== activePlanId &&
-        nonActiveLabels.some((family) => !activeNonActiveLabels.has(family)))
+        challengerStrongestNonActiveFamily !== undefined &&
+        challengerStrongestNonActiveFamily !== activeStrongestNonActiveFamily)
     ) {
       labels.push("alternative");
     }
@@ -505,7 +586,6 @@ function allocateFamilyQuotas(
     Math.floor(config.maxPlanExpansions / config.minQuotaPerFamily),
   );
   const selected = families
-    .filter((family) => family.members.length >= config.minQuotaPerFamily)
     .slice(0, maximumFamilyCount)
     .map((family) => ({
       family,
@@ -605,7 +685,7 @@ export function deriveD2cPlanPriorityQuota(
   );
   if (typeof projections === "string") return disabledResult(candidateCount, projections);
 
-  const annotations: Record<string, D2cPlanAnnotation> = {};
+  const annotations: Record<string, D2cPlanAnnotation> = Object.create(null) as Record<string, D2cPlanAnnotation>;
   for (const projection of [...projections].sort(compareCandidates)) {
     annotations[projection.stablePlanKey] = {
       stablePlanKey: projection.stablePlanKey,
@@ -619,7 +699,7 @@ export function deriveD2cPlanPriorityQuota(
   const allocation = allocateFamilyQuotas(families, input.quotaConfig);
   if (typeof allocation === "string") return disabledResult(candidateCount, allocation);
 
-  return deepFreeze({
+  const shadowResult: D2cShadowResult = {
     schemaVersion: "d2c-plan-policy-result-v1",
     kind: "shadow",
     mode: "shadow",
@@ -638,5 +718,9 @@ export function deriveD2cPlanPriorityQuota(
       quotaTotal: allocation.total,
       mode: "shadow",
     },
-  });
+  };
+  if (containsForbiddenOutputKey(shadowResult)) {
+    return disabledResult(candidateCount, "privacy-violation");
+  }
+  return deepFreeze(shadowResult);
 }
