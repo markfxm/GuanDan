@@ -2,8 +2,12 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import { decideAiAction } from "../../src/ai/aiDecisionEngine";
+import type { AiDecision, AiDecisionConfig, AiObservation, AiRuntimeState } from "../../src/ai/contracts";
 import type { Card, Suit } from "../../src/engine/cards";
 import type { CardGroup } from "../../src/engine/groups";
+import { canonicalJson, runtimeCanonicalJson } from "./d0FixtureCanonicalizer";
+import type { D0KeepCurrentFixture } from "./d0FixtureTypes";
 import type { HandPlan } from "../../src/ai/contracts";
 import type { LightweightPublicEvidence } from "../../src/ai/belief/lightweightPublicEvidence";
 import {
@@ -243,6 +247,68 @@ function sourceIdentifiers(source: string): Set<string> {
   };
   visit(file);
   return identifiers;
+}
+
+function readDetachedDecisionFixture(): {
+  observation: AiObservation;
+  runtime: AiRuntimeState;
+  config: AiDecisionConfig;
+} {
+  const fixturePath = resolve(process.cwd(), "tests/ai/fixtures/d0KeepCurrentCases.json");
+  const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as D0KeepCurrentFixture;
+  const testCase = fixture.cases[0];
+  if (testCase === undefined) throw new Error("D2C_TASK4_FIXTURE_EMPTY");
+  return {
+    observation: structuredClone(testCase.observation) as AiObservation,
+    runtime: structuredClone(testCase.runtimeInput) as AiRuntimeState,
+    config: structuredClone(testCase.config) as AiDecisionConfig,
+  };
+}
+
+function d2cInputFromDecision(
+  decision: AiDecision,
+  mode: PlanPruningMode,
+): D2cPlanPolicyInput {
+  const evidence = evidenceWith();
+  const activePlanId = decision.runtime.activePlanId;
+  return {
+    schemaVersion: "d2c-plan-policy-input-v1",
+    evidence,
+    expectedEvidenceSnapshot: snapshotFor(evidence),
+    candidatePlans: decision.runtime.candidatePlans.map((plan) => ({
+      plan,
+      protectedGroupIds: [],
+    })),
+    ...(activePlanId === undefined ? {} : { activePlanId }),
+    mode,
+    quotaConfig: { ...defaultQuotaConfig },
+  };
+}
+
+function hasObjectReference(root: unknown, target: object): boolean {
+  const seen = new Set<object>();
+  const visit = (value: unknown): boolean => {
+    if (value === target) return true;
+    if (value === null || typeof value !== "object" || seen.has(value)) return false;
+    seen.add(value);
+    return Object.values(value).some(visit);
+  };
+  return visit(root);
+}
+
+function outputKeys(root: unknown): string[] {
+  const seen = new Set<object>();
+  const keys: string[] = [];
+  const visit = (value: unknown): void => {
+    if (value === null || typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    for (const [key, child] of Object.entries(value)) {
+      keys.push(key);
+      visit(child);
+    }
+  };
+  visit(root);
+  return keys;
 }
 
 describe("D2c plan priority and quota Task 1 RED characterization", () => {
@@ -1288,5 +1354,100 @@ describe("D2c Task 3 source boundary", () => {
     ];
     const identifiers = sourceIdentifiers(source);
     for (const identifier of forbiddenIdentifiers) expect(identifiers.has(identifier)).toBe(false);
+  });
+});
+
+describe("D2c Task 4 detached shadow characterization", () => {
+  function runDetachedScenario(mode: PlanPruningMode): {
+    baselineDecision: AiDecision;
+    comparisonDecision: AiDecision;
+    d2cInput: D2cPlanPolicyInput;
+    d2cResult: D2cPlanPolicyResult;
+  } {
+    const initial = readDetachedDecisionFixture();
+    const baselineDecision = decideAiAction(
+      structuredClone(initial.observation),
+      structuredClone(initial.runtime),
+      structuredClone(initial.config),
+    );
+    const d2cInput = d2cInputFromDecision(baselineDecision, mode);
+    const d2cResult = deriveD2cPlanPriorityQuota(d2cInput);
+    const comparisonDecision = decideAiAction(
+      structuredClone(initial.observation),
+      structuredClone(initial.runtime),
+      structuredClone(initial.config),
+    );
+    return { baselineDecision, comparisonDecision, d2cInput, d2cResult };
+  }
+
+  it("emits detached shadow diagnostics without changing the existing action", () => {
+    const { baselineDecision, comparisonDecision, d2cInput, d2cResult } = runDetachedScenario("shadow");
+
+    expect(d2cResult.kind).toBe("shadow");
+    if (d2cResult.kind !== "shadow") throw new Error("D2C_TASK4_EXPECTED_SHADOW_RESULT");
+    expect(d2cResult.candidateCount).toBe(d2cInput.candidatePlans.length);
+    expect(d2cResult).toHaveProperty("annotations");
+    expect(d2cResult).toHaveProperty("familyPriority");
+    expect(d2cResult).toHaveProperty("familyQuotas");
+    expect(baselineDecision.action).toEqual(comparisonDecision.action);
+    expect(canonicalJson(baselineDecision.action)).toBe(canonicalJson(comparisonDecision.action));
+    expect(baselineDecision.selectedPlanId).toBe(comparisonDecision.selectedPlanId);
+  });
+
+  it("preserves returned runtime and candidate order beside detached shadow output", () => {
+    const { baselineDecision, comparisonDecision, d2cResult } = runDetachedScenario("shadow");
+
+    expect(d2cResult.kind).toBe("shadow");
+    expect(baselineDecision.runtime).toEqual(comparisonDecision.runtime);
+    expect(runtimeCanonicalJson(baselineDecision.runtime)).toBe(runtimeCanonicalJson(comparisonDecision.runtime));
+    expect(baselineDecision.runtime.candidatePlans.map((plan) => plan.id))
+      .toEqual(comparisonDecision.runtime.candidatePlans.map((plan) => plan.id));
+    expect(baselineDecision.runtime.generatedTurn).toBe(comparisonDecision.runtime.generatedTurn);
+    expect(baselineDecision.runtime.configVersion).toBe(comparisonDecision.runtime.configVersion);
+    expect(baselineDecision.runtime.activePlanId).toBe(comparisonDecision.runtime.activePlanId);
+    expect(baselineDecision.runtime.needsReplan).toBe(comparisonDecision.runtime.needsReplan);
+  });
+
+  it("keeps disabled D2c mode detached from the decision path", () => {
+    const { baselineDecision, comparisonDecision, d2cResult } = runDetachedScenario("disabled");
+
+    expect(d2cResult).toMatchObject({
+      kind: "disabled",
+      mode: "disabled",
+      fallbackReason: "disabled-by-config",
+    });
+    expect(baselineDecision.action).toEqual(comparisonDecision.action);
+    expect(baselineDecision.runtime).toEqual(comparisonDecision.runtime);
+    expect(baselineDecision.runtime.candidatePlans.map((plan) => plan.id))
+      .toEqual(comparisonDecision.runtime.candidatePlans.map((plan) => plan.id));
+  });
+
+  it("does not expose an action candidate list or runtime through detached shadow output", () => {
+    const { baselineDecision, d2cInput, d2cResult } = runDetachedScenario("shadow");
+
+    expect(d2cResult.kind).toBe("shadow");
+    const forbiddenOutputKeys = new Set([
+      "action",
+      "legalActions",
+      "candidatePlans",
+      "selectedPlan",
+      "selectedPlanId",
+      "runtime",
+      "actionScore",
+      "observation",
+      "config",
+      "hands",
+      "deck",
+    ]);
+    expect(outputKeys(d2cResult).some((key) => forbiddenOutputKeys.has(key))).toBe(false);
+    const referencedObjects: object[] = [
+      baselineDecision,
+      baselineDecision.runtime,
+      d2cInput.evidence,
+      ...d2cInput.candidatePlans.map((candidate) => candidate.plan),
+    ];
+    for (const referencedObject of referencedObjects) {
+      expect(hasObjectReference(d2cResult, referencedObject)).toBe(false);
+    }
   });
 });
