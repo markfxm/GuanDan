@@ -130,6 +130,8 @@ type CandidateProjection = Readonly<{
   priority: D2cPriorityTuple;
 }>;
 
+type D2cCandidateGroup = HandPlan["groups"][number];
+
 type FamilyProjection = {
   family: D2cPlanFamily;
   members: CandidateProjection[];
@@ -152,38 +154,68 @@ const FAMILY_TIERS: Readonly<Record<D2cPlanFamily, number>> = {
 const POWER_GROUP_TYPES = new Set(["bomb", "straight-flush", "joker-bomb"]);
 const OUTPUT_FORBIDDEN_KEYS = new Set(
   [
-    ["partner", "Hand"],
-    ["opponents", "Hands"],
-    ["hand", "s"],
-    ["initial", "Hands"],
-    ["de", "ck"],
-    ["hidden", "Initial", "Hand"],
-    ["hidden", "State"],
-    ["full", "State"],
-    ["hypothetical", "Hands"],
-    ["Particle", "Bank"],
-    ["particle", "s"],
-    ["pro", "vider"],
-    ["sto", "re"],
-    ["identity", "Provider"],
-    ["identity", "Store"],
-    ["pro", "vider", "Identity"],
-    ["installation", "Identity"],
-    ["idempotency", "Key"],
-    ["roll", "out", "State"],
-    ["game", "Sequence"],
-    ["room", "Transport", "Id"],
-    ["private", "Runtime"],
-    ["ser", "ver"],
-    ["treat", "ment"],
-    ["bench", "mark"],
-    ["sim", "ulation"],
-    ["per", "formance"],
-    ["smo", "ke"],
-    ["calib", "ration"],
-    ["form", "al"],
-  ].map((parts) => parts.join("").toLowerCase()),
+    "partnerHand",
+    "opponentsHands",
+    "hands",
+    "initialHands",
+    "deck",
+    "hiddenInitialHand",
+    "hiddenState",
+    "fullState",
+    "hypotheticalHands",
+    "ParticleBank",
+    "particles",
+    "provider",
+    "store",
+    "identityProvider",
+    "identityStore",
+    "providerIdentity",
+    "installationIdentity",
+    "idempotencyKey",
+    "rolloutState",
+    "gameSequence",
+    "roomTransportId",
+    "privateRuntime",
+    "server",
+    "treatment",
+    "benchmark",
+    "simulation",
+    "performance",
+    "smoke",
+    "calibration",
+    "formal",
+  ].map(normalizeOutputKey),
 );
+
+const VALID_GROUP_TYPES = new Set<D2cCandidateGroup["type"]>([
+  "single",
+  "pair",
+  "triple",
+  "full-house",
+  "straight",
+  "consecutive-pairs",
+  "plate",
+  "bomb",
+  "straight-flush",
+  "joker-bomb",
+]);
+
+const PUBLIC_SEAT_RELATIONS = new Set([
+  "self",
+  "partner",
+  "leftOpponent",
+  "rightOpponent",
+]);
+
+const PUBLIC_ACTION_KINDS = new Set([
+  "play",
+  "pass",
+  "trick-clear",
+  "finish",
+  "tribute",
+  "return",
+  "anti-tribute",
+]);
 
 function asRecord(value: unknown): UnknownRecord | undefined {
   return value !== null && typeof value === "object"
@@ -221,6 +253,116 @@ function isUniqueNonEmptyStringArray(value: unknown): value is readonly string[]
   return true;
 }
 
+function isPublicSeatRelation(value: unknown): value is string {
+  return typeof value === "string" && PUBLIC_SEAT_RELATIONS.has(value);
+}
+
+function isUniquePublicSeatArray(value: unknown): boolean {
+  if (!Array.isArray(value) || !value.every(isPublicSeat)) return false;
+  return new Set(value).size === value.length;
+}
+
+function isCurrentTrickEvidence(value: unknown): boolean {
+  const currentTrick = asRecord(value);
+  if (!currentTrick ||
+    !isNonNegativeInteger(currentTrick.trickIndex) ||
+    !isPublicSeat(currentTrick.leadSeat) ||
+    !isUniquePublicSeatArray(currentTrick.passSeats)) return false;
+
+  if (Object.prototype.hasOwnProperty.call(currentTrick, "lastPlaySeat") &&
+    currentTrick.lastPlaySeat !== undefined &&
+    !isPublicSeat(currentTrick.lastPlaySeat)) return false;
+  if (Object.prototype.hasOwnProperty.call(currentTrick, "lastPlayStableKey") &&
+    currentTrick.lastPlayStableKey !== undefined &&
+    !isNonEmptyString(currentTrick.lastPlayStableKey)) return false;
+  return currentTrick.lastPlaySeat !== undefined || currentTrick.lastPlayStableKey === undefined;
+}
+
+function isPerspectiveSeatMap(value: unknown, perspectiveSeat: unknown): boolean {
+  const seatMap = asRecord(value);
+  if (!seatMap || !isPublicSeat(perspectiveSeat)) return false;
+  const relationKeys = Object.keys(seatMap);
+  if (relationKeys.length !== PUBLIC_SEAT_RELATIONS.size ||
+    !relationKeys.every((key) => PUBLIC_SEAT_RELATIONS.has(key))) return false;
+  const seats = [
+    seatMap.self,
+    seatMap.partner,
+    seatMap.leftOpponent,
+    seatMap.rightOpponent,
+  ];
+  return seats.every(isPublicSeat) &&
+    new Set(seats).size === seats.length &&
+    seatMap.self === perspectiveSeat;
+}
+
+function isPublicTransferEvidence(value: unknown): boolean {
+  const transfer = asRecord(value);
+  return Boolean(
+    transfer &&
+    isNonNegativeInteger(transfer.eventIndex) &&
+    (transfer.kind === "tribute" || transfer.kind === "return") &&
+    isPublicSeat(transfer.fromSeat) &&
+    isPublicSeat(transfer.toSeat) &&
+    (transfer.cardId === undefined || isNonEmptyString(transfer.cardId)),
+  );
+}
+
+function isRecentPublicAction(value: unknown): boolean {
+  const action = asRecord(value);
+  if (!action ||
+    !isNonNegativeInteger(action.eventIndex) ||
+    typeof action.kind !== "string" ||
+    !PUBLIC_ACTION_KINDS.has(action.kind) ||
+    !isPublicSeat(action.seat) ||
+    !isPublicSeatRelation(action.relation) ||
+    !isNonNegativeInteger(action.trickIndex) ||
+    !isNonEmptyString(action.publicStableKey) ||
+    !isUniqueNonEmptyStringArray(action.publicCardIds)) return false;
+
+  return (action.patternType === undefined || isNonEmptyString(action.patternType)) &&
+    (action.groupType === undefined || isNonEmptyString(action.groupType)) &&
+    (action.handCountBefore === undefined || isNonNegativeInteger(action.handCountBefore)) &&
+    (action.handCountAfter === undefined || isNonNegativeInteger(action.handCountAfter));
+}
+
+function isRecentActionTendency(value: unknown): boolean {
+  const tendency = asRecord(value);
+  return Boolean(
+    tendency &&
+    isNonNegativeInteger(tendency.playCount) &&
+    isNonNegativeInteger(tendency.passCount) &&
+    (tendency.lastActionKind === undefined ||
+      tendency.lastActionKind === "play" ||
+      tendency.lastActionKind === "pass"),
+  );
+}
+
+function isEvidenceProvenance(value: unknown): boolean {
+  const row = asRecord(value);
+  return Boolean(
+    row &&
+    isNonEmptyString(row.field) &&
+    (row.publicSource === "HardPublicLedger" || row.publicSource === "PublicActionEvent[]") &&
+    isNonEmptyString(row.derivation) &&
+    row.hiddenStateRisk === "none" &&
+    row.hashImpact === "none",
+  );
+}
+
+function isCandidateGroup(value: unknown): value is D2cCandidateGroup {
+  const group = asRecord(value);
+  return Boolean(
+    group &&
+    typeof group.type === "string" &&
+    VALID_GROUP_TYPES.has(group.type as D2cCandidateGroup["type"]) &&
+    Array.isArray(group.cards),
+  );
+}
+
+function isCandidateGroupArray(value: unknown): value is readonly D2cCandidateGroup[] {
+  return Array.isArray(value) && value.every(isCandidateGroup);
+}
+
 function isRelationCounts(value: unknown): boolean {
   const record = asRecord(value);
   if (!record) return false;
@@ -242,42 +384,41 @@ function isEvidenceStructure(value: unknown): D2cFallbackReason | undefined {
     !isPublicSeat(evidence.perspectiveSeat)
   ) return "invalid-evidence";
 
-  const seatMap = asRecord(evidence.seatMap);
-  if (!seatMap || !["self", "partner", "leftOpponent", "rightOpponent"]
-    .every((key) => isPublicSeat(seatMap[key]))) return "invalid-evidence";
+  if (!isPerspectiveSeatMap(evidence.seatMap, evidence.perspectiveSeat)) return "invalid-evidence";
 
   const facts = asRecord(evidence.hardPublicFacts);
   if (!facts || !isRelationCounts(facts.remainingCardCounts)) return "invalid-evidence";
-  if (!asRecord(facts.currentTrick) || !isPublicSeat(asRecord(facts.currentTrick)?.leadSeat)) {
-    return "invalid-evidence";
-  }
+  if (!isCurrentTrickEvidence(facts.currentTrick)) return "invalid-evidence";
   if (
-    typeof facts.initiativeRelation !== "string" ||
+    !isPublicSeatRelation(facts.initiativeRelation) ||
     !Array.isArray(facts.playedCardIds) ||
-    !facts.playedCardIds.every((item) => typeof item === "string") ||
+    !facts.playedCardIds.every(isNonEmptyString) ||
     !Array.isArray(facts.playedCardClasses) ||
-    !facts.playedCardClasses.every((item) => typeof item === "string") ||
+    !facts.playedCardClasses.every(isNonEmptyString) ||
     !Array.isArray(facts.publicTransfers) ||
+    !facts.publicTransfers.every(isPublicTransferEvidence) ||
     !Array.isArray(facts.publicTributeEvents) ||
-    !facts.publicTributeEvents.every((item) => typeof item === "string") ||
+    !facts.publicTributeEvents.every(isNonEmptyString) ||
     !Array.isArray(facts.finishOrder) ||
-    !facts.finishOrder.every((item) => typeof item === "string")
+    !facts.finishOrder.every(isPublicSeatRelation)
   ) return "invalid-evidence";
 
   const derived = asRecord(evidence.derivedSignals);
-  if (!derived || !Array.isArray(derived.recentActions) || !isRelationCounts(derived.recentPassStreakByRelation)) {
+  if (!derived ||
+    !Array.isArray(derived.recentActions) ||
+    !derived.recentActions.every(isRecentPublicAction) ||
+    !isRelationCounts(derived.recentPassStreakByRelation)) {
     return "invalid-evidence";
   }
   const tendencies = asRecord(derived.recentActionTendencies);
   if (!tendencies || !["self", "partner", "leftOpponent", "rightOpponent"]
     .every((key) => {
-      const tendency = asRecord(tendencies[key]);
-      if (!tendency) return false;
-      return isNonNegativeInteger(tendency.playCount) &&
-        isNonNegativeInteger(tendency.passCount);
+      return isRecentActionTendency(tendencies[key]);
     })) return "invalid-evidence";
 
-  if (!Array.isArray(evidence.provenance)) return "invalid-evidence";
+  if (!Array.isArray(evidence.provenance) || !evidence.provenance.every(isEvidenceProvenance)) {
+    return "invalid-evidence";
+  }
   return undefined;
 }
 
@@ -305,7 +446,7 @@ function validateCandidateEnvelope(
     if (seen.has(plan.id)) return "duplicate-plan-key";
     seen.add(plan.id);
     const metrics = asRecord(plan.metrics);
-    if (!Array.isArray(plan.groups) || !metrics) return "invalid-family-annotation";
+    if (!isCandidateGroupArray(plan.groups) || !metrics) return "invalid-family-annotation";
     if (!isUniqueNonEmptyStringArray(candidate.protectedGroupIds)) return "invalid-family-annotation";
     if (!["estimatedTurns", "lowSingleCount", "retainedControl", "responseCoverage", "leadFlexibility", "protectionLoss"]
       .every((key) => isFiniteNumber(metrics[key]))) return "invalid-family-annotation";

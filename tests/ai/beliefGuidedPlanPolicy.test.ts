@@ -228,6 +228,23 @@ function sourceFile(): string {
   );
 }
 
+function sourceIdentifiers(source: string): Set<string> {
+  const file = ts.createSourceFile(
+    "beliefGuidedPlanPolicy.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const identifiers = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node)) identifiers.add(node.text);
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return identifiers;
+}
+
 describe("D2c plan priority and quota Task 1 RED characterization", () => {
   it("handles zero candidates with action-only semantics", () => {
     const result = deriveD2cPlanPriorityQuota(inputFor([]));
@@ -656,9 +673,8 @@ describe("D2c plan priority and quota Task 1 RED characterization", () => {
       "calibration",
       "formal",
     ];
-    for (const identifier of forbiddenIdentifiers) {
-      expect(source).not.toMatch(new RegExp(`\\b${identifier}\\b`));
-    }
+    const identifiers = sourceIdentifiers(source);
+    for (const identifier of forbiddenIdentifiers) expect(identifiers.has(identifier)).toBe(false);
   });
 });
 
@@ -1250,5 +1266,27 @@ describe("D2c Task 3 source boundary", () => {
     expect(source).not.toMatch(/\bFunction\s*\(/);
     expect(source).not.toMatch(/JSON\.parse\(\s*JSON\.stringify\(/);
     expect(source).not.toMatch(/from\s+["'][^"']+\/["']/);
+    const forbiddenIdentifiers = [
+      "RoomState",
+      "AiRuntimeState",
+      "HandPlanner",
+      "ensurePlans",
+      "decideAiAction",
+      "runAiStep",
+      "hands",
+      "deck",
+      "hiddenState",
+      "privateRuntime",
+      "particles",
+      "rollout",
+      "server",
+      "provider",
+      "store",
+      "benchmark",
+      "simulation",
+      "performance",
+    ];
+    const identifiers = sourceIdentifiers(source);
+    for (const identifier of forbiddenIdentifiers) expect(identifiers.has(identifier)).toBe(false);
   });
 });
