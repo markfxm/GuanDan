@@ -871,6 +871,220 @@ describe("D2c Task 3 malformed-input hardening", () => {
       "invalid-evidence",
     );
   });
+
+  it("fails closed for malformed CardGroup elements", () => {
+    const malformedGroups: unknown[] = [
+      null,
+      {},
+      { type: "pair" },
+      { cards: [] },
+      { type: "pair", cards: undefined },
+      { type: 123, cards: [] },
+      { type: "pair", cards: {} },
+    ];
+
+    for (const group of malformedGroups) {
+      const malformedCandidate = withGroups(
+        candidate("malformed-group"),
+        [group as unknown as CardGroup],
+      );
+      const input = inputFor([malformedCandidate]);
+      let result: D2cPlanPolicyResult | undefined;
+      expect(() => {
+        result = deriveD2cPlanPriorityQuota(input);
+      }).not.toThrow();
+      expect(result?.kind).toBe("disabled");
+      if (result?.kind !== "disabled") throw new Error("D2C_EXPECTED_DISABLED_RESULT");
+      expect(result.fallbackReason).toBe("invalid-family-annotation");
+      expect(result.annotations).toEqual([]);
+      expect(result.familyPriority).toEqual([]);
+      expect(result.familyQuotas).toEqual([]);
+    }
+  });
+
+  it("fails closed for malformed nested public evidence", () => {
+    const recentAction = (): Record<string, unknown> => ({
+      eventIndex: 1,
+      kind: "play",
+      seat: 1,
+      relation: "leftOpponent",
+      trickIndex: 0,
+      publicStableKey: "play:left:1",
+      publicCardIds: [],
+    });
+    const publicTransfer = (): Record<string, unknown> => ({
+      eventIndex: 1,
+      kind: "tribute",
+      fromSeat: 1,
+      toSeat: 0,
+      cardId: "C2-1",
+    });
+    const provenanceRow = (): Record<string, unknown> => ({
+      field: "remainingCardCounts",
+      publicSource: "HardPublicLedger",
+      derivation: "copy",
+      hiddenStateRisk: "none",
+      hashImpact: "none",
+    });
+    const cases: Array<[string, (evidence: Record<string, unknown>) => void]> = [
+      ["initiative relation", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.initiativeRelation = "unknown";
+      }],
+      ["finish order relation", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.finishOrder = ["unknown"];
+      }],
+      ["recent action relation", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), relation: "unknown" }];
+      }],
+      ["negative trick index", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.currentTrick = { trickIndex: -1, leadSeat: 0, passSeats: [] };
+      }],
+      ["fractional trick index", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.currentTrick = { trickIndex: 1.5, leadSeat: 0, passSeats: [] };
+      }],
+      ["invalid trick lead seat", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.currentTrick = { trickIndex: 0, leadSeat: 4, passSeats: [] };
+      }],
+      ["invalid trick pass seats container", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.currentTrick = { trickIndex: 0, leadSeat: 0, passSeats: {} };
+      }],
+      ["invalid trick pass seat", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.currentTrick = { trickIndex: 0, leadSeat: 0, passSeats: [4] };
+      }],
+      ["null public transfer", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [null];
+      }],
+      ["empty public transfer", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [{}];
+      }],
+      ["negative public transfer index", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [{ ...publicTransfer(), eventIndex: -1 }];
+      }],
+      ["unknown public transfer kind", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [{ ...publicTransfer(), kind: "unknown" }];
+      }],
+      ["invalid public transfer from seat", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [{ ...publicTransfer(), fromSeat: 4 }];
+      }],
+      ["invalid public transfer to seat", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [{ ...publicTransfer(), toSeat: 4 }];
+      }],
+      ["invalid public transfer card id", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [{ ...publicTransfer(), cardId: 123 }];
+      }],
+      ["null recent action", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [null];
+      }],
+      ["empty recent action", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{}];
+      }],
+      ["negative recent action index", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), eventIndex: -1 }];
+      }],
+      ["unknown recent action kind", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), kind: "unknown" }];
+      }],
+      ["invalid recent action seat", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), seat: 4 }];
+      }],
+      ["invalid recent action relation", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), relation: "unknown" }];
+      }],
+      ["negative recent action trick index", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), trickIndex: -1 }];
+      }],
+      ["empty recent action stable key", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), publicStableKey: "" }];
+      }],
+      ["invalid recent action card ids container", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), publicCardIds: {} }];
+      }],
+      ["invalid recent action card id", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), publicCardIds: [123] }];
+      }],
+      ["mixed tendency without valid recent action", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [null];
+        const tendencies = signals.recentActionTendencies as Record<string, unknown>;
+        tendencies.leftOpponent = { playCount: 1, passCount: 1 };
+      }],
+      ["unknown tendency last action", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        const tendencies = signals.recentActionTendencies as Record<string, unknown>;
+        tendencies.leftOpponent = { playCount: 0, passCount: 0, lastActionKind: "unknown" };
+      }],
+      ["negative tendency play count", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        const tendencies = signals.recentActionTendencies as Record<string, unknown>;
+        tendencies.leftOpponent = { playCount: -1, passCount: 0 };
+      }],
+      ["fractional tendency pass count", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        const tendencies = signals.recentActionTendencies as Record<string, unknown>;
+        tendencies.leftOpponent = { playCount: 0, passCount: 1.5 };
+      }],
+      ["null provenance", (evidence) => {
+        evidence.provenance = [null];
+      }],
+      ["empty provenance", (evidence) => {
+        evidence.provenance = [{}];
+      }],
+      ["empty provenance field", (evidence) => {
+        evidence.provenance = [{ ...provenanceRow(), field: "" }];
+      }],
+      ["unknown provenance source", (evidence) => {
+        evidence.provenance = [{ ...provenanceRow(), publicSource: "unknown" }];
+      }],
+      ["invalid provenance derivation", (evidence) => {
+        evidence.provenance = [{ ...provenanceRow(), derivation: 123 }];
+      }],
+      ["unknown provenance risk", (evidence) => {
+        evidence.provenance = [{ ...provenanceRow(), hiddenStateRisk: "unknown" }];
+      }],
+      ["unknown provenance hash impact", (evidence) => {
+        evidence.provenance = [{ ...provenanceRow(), hashImpact: "unknown" }];
+      }],
+      ["duplicate seat map", (evidence) => {
+        evidence.seatMap = { self: 0, partner: 0, leftOpponent: 1, rightOpponent: 2 };
+      }],
+      ["seat map perspective mismatch", (evidence) => {
+        evidence.seatMap = { self: 1, partner: 2, leftOpponent: 0, rightOpponent: 3 };
+      }],
+    ];
+
+    for (const [label, mutate] of cases) {
+      expectDisabled(
+        malformedEvidenceInput(mutate),
+        "invalid-evidence",
+      );
+      expect(label.length).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe("D2c Task 3 immutability", () => {
