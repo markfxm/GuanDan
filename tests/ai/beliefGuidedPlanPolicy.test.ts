@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import type { Card } from "../../src/engine/cards";
+import type { CardGroup } from "../../src/engine/groups";
 import type { HandPlan } from "../../src/ai/contracts";
 import type { LightweightPublicEvidence } from "../../src/ai/belief/lightweightPublicEvidence";
 import {
@@ -140,6 +142,39 @@ function candidate(
     metrics: { ...defaultMetrics, ...overrides },
   };
   return { plan, protectedGroupIds };
+}
+
+function testCard(id: string, suit: Card["suit"]): Card {
+  return { id, kind: "suited", rank: "2", suit, copy: 1 };
+}
+
+function testGroup(type: CardGroup["type"], cards: Card[]): CardGroup {
+  const purpose = type === "single"
+    ? "risk"
+    : type === "straight-flush"
+      ? "attack"
+      : type === "bomb" || type === "joker-bomb"
+        ? "recovery"
+        : "filler";
+  return {
+    id: `${type}:test`,
+    type,
+    label: type,
+    purpose,
+    cards,
+    wildcards: [],
+    strength: 1,
+  };
+}
+
+function withGroups(
+  base: D2cPlanCandidate,
+  groups: CardGroup[],
+): D2cPlanCandidate {
+  return {
+    ...base,
+    plan: { ...base.plan, groups },
+  };
 }
 
 function snapshotFor(evidence: LightweightPublicEvidence): D2cEvidenceSnapshotRef {
@@ -433,6 +468,130 @@ describe("D2c plan priority and quota Task 1 RED characterization", () => {
     expect(result).not.toHaveProperty("selectedPlanId");
     expect(result).not.toHaveProperty("runtime");
     expect(JSON.stringify(result)).not.toMatch(/partnerHand|opponentsHands|hiddenState|deck|particle/i);
+  });
+
+  it("classifies finishability from six-decimal canonical estimated turns", () => {
+    const first = candidate("canonical-finish-a", { estimatedTurns: 1.0000001 });
+    const second = candidate("canonical-finish-b", { estimatedTurns: 1.0000004 });
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([first, second])),
+    );
+
+    expect(result.annotations[first.plan.id].familyIds).toContain("finishability");
+    expect(result.annotations[second.plan.id].familyIds).toContain("finishability");
+    expect(first.plan.metrics.estimatedTurns).toBe(1.0000001);
+    expect(second.plan.metrics.estimatedTurns).toBe(1.0000004);
+  });
+
+  it("uses canonical protection loss for power-preserving power groups", () => {
+    const bomb = testGroup("bomb", [
+      testCard("S2-1", "spades"),
+      testCard("H2-1", "hearts"),
+      testCard("C2-1", "clubs"),
+      testCard("D2-1", "diamonds"),
+    ]);
+    const powerCandidate = withGroups(
+      candidate("canonical-power", { protectionLoss: 0.0000004 }),
+      [bomb],
+    );
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([powerCandidate])),
+    );
+
+    expect(result.annotations[powerCandidate.plan.id].familyIds).toContain("power-preserving");
+    expect(powerCandidate.plan.metrics.protectionLoss).toBe(0.0000004);
+  });
+
+  it("does not label an ordinary zero-loss plan as power-preserving", () => {
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([
+        candidate("ordinary-zero-loss", {
+          protectionLoss: 0,
+          responseCoverage: 0,
+          leadFlexibility: 0,
+        }),
+      ])),
+    );
+
+    expect(result.annotations["ordinary-zero-loss"].familyIds).not.toContain("power-preserving");
+  });
+
+  it("marks urgent-defense for a non-single CardGroup object", () => {
+    const pair = testGroup("pair", [
+      testCard("S2-1", "spades"),
+      testCard("H2-1", "hearts"),
+    ]);
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([
+        withGroups(candidate("non-single", {
+          responseCoverage: 0,
+          leadFlexibility: 0,
+        }), [pair]),
+      ])),
+    );
+
+    expect(result.annotations["non-single"].familyIds).toContain("urgent-defense");
+  });
+
+  it("compares the strongest non-active family when deriving alternative", () => {
+    const active = candidate("strongest-active", {
+      responseCoverage: 1,
+      leadFlexibility: 2,
+    });
+    const challenger = candidate("strongest-challenger", {
+      estimatedTurns: 2,
+      responseCoverage: 0,
+      leadFlexibility: 2,
+    });
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([active, challenger], {
+        activePlanId: active.plan.id,
+        evidence: uncertaintyEvidence(),
+      })),
+    );
+
+    expect(result.annotations[active.plan.id].familyIds).toEqual(
+      expect.arrayContaining(["urgent-defense", "uncertainty-cover"]),
+    );
+    expect(result.annotations[challenger.plan.id].familyIds).toEqual([
+      "uncertainty-cover",
+    ]);
+    expect(result.annotations[challenger.plan.id].familyIds).toContain("alternative");
+  });
+
+  it("caps minimum family quota by candidate count without dropping the family", () => {
+    const urgent = candidate("quota-urgent");
+    const small = candidate("quota-small", {
+      estimatedTurns: 2,
+      responseCoverage: 0,
+      leadFlexibility: 0,
+    });
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([urgent, small], {
+        quotaConfig: {
+          ...defaultQuotaConfig,
+          maxPlanFamilies: 2,
+          maxPlanExpansions: 4,
+          minQuotaPerFamily: 2,
+          maxQuotaPerFamily: 3,
+        },
+      })),
+    );
+    const smallFamily = result.annotations[small.plan.id].ownerFamily;
+    const smallQuota = result.familyQuotas.find((item) => item.family === smallFamily);
+
+    expect(smallFamily).toBe("other");
+    expect(smallQuota).toEqual({ family: "other", quota: 1 });
+  });
+
+  it("fails closed when a stable plan key becomes a forbidden output key", () => {
+    const result = deriveD2cPlanPriorityQuota(inputFor([candidate("hiddenState")]));
+
+    expect(result).toMatchObject({
+      kind: "disabled",
+      fallbackReason: "privacy-violation",
+    });
+    expect(result).not.toHaveProperty("annotations.hiddenState");
   });
 
   it("enforces the exact source-boundary import contract and skeleton boundary", () => {
