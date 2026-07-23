@@ -86,12 +86,46 @@ function evidenceWith(
       recentActionTendencies: {
         self: { playCount: 1, passCount: 0, lastActionKind: "play" },
         partner: { playCount: 0, passCount: 1, lastActionKind: "pass" },
-        leftOpponent: { playCount: 1, passCount: 1, lastActionKind: "pass" },
+        leftOpponent: { playCount: 0, passCount: 0 },
         rightOpponent: { playCount: 0, passCount: 0 },
       },
     },
     provenance: [],
     ...overrides,
+  };
+}
+
+function uncertaintyEvidence(): LightweightPublicEvidence {
+  const base = evidenceWith();
+  return {
+    ...base,
+    derivedSignals: {
+      ...base.derivedSignals,
+      recentActions: [
+        {
+          eventIndex: 5,
+          kind: "play",
+          seat: 1,
+          relation: "leftOpponent",
+          trickIndex: 2,
+          publicStableKey: "play:left-opponent:5",
+          publicCardIds: ["C2-1"],
+        },
+        {
+          eventIndex: 6,
+          kind: "pass",
+          seat: 1,
+          relation: "leftOpponent",
+          trickIndex: 2,
+          publicStableKey: "pass:left-opponent:6",
+          publicCardIds: [],
+        },
+      ],
+      recentActionTendencies: {
+        ...base.derivedSignals.recentActionTendencies,
+        leftOpponent: { playCount: 1, passCount: 1, lastActionKind: "pass" },
+      },
+    },
   };
 }
 
@@ -200,7 +234,10 @@ describe("D2c plan priority and quota Task 1 RED characterization", () => {
     ];
     const result = expectShadow(
       deriveD2cPlanPriorityQuota(
-        inputFor(candidates, { activePlanId: "active" }),
+        inputFor(candidates, {
+          activePlanId: "active",
+          evidence: uncertaintyEvidence(),
+        }),
       ),
     );
     const familyIds = Object.values(result.annotations).flatMap((item) => item.familyIds);
@@ -213,6 +250,13 @@ describe("D2c plan priority and quota Task 1 RED characterization", () => {
       "alternative",
       "other",
     ]));
+
+    const withoutRecentActions = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("no-uncertainty", {
+        responseCoverage: 2,
+      })])),
+    );
+    expect(withoutRecentActions.annotations["no-uncertainty"].familyIds).not.toContain("uncertainty-cover");
   });
 
   it("deduplicates multi-family labels and assigns one owner family", () => {
@@ -418,12 +462,43 @@ describe("D2c plan priority and quota Task 1 RED characterization", () => {
     expect(contractsImport?.isTypeOnly).toBe(true);
     const contractsBindings = contractsImport?.namedBindings;
     expect(contractsBindings !== undefined && ts.isNamedImports(contractsBindings)).toBe(true);
-    expect(source).toContain("const D2C_PLAN_POLICY_NOT_IMPLEMENTED");
-    expect(source).toContain("throw new Error(D2C_PLAN_POLICY_NOT_IMPLEMENTED)");
-    expect(source).not.toContain("roundD2cScore");
-    expect(source).not.toContain("compareStableText");
-    expect(source).not.toContain("Math.floor");
     expect(source).not.toMatch(/import\s*\(/);
     expect(source).not.toMatch(/\brequire\s*\(/);
+    const forbiddenIdentifiers = [
+      "RoomState",
+      "PublicRoom",
+      "AiRuntimeState",
+      "HandPlanner",
+      "generateHandPlans",
+      "generateFastHandPlans",
+      "generateRapidHandPlan",
+      "ensurePlans",
+      "decideAiAction",
+      "runAiStep",
+      "hands",
+      "initialHands",
+      "partnerHand",
+      "opponentsHands",
+      "deck",
+      "hiddenState",
+      "privateRuntime",
+      "ParticleBank",
+      "particles",
+      "rollout",
+      "likelihood",
+      "server",
+      "provider",
+      "store",
+      "treatment",
+      "benchmark",
+      "simulation",
+      "performance",
+      "smoke",
+      "calibration",
+      "formal",
+    ];
+    for (const identifier of forbiddenIdentifiers) {
+      expect(source).not.toMatch(new RegExp(`\\b${identifier}\\b`));
+    }
   });
 });
