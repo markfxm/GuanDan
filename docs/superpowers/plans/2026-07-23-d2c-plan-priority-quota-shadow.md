@@ -1,22 +1,22 @@
 # D2c Plan Priority / Quota Shadow Implementation Plan
-
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
-**Goal:** 使用 D2b 的 LightweightPublicEvidence 对现有 0–5 个候选计划进行确定性的 family 分类、priority 排序和固定 quota 计算；首轮只支持 disabled 与 shadow，不改变候选计划、planner、合法动作、runtime 或最终出牌。
-**Architecture:** 新增一个不接入正式决策路径的纯函数 src/ai/planning/beliefGuidedPlanPolicy.ts，消费 D2b evidence、现有只读 HandPlan 和由既有 protected-group policy 预先产生的只读 group IDs。它只输出深冻结的 family/priority/quota/diagnostics shadow 记录，不生成计划、不调用 HandPlanner、不筛除或重排 candidate plans，也不产生 D2d action reducer 输入。
-**Tech Stack:** TypeScript 5.7, Vitest 2.1.9, existing LightweightPublicEvidence, HandPlan, D1 plan identity and protected-group policy contracts.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task.
+**Goal:** 使用 D2b 的 LightweightPublicEvidence 对现有 0–5 个候选计划进行确定性的计划类别识别、优先级排序和固定配额计算；第一轮只支持 disabled 和 shadow，不改变候选计划、planner 调用、合法动作、runtime 或最终出牌。
+**Architecture:** 新增一个不接入正式决策路径的纯函数模块 src/ai/planning/beliefGuidedPlanPolicy.ts。它消费 D2b evidence、现有只读 HandPlan 和受保护组 ID，输出深冻结的 family/priority/quota/diagnostics shadow 记录；不生成计划、不调用 HandPlanner、不筛除或重排 candidate plans，也不产生 D2d action reducer 输入。
+**Tech Stack:** TypeScript, Vitest, existing GuanDan AI planning and D2 public-evidence contracts.
 
 ## Global Constraints
 
-- Verified base is main 43be5089f87c5710ae90932b1ea2d25e01b95565 with tree ac904a6afbd6abf111c7d8eed46b58a1cb9a637a; planning branch is codex/d2c-plan.
+- Verified implementation base is main 43be5089f87c5710ae90932b1ea2d25e01b95565 with tree ac904a6afbd6abf111c7d8eed46b58a1cb9a637a; planning branch is codex/d2c-plan.
 - formalExecutionAllowed=false remains unchanged.
-- D2c first release permits only PlanPruningMode = "disabled" | "shadow"; the type contains no "active" member.
-- The policy never changes candidatePlans, candidate count, candidate order, legal actions, evaluator scores, selected action, AiRuntimeState, public event/hash, replay schema, PublicRoom, D0 fixtures, or artifacts.
-- The policy never calls generateHandPlans, generateFastHandPlans, generateRapidHandPlan, HandPlanner, decideAiAction, runAiStep, an unbounded planner, an action reducer, a particle sampler, a likelihood evaluator, a rollout policy, a treatment registry, a benchmark runner, a server provider/store, or a production integration adapter.
-- D2c input contains no RoomState, hands, initialHands, partnerHand, opponentsHands, deck, hiddenState, private runtime, particle bank, rollout state, or provider/store identity internals.
-- The only future implementation production module is src/ai/planning/beliefGuidedPlanPolicy.ts; the only future concentrated test module is tests/ai/beliefGuidedPlanPolicy.test.ts.
-- No task in this plan modifies src/game/room.ts, src/ai/aiDecisionEngine.ts, src/ai/contracts.ts, src/ai/runtimeContracts.ts, src/ai/planning/handPlanner.ts, public event/ledger/replay modules, package files, fixtures, artifacts, benchmark approvals, or server/UI files.
-- All normal results use fixed integer comparisons, source order normalized by stable keys, and explicit string tie-breaks. No Date.now(), performance.now(), Math.random(), worker order, wall-clock duration, object address, filesystem order, or directory order may affect a result.
-- A D2c failure leaves the old AI path untouched and returns a stable disabled result with one D2cFallbackReason; it never silently enters active behavior.
+- The only first-release modes are PlanPruningMode = "disabled" | "shadow"; there is no active mode.
+- D2c never changes candidatePlans, candidate count, candidate order, legal actions, evaluator scores, selected action, AiRuntimeState, public event/hash, replay schema, PublicRoom, D0 fixtures, or artifacts.
+- D2c never calls generateHandPlans, generateFastHandPlans, generateRapidHandPlan, HandPlanner, decideAiAction, runAiStep, an unbounded planner, an action reducer, a particle sampler, a likelihood evaluator, a rollout policy, a treatment registry, a benchmark runner, a server provider/store, or a production integration adapter.
+- D2c input contains no RoomState, any player's hands, initialHands, partnerHand, opponentsHands, deck, hiddenState, private runtime, particle bank, rollout state, or provider/store identity internals.
+- The future implementation allowlist is exactly src/ai/planning/beliefGuidedPlanPolicy.ts and tests/ai/beliefGuidedPlanPolicy.test.ts.
+- No task changes room.ts, aiDecisionEngine.ts, contracts.ts, runtimeContracts.ts, handPlanner.ts, public event/ledger/replay modules, package files, fixtures, artifacts, benchmark approvals, or server/UI files.
+- All stable text ordering uses one UTF-16 code-unit comparator. No locale-dependent ordering, environment locale, case-localized ordering, Date.now(), performance.now(), Math.random(), worker order, wall-clock duration, object address, filesystem order, or directory order may affect a normal result.
+- A D2c failure leaves the old AI path untouched and returns a stable disabled result with one D2cFallbackReason.
+- Fractional values in the six candidate-quality inputs are allowed. D2c validates those six fields only for number and finite value, calculates the exact formula, then applies six-decimal D2c normalization. Existing PlanMetrics is not changed or narrowed.
 
 ---
 
@@ -24,65 +24,69 @@
 
 ### Goal
 
-D2c records a public-evidence-guided shadow view of existing candidates. The first implementation has three pure responsibilities:
+D2c has three pure responsibilities:
 
-1. classify each existing candidate into a deterministic, deduplicated list of public plan families;
-2. sort family and candidate annotations with a fixed priority tuple and stable key;
-3. allocate bounded family quotas as diagnostic metadata without using the quota to select, delete, copy, or regenerate a candidate.
+1. classify every existing candidate into a deterministic, deduplicated list of public plan families;
+2. sort family and candidate annotations with a fixed priority tuple and stable UTF-16 key ordering;
+3. calculate bounded family-level quotas as diagnostic metadata without using quota to select, delete, copy, or regenerate a candidate.
+
+The output is detached shadow metadata. The first implementation does not call the decision engine or planner and does not register a production adapter.
 
 ### Non-goals
 
-D2c does not generate candidate plans, call unbounded HandPlanner, delete or reorder candidate plans, change legal action generation, choose an action, score an action, create particles, infer complete hidden hands, execute rollout, compute team utility, register treatment, run benchmark/simulation/performance/smoke/calibration/formal workload, or enter active mode.
+D2c does not generate candidate plans, call an unbounded HandPlanner, delete or reorder candidates, change legal action generation, choose or score an action, create particles, infer complete hidden hands, execute rollout, compute team utility, register treatment, run benchmark/simulation/performance/smoke/calibration/formal workload, or enter active mode.
 
-The design deliberately does not apply the D2 design's beliefGuidedActionSearch, safety-mandatory action set, representative-action reducer, particle bank, CRN, rollout, or treatment contracts. Those belong to separately authorized D2d–D2g work.
+The current D2 design order is D2a public ledger, D2b lightweight public evidence, D2c plan priority/quota shadow, D2d representative action reducer, D2e particle/likelihood/ESS, D2f CRN rollout/team utility, and D2g engine treatment/benchmark/ablation. D2c does not implement any later stage.
 
 ## 2. Verified baseline
-
-### Main verification evidence
-
-The verified main baseline is:
 
 | Check | Result |
 |---|---|
 | branch | main |
 | HEAD | 43be5089f87c5710ae90932b1ea2d25e01b95565 |
 | tree | ac904a6afbd6abf111c7d8eed46b58a1cb9a637a |
-| D2b ancestor | 2785eac4ce0b32854d6d612b60ab76ddb43ca21e is ancestor of main |
+| D2b ancestor | 2785eac4ce0b32854d6d612b60ab76ddb43ca21e is an ancestor of main |
 | D2b focused | 1 file, 31 tests passed |
 | D2b combined | 12 files, 66 tests passed |
-| TypeScript | exit 0 after npm ci restored local dependencies |
+| TypeScript | exit 0 after local dependencies were restored |
 | build | exit 0, natural completion |
 | non-restricted regression | 70 files, 616 tests passed, exit 0 |
 | frozen evidence | git diff --exit-code exit 0 |
 | production D2b scan | 0 matches in frozen decision-path files |
 | main worktree | clean |
 
-The D2b core and regression commands excluded .worktrees/** because the repository intentionally contains older linked worktrees with same-named characterization tests. No old worktree was deleted or changed.
+D2a/D2b commands exclude .worktrees/** because linked historical worktrees contain same-named characterization tests. No historical worktree or branch is modified by this plan.
 
-### Design sources read
-
-The latest applicable D2 design is docs/plans/2026-07-16-d2-belief-guided-bounded-search-design.md. Its current order is D2a public ledger, D2b lightweight public evidence, D2c plan priority/quota shadow, D2d representative action reducer, D2e particle/likelihood/ESS, D2f CRN rollout/team utility, and D2g engine treatment/benchmark/ablation. The earlier particle-first ordering is not used here.
-
-The D2b contract is in src/ai/belief/lightweightPublicEvidence.ts and the frozen D2b plan is docs/superpowers/plans/2026-07-19-d2b-lightweight-public-evidence.md. No D2c implementation module exists at this base.
+Design source: docs/plans/2026-07-16-d2-belief-guided-bounded-search-design.md. D2b contract: src/ai/belief/lightweightPublicEvidence.ts. Frozen D2b plan: docs/superpowers/plans/2026-07-19-d2b-lightweight-public-evidence.md. No D2c implementation module exists at this base.
 
 ## 3. Current architecture map
 
-### D2b input and output boundary
+### LightweightPublicEvidence boundary
 
-deriveLightweightPublicEvidence(ledger: HardPublicLedger, recentEvents: readonly PublicActionEvent[], perspectiveSeat: PublicSeat): LightweightPublicEvidence consumes only public ledger/event/hash contracts. Its output has schemaVersion: "d2-lightweight-evidence-v1", hardPublicFacts, derivedSignals, and frozen provenance. The relevant D2b public evidence fields for D2c are:
+The D2b function is:
 
-- hardPublicFacts.remainingCardCounts keyed by self, partner, leftOpponent, rightOpponent;
+    deriveLightweightPublicEvidence(
+      ledger: HardPublicLedger,
+      recentEvents: readonly PublicActionEvent[],
+      perspectiveSeat: PublicSeat,
+    ): LightweightPublicEvidence
+
+It consumes public ledger/event/hash contracts only. Its output has schemaVersion "d2-lightweight-evidence-v1", hardPublicFacts, derivedSignals, and frozen provenance.
+
+D2c may read only:
+
+- hardPublicFacts.remainingCardCounts keyed by self, partner, leftOpponent, and rightOpponent;
 - hardPublicFacts.finishOrder;
-- derivedSignals.recentActions containing all event kinds in the canonical last-16 event window;
+- derivedSignals.recentActions containing all event kinds in the canonical last-16 window;
 - derivedSignals.recentPassStreakByRelation;
 - derivedSignals.recentActionTendencies with playCount, passCount, and lastActionKind;
-- schemaVersion, eventIndex, perspectiveSeat, and public identity fields.
+- schemaVersion, eventIndex, perspectiveSeat, gameId, roundIdentity, and handIdentity.
 
-D2c treats evidence as a read-only snapshot. It validates the version and required finite/integer aggregate shapes before classification. It calls D2b's privacy assertion on the evidence, but it does not serialize or copy hidden state because none is part of the D2c input contract.
+D2c calls the D2b privacy assertion, does not serialize evidence, and has no hidden-state input.
 
 ### Existing plan and runtime types
 
-The actual definitions are in src/ai/contracts.ts:
+Actual definitions are in src/ai/contracts.ts:
 
     export type HandPlan = {
       id: string;
@@ -100,16 +104,16 @@ The actual definitions are in src/ai/contracts.ts:
       planSelectionState?: D1PlanSelectionState;
     };
 
-PlanMetrics contains the existing deterministic signals hardViolations, protectionLoss, estimatedTurns, lowSingleCount, retainedControl, wildcardFlexibility, responseCoverage, leadFlexibility, and fallbackScore. D2c may read these metrics and the candidate's existing groups; it may not mutate them or derive a new HandPlan.
+PlanMetrics contains hardViolations, protectionLoss, estimatedTurns, lowSingleCount, retainedControl, wildcardFlexibility, responseCoverage, leadFlexibility, and fallbackScore. The existing fractional fixture at tests/ai/planIdentity.test.ts:17 contains protectionLoss 0.123456789 and estimatedTurns 1.23456789. D2c does not change PlanMetrics or impose a new domain on unused fields.
 
-src/ai/runtimeContracts.ts defines PlanIdentity with rootPlanId, planFamilyId, and lineageId, and D1PlanSelectionState with activePlanId, activePlanFamilyId, and planIdentityById. Existing D1 family IDs are identity lineage identifiers, not D2c semantic family labels. D2c reuses HandPlan.id as the stable candidate key and may read the current active ID; it does not overwrite or reinterpret D1 identity state.
+src/ai/runtimeContracts.ts defines PlanIdentity with rootPlanId, planFamilyId, and lineageId, plus D1PlanSelectionState with activePlanId, activePlanFamilyId, and planIdentityById. D1 family IDs are identity-lineage identifiers, not D2c semantic family labels. D2c reuses HandPlan.id and reads the current active ID only.
 
-### Room-to-decision call path
+src/ai/policy/powerGroupPolicy.ts computes protected groups through createPowerGroupPolicyIndex/protectedPowerGroups. The future caller supplies only stable protected group IDs in D2cPlanCandidate; D2c does not import private hands or rerun the policy.
 
-The verified production path is:
+### Room-to-decision path
 
     src/game/room.ts:runAiStep
-      -> decideAiAction(observation, room.aiRuntime[seat], config)
+      -> decideAiAction(observation, room.aiRuntime[seat], config, invocation?)
          -> analyzeHand / HandAnalysisCache
          -> ensurePlans
             -> generateFastHandPlans when replan is needed
@@ -122,33 +126,36 @@ The verified production path is:
       -> applyExecutedAction
       -> public event commit / public ledger update
 
-getPublicRoom may call ensureAiPlans, which calls ensurePlans, but it does not expose the public ledger or private runtime. D2c is not called from any of these paths in this plan. A future shadow adapter, if separately authorized, must call the pure policy after the existing decision has been computed and discard its result without passing it back to the decision engine.
+getPublicRoom may call ensureAiPlans, which calls ensurePlans, but it does not expose the public ledger or private runtime. D2c is not called from this path. A separately authorized adapter would compute detached metadata after the existing decision and discard it.
 
-### Candidate cardinality and existing concepts
+### Candidate cardinality and reusable concepts
 
-The existing planner budget has maxPlans, and ensurePlans returns candidatePlans from generateFastHandPlans. The D1 selector evaluates active plus up to k - 1 challengers, with the current default k = 5. Current runtime therefore supports zero candidates in an empty/replan state, one candidate in fallback/fast cases, and up to five candidates under the D1 top-k boundary. D2c rejects counts greater than five rather than truncating.
+The existing planner budget has maxPlans, ensurePlans returns candidatePlans from generateFastHandPlans, and the D1 selector uses the active plan plus challengers with current default k = 5. Runtime supports 0, 1, and 2–5 candidates. D2c rejects more than five rather than truncating.
 
-Existing concepts:
-
-| Concept | Present location | D2c use |
+| Concept | Actual source | D2c treatment |
 |---|---|---|
-| active plan | AiRuntimeState.activePlanId, D1 state | read-only equality against HandPlan.id |
-| stable candidate key | HandPlan.id | canonical key and final tie-break |
-| plan family identity | D1PlanSelectionState.planIdentityById[*].planFamilyId | not confused with semantic D2c labels |
-| protected group | src/ai/policy/powerGroupPolicy.ts | caller supplies read-only protected group IDs |
-| urgent-defense | absent as a named type | derived only from public low-count/finish signals plus candidate response/control metrics |
-| uncertainty-cover | absent as a named type | derived from mixed public play/pass evidence plus candidate coverage |
+| active plan | AiRuntimeState.activePlanId and D1 selection state | optional equality against HandPlan.id |
+| stable plan key | HandPlan.id | canonical key and final tie-break |
+| plan family identity | D1PlanSelectionState.planIdentityById[*].planFamilyId | not confused with D2c labels |
+| protected group | src/ai/policy/powerGroupPolicy.ts | supplied as stable group IDs |
+| urgent-defense | no named type | derived from public low-count/finish signals plus candidate metrics |
+| uncertainty-cover | no named type | derived from mixed public play/pass evidence plus candidate coverage |
 | quota/budget | PlanningBudget exists for planner generation | D2c adds a separate frozen quota config |
-| action prior | no suitable D2c action signature is present | omitted from D2c v1; no action prior is consumed |
+| action prior | no suitable D2c action signature | omitted from D2c v1 |
 
-src/ai/policy/powerGroupPolicy.ts already computes protected groups through createPowerGroupPolicyIndex/protectedPowerGroups. D2c receives only their stable CardGroup.id values in its candidate wrapper. It does not import private hands or rerun the policy, and it does not change the existing policy result.
+D2c reuses existing contracts and does not modify planManager.ts, planSelector.ts, planEvaluator.ts, HandPlanner, room.ts, or the decision engine.
 
 ## 4. Exact data contracts
 
-The only future production module is src/ai/planning/beliefGuidedPlanPolicy.ts. Its complete public contract is:
+The future module has exactly two import sources:
 
-    import type { LightweightPublicEvidence } from "../belief/lightweightPublicEvidence";
+    import {
+      assertLightweightPublicEvidencePrivacy,
+      type LightweightPublicEvidence,
+    } from "../belief/lightweightPublicEvidence";
     import type { HandPlan } from "../contracts";
+
+The D2b source has one runtime named binding, assertLightweightPublicEvidencePrivacy, and one type binding, LightweightPublicEvidence. The contracts source is type-only. There are no default, namespace, side-effect, dynamic, or CommonJS imports.
 
     export type PlanPruningMode = "disabled" | "shadow";
 
@@ -176,6 +183,13 @@ The only future production module is src/ai/planning/beliefGuidedPlanPolicy.ts. 
       | "unknown-mode"
       | "privacy-violation";
 
+    export type D2cEvidenceSnapshotRef = Readonly<{
+      gameId: string;
+      roundIdentity: string;
+      handIdentity: string;
+      eventIndex: number;
+    }>;
+
     export type D2cQuotaConfig = Readonly<{
       schemaVersion: "d2c-plan-quota-v1";
       maxPlanFamilies: number;
@@ -192,6 +206,7 @@ The only future production module is src/ai/planning/beliefGuidedPlanPolicy.ts. 
     export type D2cPlanPolicyInput = Readonly<{
       schemaVersion: "d2c-plan-policy-input-v1";
       evidence: LightweightPublicEvidence;
+      expectedEvidenceSnapshot: D2cEvidenceSnapshotRef;
       candidatePlans: readonly D2cPlanCandidate[];
       activePlanId?: string;
       mode: PlanPruningMode;
@@ -210,13 +225,16 @@ The only future production module is src/ai/planning/beliefGuidedPlanPolicy.ts. 
       familyIds: readonly D2cPlanFamily[];
       ownerFamily: D2cPlanFamily;
       priority: D2cPriorityTuple;
-      quota: number;
+    }>;
+
+    export type D2cFamilyPriority = Readonly<{
+      family: D2cPlanFamily;
+      priority: number;
+      candidatePlanKeys: readonly string[];
     }>;
 
     export type D2cFamilyQuota = Readonly<{
       family: D2cPlanFamily;
-      priority: number;
-      candidatePlanKeys: readonly string[];
       quota: number;
     }>;
 
@@ -247,24 +265,29 @@ The only future production module is src/ai/planning/beliefGuidedPlanPolicy.ts. 
       mode: "shadow";
       candidateCount: number;
       annotations: Readonly<Record<string, D2cPlanAnnotation>>;
-      familyPriority: readonly D2cFamilyQuota[];
+      familyPriority: readonly D2cFamilyPriority[];
       familyQuotas: readonly D2cFamilyQuota[];
       diagnostics: D2cDiagnostics;
     }>;
 
-    export type D2cPlanPolicyResult = D2cDisabledResult | D2cShadowResult;
+    export type D2cPlanPolicyResult =
+      | D2cDisabledResult
+      | D2cShadowResult;
 
-    export function deriveD2cPlanPriorityQuota(input: D2cPlanPolicyInput): D2cPlanPolicyResult;
+    export function deriveD2cPlanPriorityQuota(
+      input: D2cPlanPolicyInput,
+    ): D2cPlanPolicyResult;
 
 Contract decisions:
 
-- HandPlan.id is the stable plan key. D2c never creates a transient identity, never hashes a private hand, and never replaces an existing D1 identity.
-- D2cPlanCandidate.protectedGroupIds is a read-only projection produced by the existing protected-group policy. It contains IDs only; no Card[], private hand, or policy index object crosses the D2c boundary.
-- candidatePlans is not returned from the result. This makes it impossible for the policy result to replace or reorder the caller's candidates. An annotation map is keyed by stable plan ID and has no plan object reference.
-- Every result object and nested array/record is deep-frozen. Inputs are never mutated, and no input object is retained by reference in output.
-- D2cDiagnostics contains counts, family/quota results, and one fallback reason only. It contains no candidate groups, card IDs, public event payloads, hidden state, action score, runtime, or wall-clock duration.
-- D2cShadowResult.familyPriority is the complete family ordering; familyQuotas is the same ordering with quota values made explicit. It does not mean candidates have been pruned or expanded.
-- D2cDisabledResult.annotations and quota arrays are empty by contract. candidateCount remains the observed count for diagnostics; no fake candidate or fake identity is created.
+- HandPlan.id is the stable key. D2c never creates a transient identity and never hashes a private hand.
+- expectedEvidenceSnapshot contains only D2b-public gameId, roundIdentity, handIdentity, and eventIndex. It never contains room, hands, runtime, or hidden state.
+- candidatePlans is not returned. annotations is keyed by stable plan ID and contains no plan or group object.
+- D2cPlanAnnotation deliberately has no quota field. Quota is a family-level diagnostic, not candidate selection, expansion count, retained flag, or candidate copy state.
+- familyPriority contains every discovered owner family in complete priority order and does not imply selection or expansion.
+- familyQuotas contains only quota > 0, has no candidate object, preserves familyPriority relative order, and sums to diagnostics.quotaTotal.
+- Every output object, array, and record is deep-frozen. Inputs are never mutated and no input object is retained in output.
+- Diagnostics contain only aggregate counts, stable keys, family/quota data, mode, schema, and one fallback reason; no evidence object, cards, groups, runtime, action, private state, or wall-clock data.
 
 ## 5. Plan family taxonomy
 
@@ -280,34 +303,35 @@ The classifier uses only D2b aggregates and the candidate's existing PlanMetrics
 
     publicUncertainty =
       recentActions.length > 0 &&
-      (left.playCount > 0 && left.passCount > 0 ||
-       right.playCount > 0 && right.passCount > 0);
+      ((left.playCount > 0 && left.passCount > 0) ||
+       (right.playCount > 0 && right.passCount > 0));
 
     publicHighValue =
-      leftOpponentCount <= 5 || rightOpponentCount <= 5 ||
+      leftOpponentCount <= 5 ||
+      rightOpponentCount <= 5 ||
       evidence.hardPublicFacts.finishOrder.length > 0;
 
-Counts come from evidence.hardPublicFacts.remainingCardCounts; the relation keys are fixed and are not inferred from hidden hands. The classifier does not claim why an opponent passed, what cards they hold, or which action they will choose.
+Counts come from evidence.hardPublicFacts.remainingCardCounts. No hidden hand, pass explanation, or future action is inferred.
 
 ### Candidate labels
 
-For each candidate, first compute these base labels in the listed order, deduplicating with a set:
+Compute labels in this order and deduplicate with a set:
 
 1. active when activePlanId === plan.id.
-2. urgent-defense when publicUrgency is true and the plan has responseCoverage > 0, a protected group ID, or a non-single group. This records that the candidate can represent a defensive public situation; it does not remove other legal actions.
-3. finishability when estimatedTurns equals the minimum estimatedTurns among the supplied candidates.
-4. power-preserving when protectedGroupIds.length > 0 or the plan has a bomb, straight-flush, or joker-bomb group and protectionLoss === 0.
+2. urgent-defense when publicUrgency is true and the plan has responseCoverage > 0, a protected group ID, or a non-single group.
+3. finishability when estimatedTurns equals the minimum finite estimatedTurns among supplied candidates.
+4. power-preserving when protectedGroupIds.length > 0 or the plan has a protected power group and protectionLoss === 0.
 5. uncertainty-cover when publicUncertainty is true and the plan has responseCoverage > 0 or leadFlexibility >= 2.
-6. alternative when the candidate has at least two labels among items 2–5, or when an active plan exists and the candidate is not active and its strongest non-active label differs from the active candidate's strongest non-active label.
-7. other when no label has been assigned.
+6. alternative when the candidate has at least two labels among items 2–5, or when an active plan exists and a non-active candidate has a distinct strongest non-active label.
+7. other when no label was assigned.
 
-active is a marker, not an action rule. A candidate can have multiple labels. Repeated labels are removed before sorting. If an active plan is absent, no candidate receives active; the remaining labels are classified normally. If an active ID is present but not among candidates, the input is stale and returns disabled with stale-evidence. The caller must then preserve the old action path.
+An active candidate can have other labels. When no active plan exists, no candidate receives active. When activePlanId is supplied but absent from candidatePlans, the input is stale. A candidate may belong to multiple families; ownerFamily is selected once by highest family tier, then compareStableText on the family label. Duplicate family labels do not consume additional quota.
 
-The current code has no explicit urgent-defense or uncertainty type. The above is the minimum read-only representation built from existing public evidence and HandPlan metrics; it does not refactor planner state or invent hidden-state features. The current code also has no action signature suitable for an action prior, so D2c v1 does not expose one.
+The repository has no explicit urgent-defense or uncertainty-cover type. These labels are the minimum read-only D2c representation; no planner refactor is required. D2c does not use hidden state to classify a family.
 
-## 6. Priority and stable tie-break
+## 6. Priority, fractional candidate quality, and stable tie-break
 
-The priority for a candidate is the tuple:
+The candidate priority tuple is:
 
     [
       familyTier,
@@ -316,7 +340,7 @@ The priority for a candidate is the tuple:
       stablePlanKey,
     ]
 
-Higher numeric components sort first. The final string component sorts ascending with localeCompare and is the only tie-break after all numeric components. The fixed family tiers are:
+The numeric components sort descending. stablePlanKey sorts ascending with the same UTF-16 comparator used everywhere else.
 
 | Family | familyTier |
 |---|---:|
@@ -328,23 +352,48 @@ Higher numeric components sort first. The final string component sorts ascending
 | alternative | 100 |
 | other | 0 |
 
-For a multi-family candidate, familyTier is the maximum tier of its labels. publicSignalTier is 2 for publicUrgency, 1 for publicHighValue without urgency, and 0 otherwise. candidateQuality is the fixed integer:
+For multi-family candidates, familyTier is the maximum tier. publicSignalTier is 2 for publicUrgency, 1 for publicHighValue without urgency, and 0 otherwise.
+
+Candidate quality reads exactly six fields: estimatedTurns, lowSingleCount, retainedControl, responseCoverage, leadFlexibility, and protectionLoss. Each must satisfy typeof value === "number" and Number.isFinite(value). There is no integral, sign, or decimal-length restriction. Unused hardViolations, wildcardFlexibility, and fallbackScore are not domain-narrowed by this validator.
+
+The exact raw formula is:
 
     1000
-      - 100 * plan.metrics.estimatedTurns
-      - 10 * plan.metrics.lowSingleCount
-      + 10 * plan.metrics.retainedControl
-      + 5 * plan.metrics.responseCoverage
-      + 5 * plan.metrics.leadFlexibility
-      - 50 * plan.metrics.protectionLoss;
+      - 100 * estimatedTurns
+      - 10 * lowSingleCount
+      + 10 * retainedControl
+      + 5 * responseCoverage
+      + 5 * leadFlexibility
+      - 50 * protectionLoss
 
-The implementation validates every metric as finite and non-negative before this calculation. stablePlanKey is included in the tuple for auditability but is compared separately as the final ascending tie-break. Candidate input permutation therefore cannot affect labels, family order, annotations, quota, or any normal result bytes. Equal input snapshots produce equal JSON bytes because family IDs, plan IDs, and record keys are emitted in stable sorted order.
+Use exactly:
 
-The ordering expresses plan-category priority only: urgent public defense, active plan continuity, public high-value/finish or power preservation, public uncertainty coverage, then alternatives/other. It does not define an “urgent action beats immediate finish” rule and does not select any action; action semantics remain outside D2c.
+    const D2C_SCORE_DECIMALS = 6;
+    const D2C_SCORE_SCALE = 1_000_000;
+
+    function roundD2cScore(value: number): number {
+      const rounded =
+        Math.round(value * D2C_SCORE_SCALE) / D2C_SCORE_SCALE;
+      return Object.is(rounded, -0) ? 0 : rounded;
+    }
+
+Compute raw candidateQuality from the formula, then apply roundD2cScore. A non-finite input or non-finite raw/derived score returns invalid-family-annotation. Values are not coerced and PlanMetrics is not changed.
+
+The canonical finishability signal is the minimum estimatedTurns. The canonical power-preserving signal requires protectionLoss === 0 or an existing protected group. The authorized D1 fixture at tests/ai/planIdentity.test.ts:17 includes protectionLoss 0.123456789 and estimatedTurns 1.23456789; D2c tests preserve these values and assert deterministic six-decimal derived quality.
+
+Use this comparator for stablePlanKey, family labels, owner-family numeric-tier ties, record insertion order, candidatePlanKeys, familyPriority, and familyQuotas:
+
+    function compareStableText(left: string, right: string): number {
+      return left < right ? -1 : left > right ? 1 : 0;
+    }
+
+This is UTF-16 code-unit ordering, independent of locale or process environment. Candidate permutation therefore yields equal labels, priority, quota, diagnostics, and serialized result bytes. No time, random value, or worker order participates.
+
+This is plan-category priority only. It is not an action-layer rule.
 
 ## 7. Fixed quota algorithm
 
-The default frozen config used by the first tests is:
+Frozen default:
 
     const D2C_DEFAULT_QUOTA_CONFIG: D2cQuotaConfig = Object.freeze({
       schemaVersion: "d2c-plan-quota-v1",
@@ -354,478 +403,313 @@ The default frozen config used by the first tests is:
       maxQuotaPerFamily: 3,
     });
 
-The fields are validated as integers. maxPlanFamilies is 1–5, maxPlanExpansions is 0–5, minQuotaPerFamily is 1–maxQuotaPerFamily, and maxQuotaPerFamily is 1–5. A config with non-integers, negatives, min > max, an unknown version, or a required minimum greater than the expansion budget returns disabled with invalid-quota-config. If the computed selected-family minimum would exceed the budget, the result is disabled with quota-exceeds-budget; the implementation never returns an over-budget result.
+Validation:
 
-Quota units are unique candidate plan keys, not family memberships. A candidate with urgent-defense and power-preserving is assigned to exactly one ownerFamily: the highest-tier label, then the lexicographically smallest label on a numeric tie. Its annotation still retains both labels, but it consumes one quota unit only in ownerFamily. This prevents repeated family membership from consuming the same candidate twice.
+- schemaVersion must be d2c-plan-quota-v1;
+- maxPlanFamilies is an integer in 1..5;
+- maxPlanExpansions is an integer in 0..5;
+- minQuotaPerFamily is an integer in 1..maxQuotaPerFamily;
+- maxQuotaPerFamily is an integer in 1..5;
+- when maxPlanExpansions is positive, minQuotaPerFamily must not exceed it;
+- malformed, negative, non-integer, inverted, or out-of-range configuration returns invalid-quota-config.
 
-The exact algorithm is:
+maxPlanExpansions === 0 is valid shadow: familyPriority remains complete, familyQuotas is empty, and quotaTotal is 0.
 
-1. Sort candidates by stablePlanKey; reject duplicate or empty keys.
-2. Classify and score each candidate.
-3. Group candidates by ownerFamily, retaining each group sorted by candidate priority descending and stable key ascending.
-4. Sort families by their highest member priority descending, then family name ascending.
-5. Select at most maxPlanFamilies families and at most maxPlanExpansions / minQuotaPerFamily families. If the budget is zero, select none and return quota total zero.
-6. Give each selected family minQuotaPerFamily, capped by that family's unique candidate count.
-7. While budget remains, increment the selected family with the largest candidateCount - quota, capped at maxQuotaPerFamily and candidate count. Ties use family priority descending, then family name ascending. This is the fixed largest-remainder-style allocation; no runtime duration participates.
-8. Emit the family quota records and verify 0 <= quota <= maxQuotaPerFamily, each quota is an integer, and sum(familyQuotas.quota) <= maxPlanExpansions. Any failed invariant returns disabled with quota-exceeds-budget.
+Allocator:
 
-The lower bound is 1 per selected family and the upper bound is 3 in the frozen default. The budget is five unique candidate allocation units. A remaining budget is distributed to the largest deficit first; a budget shortage drops the lowest-priority family before any quota is emitted. The algorithm does not copy candidates into quota slots and does not call any planner.
+1. Validate candidate keys and classify candidates.
+2. Assign one ownerFamily per candidate; repeated membership does not charge twice.
+3. Sort each family by highest member priority, then compareStableText(family).
+4. Keep familyPriority complete, including families receiving no quota.
+5. For zero budget, emit no quota.
+6. For positive budget, select no more than maxPlanFamilies and no more than Math.floor(maxPlanExpansions / minQuotaPerFamily) families. A family is eligible only when it has enough distinct candidate keys for the minimum.
+7. Give selected families the minimum, capped by candidate count and maxQuotaPerFamily.
+8. While budget remains, add one unit to the selected family with largest remaining deficit, capped by candidate count and maxQuotaPerFamily. Ties use familyPriority order and compareStableText.
+9. Emit only quota > 0 in familyPriority relative order.
+10. Set diagnostics.quotaTotal to the sum and check the postconditions.
+
+quota-exceeds-budget is only for allocator postcondition failures: produced quota is non-integer/negative/above max, sum exceeds maxPlanExpansions, duplicate family quota, or familyQuotas order disagrees with familyPriority. It is not used for malformed config. Use Math.floor explicitly; never depend on implicit fractional truncation. The allocator never creates a candidate, calls a planner, or changes caller state.
 
 ## 8. candidatePlans 0/1/2–5 semantics
 
-### Zero candidates
+- 0: stable disabled result, candidateCount 0, empty annotations/family arrays, quotaTotal 0, and no-candidates-action-only. No pseudo-plan, identity, alignment, damage, switch, or expansion.
+- 1: retain the one read-only annotation and one owner family. The fixed allocator may emit one positive family quota, or none for zero budget. Never copy or expand the candidate.
+- 2–5: classify all, keep complete familyPriority, allocate family-level quota, and leave caller count/order unchanged. More than 5 returns candidate-count-overflow.
+- Every cardinality has permutation-invariant output and no effect on legal actions or final selection.
 
-Return a stable disabled result with candidateCount: 0, empty annotations, empty family priority/quota arrays, quotaTotal: 0, and fallbackReason: no-candidates-action-only. Do not create a pseudo-plan, plan ID, plan family, alignment score, damage score, switch record, or transient identity. D2d's action-only semantics are not implemented by this module; the existing action path remains the sole path.
+## 9. Disabled and shadow semantics
 
-### One candidate
+disabled returns before evidence classification and before the D2b privacy function. It performs only envelope checks needed for a stable candidate count, returns empty annotations and family arrays, and uses disabled-by-config. It has no policy side effect.
 
-Classify and annotate the one existing candidate. If the mode is shadow and the config permits one unit, its owner family receives quota 1. The annotation is a read-only view keyed by the candidate's existing HandPlan.id. No planner expansion occurs, the candidate is not duplicated, and no active selection is performed.
+shadow validates evidence, expected snapshot, candidates, active ID, and quota config; classifies and freezes advisory metadata. No caller may pass it to ensurePlans, selectActivePlan, generateActionCandidates, evaluateActionCandidate, runAiStep, or a room transition.
 
-### Two through five candidates
-
-Classify all candidates, group by owner family, compute family priority, and allocate the fixed quota. All input candidates remain with the caller in their original order. The result contains only annotations and aggregate quota records. A candidate count above five returns disabled with candidate-count-overflow; it is never silently truncated.
-
-In every cardinality case, the result is invariant under candidate input permutation and has no effect on legal action generation or final action selection.
-
-## 9. Disabled/shadow semantics
-
-mode: disabled returns before evidence classification. It performs only input envelope checks needed to report candidateCount safely, produces empty annotations and quotas, sets fallbackReason: disabled-by-config, and causes no policy side effect. It does not call the privacy scanner, inspect plan groups, or access the public evidence fields for classification.
-
-mode: shadow validates the evidence, candidate wrappers, active ID, and quota config; classifies all candidates; produces the frozen result; and returns it to a caller that may log aggregate diagnostics. The result is advisory metadata only. No caller in this plan is allowed to pass annotations or quotas to ensurePlans, selectActivePlan, generateActionCandidates, evaluateActionCandidate, runAiStep, or a room transition.
-
-The result contains no action, legalActions, actionScore, selectedPlan, runtime, or candidatePlans property. That shape is an enforced boundary against action control. If a future D2d contract adds action priors, the prior must be a read-only aggregate/tag record, must not delete legal actions, must not change evaluator scores or ordering, and must be authorized in a separate D2d task.
+The result has no action, legalActions, actionScore, selectedPlan, selectedPlanId, runtime, or candidatePlans property. D2c v1 emits no action prior. Any later prior is a separate D2d contract and cannot delete legal actions, change evaluator scores, reorder actions, or generate actions.
 
 ## 10. Action-prior boundary
 
-The latest D2 design mentions a possible action prior, but the current repository has no action signature that D2c can consume without crossing into D2d. D2c v1 therefore emits only plan family annotations, family priority, family quota, and aggregate diagnostics.
-
-No D2c function may create a legal action, infer a representative action, filter an action, score an action, reorder ActionCandidate, or call the existing evaluator. The shadow result may be compared against an unchanged action decision in a test, but it may not be used as an input to that decision. Any action-prior implementation requires a separate D2d authorization and a bounded action backend.
+The current code has no suitable D2c action signature. D2c v1 emits only plan annotations, complete family priority, positive family quotas, and diagnostics. Any use of a prior to reduce or reorder actions belongs to separately authorized D2d.
 
 ## 11. Privacy and source boundary
 
-### Module import allowlist
+Exact future imports:
 
-The AST source-boundary test permits only these imports in src/ai/planning/beliefGuidedPlanPolicy.ts:
+    import {
+      assertLightweightPublicEvidencePrivacy,
+      type LightweightPublicEvidence,
+    } from "../belief/lightweightPublicEvidence";
+    import type { HandPlan } from "../contracts";
 
-    ../belief/lightweightPublicEvidence
-    ../contracts
+The AST test requires exactly these two module specifiers; assertLightweightPublicEvidencePrivacy is the only runtime binding, LightweightPublicEvidence is a type binding, and HandPlan is type-only. It rejects default, namespace, side-effect, third-source, dynamic, and CommonJS imports.
 
-Both are type-only imports. The module has no runtime import from room, planner, runtime, server, provider/store, public event/ledger, particle, rollout, benchmark, or treatment code. The existing protected-group policy is reused by the caller before the D2c call; only stable protected group IDs enter D2cPlanCandidate.
+The module must not import or read RoomState, hands, partnerHand, opponentsHands, initialHands, deck, hiddenState, particle bank, rollout state, server provider/store identity internals, room.ts, aiDecisionEngine.ts, HandPlanner, or planner modules. The recursive D2b privacy assertion is reused. Output contains only schema, mode, aggregate counts, family labels, stable keys, numeric priority/quota data, and fallback reason; no evidence object, cards, groups, runtime, private state, or action data.
 
-The AST test rejects these module sources and identifiers:
+The source test also proves room.ts, aiDecisionEngine.ts, contracts.ts, runtimeContracts.ts, handPlanner.ts, planManager.ts, planSelector.ts, and planEvaluator.ts do not import D2c. A detached test may import the policy directly; this does not authorize a production adapter.
 
-    RoomState, PublicRoom, hands, initialHands, partnerHand, opponentsHands,
-    deck, hiddenState, privateRuntime, AiRuntimeState, HandPlanner,
-    generateHandPlans, generateFastHandPlans, generateRapidHandPlan,
-    decideAiAction, runAiStep, ParticleBank, particles, rollout, likelihood,
-    server, provider, store, identityProvider, identityStore, treatment,
-    benchmark, simulation, performance, smoke, calibration, formal
+## 12. Failure and fallback behavior
 
-It also rejects dynamic import(), require(), side-effect imports, and serialization of candidate plan objects or evidence into diagnostics.
+Shadow validation order is fixed:
 
-### Recursive privacy boundary
+1. input schemaVersion;
+2. evidence structure and D2b privacy;
+3. expectedEvidenceSnapshot structure;
+4. gameId exact equality;
+5. roundIdentity exact equality;
+6. handIdentity exact equality;
+7. eventIndex exact equality;
+8. candidate, family, and quota validation.
 
-D2c reuses assertLightweightPublicEvidencePrivacy on valid shadow input evidence. The D2c output is scanned independently with the normalized forbidden-key set:
+Malformed expectedEvidenceSnapshot -> invalid-evidence. Different identity field or evidence.eventIndex older/newer than the expected value -> stale-evidence. Stale means mismatch with the caller-declared decision snapshot, not merely elapsed time. D2c never reads RoomState, current room state, Date.now, or wall-clock time, and never repairs a snapshot.
 
-    partnerHand, opponentsHands, hands, initialHands, deck, hiddenInitialHand,
-    hiddenState, fullState, hypotheticalHands, ParticleBank, particles,
-    privateRuntime, rolloutState, provider, store, identityProvider,
-    identityStore, providerIdentity, installationIdentity, idempotencyKey,
-    gameSequence, roomTransportId
-
-Diagnostics contain only integer counts, family labels, stable plan keys, quota integers, mode, schema and fallback reason. They never contain the evidence object, HandPlan.groups, card IDs, Card[], private runtime, or serialized hidden state.
-
-## 12. Failure/fallback behavior
-
-All failures below return a frozen D2cDisabledResult, preserve the old AI action path, preserve candidates and runtime, and report the exact stable reason shown:
-
-| Failure | Result |
+| Condition | Reason |
 |---|---|
-| invalid evidence shape or non-finite evidence aggregate | invalid-evidence |
-| evidence eventIndex is older than the caller's required snapshot contract | stale-evidence |
-| evidence schema is not d2-lightweight-evidence-v1 | unknown-evidence-schema |
-| candidate count greater than 5 | candidate-count-overflow |
-| duplicate HandPlan.id | duplicate-plan-key |
-| empty or non-string stable plan ID | missing-plan-key |
-| unknown family label produced by classifier validation | invalid-family-annotation |
-| unknown quota schema, non-integer/negative bound, or min/max inversion | invalid-quota-config |
-| computed quota sum exceeds maxPlanExpansions | quota-exceeds-budget |
-| runtime mode value is not disabled or shadow | unknown-mode |
-| D2b privacy assertion or D2c output privacy scan fails | privacy-violation |
+| unknown evidence schema | unknown-evidence-schema |
+| invalid evidence structure | invalid-evidence |
+| privacy assertion failure | privacy-violation |
+| malformed snapshot | invalid-evidence |
+| identity or eventIndex mismatch | stale-evidence |
+| candidate count > 5 | candidate-count-overflow |
+| missing/empty stable key | missing-plan-key |
+| duplicate stable key | duplicate-plan-key |
+| invalid family/protected-group annotation | invalid-family-annotation |
+| used metric non-number/non-finite or non-finite derived score | invalid-family-annotation |
+| malformed quota configuration | invalid-quota-config |
+| allocator postcondition failure | quota-exceeds-budget |
+| unknown mode | unknown-mode |
 
-Unknown mode is tested through a runtime as unknown input because the exported TypeScript union prevents it in well-typed callers. Duplicate and missing stable keys are detected before any annotation is emitted. Invalid family labels are validated against the closed D2cPlanFamily set before output freezing. No error is converted into active mode, candidate deletion, planner retry, action change, or runtime mutation.
-
-The stale evidence rule is limited to the input snapshot's declared eventIndex; D2c does not compare wall-clock time or room state. A caller that cannot establish the evidence/candidate snapshot pairing must call the old decision path and pass a stable stale reason to its own diagnostics; D2c itself does not access room state to repair the pairing.
+Every failure is disabled, preserves the old AI path, leaves input unchanged, and records one stable reason. It never enters active behavior.
 
 ## 13. Proposed file map
 
-Future implementation allowlist:
-
-| File | Responsibility |
+| Path | Role |
 |---|---|
-| src/ai/planning/beliefGuidedPlanPolicy.ts | Pure D2c contracts, evidence validation, family classification, priority tuple, quota allocation, deep freeze, disabled/shadow result |
-| tests/ai/beliefGuidedPlanPolicy.test.ts | RED, behavior, permutation, immutability, malformed-input, privacy, AST source boundary, and shadow no-op characterization |
+| src/ai/planning/beliefGuidedPlanPolicy.ts | future pure contracts, snapshot/evidence validation, classification, stable priority, allocator, deep freeze |
+| tests/ai/beliefGuidedPlanPolicy.test.ts | future focused RED/GREEN, negative matrix, AST boundary, freeze, permutation, detached shadow |
 
-No production adapter is included in this allowlist. If a future review authorizes one, it must be a separate file and separate commit after the pure policy gate; it may call the policy after the existing decision and discard the result, but it may not be combined with Task 2 or modify room.ts/aiDecisionEngine.ts.
+These are the only future implementation files. No production adapter is included.
 
 ## 14. Task-by-task TDD implementation
 
-Each task below is independently reviewable. The listed commit subject is the only intended subject for that atomic boundary. Every test command must add --exclude ".worktrees/**" when run from repository root.
+Every task below has exact files, interfaces, named tests, command, expected result, allowlist, commit subject, and stop condition.
 
 ### Task 1: RED characterization
 
-**Files:**
+Files: create tests/ai/beliefGuidedPlanPolicy.test.ts only.
 
-- Create: tests/ai/beliefGuidedPlanPolicy.test.ts
-- No production file is created in this task.
+Add named tests for:
 
-**Interfaces:**
+- zero action-only disabled;
+- one candidate without expansion;
+- 2–5 candidates;
+- six candidates rejected;
+- active, urgent-defense, finishability, uncertainty-cover, power-preserving, alternative, other, and multi-family de-duplication;
+- complete familyPriority versus positive-only familyQuotas;
+- quotaTotal equals family quota sum;
+- no candidate annotation quota or selection state;
+- candidate permutation and repeated JSON byte stability;
+- UTF-16 comparator independent of locale;
+- fractional quality with exact formula and six-decimal result;
+- unused metric broader domain accepted;
+- stale older event index;
+- stale newer event index;
+- stale identity mismatch;
+- malformed expected snapshot;
+- zero expansion valid shadow;
+- invalid quota configuration;
+- disabled no-op and immutable outputs.
 
-- Consumes: the future imports D2cPlanCandidate, D2cPlanPolicyInput, deriveD2cPlanPriorityQuota from src/ai/planning/beliefGuidedPlanPolicy.ts, D2b evidence fixtures, and existing HandPlan fixtures.
-- Produces: failing tests that lock the exact D2c contract without touching production decision code.
+The source-boundary test uses the TypeScript AST against the future source path and requires the exact imports in section 4, the sole runtime D2b binding, type bindings, and rejection of default/namespace/side-effect/third-source/dynamic/CommonJS imports. It scans production files for D2c imports.
 
-- [ ] **Step 1: Add deterministic fixture builders and imports.**
-
-Use HandPlan fixtures with valid existing PlanMetrics, D2b evidence fixtures created by existing public-ledger helpers, and D2cPlanCandidate wrappers containing only protectedGroupIds. The test must not call createRoom, read room hands, or construct a deck as a D2c input.
-
-- [ ] **Step 2: Add zero/one/multi-cardinality RED cases.**
-
-Add these exact test names:
-
-    returns action-only disabled semantics for zero candidates without a fake plan
-    annotates one existing candidate without expansion or duplication
-    classifies two through five candidates without changing candidate order
-    rejects more than five candidates with candidate-count-overflow
-
-The assertions must check candidateCount, empty zero-plan output, one annotation for one plan, unchanged input JSON, and no candidate plan array in the result.
-
-- [ ] **Step 3: Add taxonomy and priority RED cases.**
-
-Add these exact test names:
-
-    marks the active plan without treating D1 identity as a semantic family
-    marks urgent-defense from public low-count evidence and candidate response coverage
-    marks uncertainty-cover from mixed public play/pass evidence
-    marks power-preserving and finishability from existing candidate metrics
-    marks multi-family candidates as alternative with deduplicated family labels
-    orders family and candidate ties by stable plan key
-
-Use evidence-only public counts and recent action tendencies. Assert that no hidden-hand or private runtime fixture is passed to the policy.
-
-- [ ] **Step 4: Add quota and invariance RED cases.**
-
-Add these exact test names:
-
-    allocates bounded quotas with conservation and per-family caps
-    does not double-charge a candidate that belongs to multiple families
-    is invariant to candidate input permutation
-    returns byte-stable output for repeated equal input
-    disabled mode skips classification and returns disabled-by-config
-
-Assert sum(quota) <= maxPlanExpansions, lower/upper bounds, stable family order, and exact JSON equality across permutations/repeated calls.
-
-- [ ] **Step 5: Add malformed-input and source-boundary RED cases.**
-
-Add these exact test names:
-
-    fails closed for invalid evidence and unknown evidence schema
-    fails closed for duplicate or missing stable plan keys
-    fails closed for invalid quota and over-budget configuration
-    fails closed for an unknown runtime mode
-    deep-freezes result and never mutates evidence or candidate inputs
-    keeps the D2c module within evidence/contracts-only source boundaries
-
-The source test must parse the actual future path with the TypeScript AST, require the two-item type-only import allowlist, reject forbidden identifiers, and reject dynamic import/require/side-effect imports.
-
-- [ ] **Step 6: Run the focused RED gate.**
-
-Run:
+Command:
 
     npx vitest run tests/ai/beliefGuidedPlanPolicy.test.ts --exclude ".worktrees/**" --testTimeout=120000 --reporter=verbose
 
-Expected result: collection fails only because src/ai/planning/beliefGuidedPlanPolicy.ts does not exist. There must be no fixture/setup failure, no URL-scheme failure, and no unrelated production test failure.
+Expected RED: collection fails only because src/ai/planning/beliefGuidedPlanPolicy.ts is absent. No fixture/setup, URL-scheme, or unrelated production failure.
 
-- [ ] **Step 7: Commit the characterization.**
-
-    git add tests/ai/beliefGuidedPlanPolicy.test.ts
-    git commit -m "test: characterize D2c plan priority and quota"
-
-Stop if any file outside the test allowlist is staged or if the RED failure is not a module-resolution failure.
+Commit: test: characterize D2c plan priority and quota.
+Stop if another file is staged or RED is not module resolution.
 
 ### Task 2: Minimal pure D2c policy
 
-**Files:**
+Files: create src/ai/planning/beliefGuidedPlanPolicy.ts; modify the focused test only for GREEN assertions.
 
-- Create: src/ai/planning/beliefGuidedPlanPolicy.ts
-- Modify: tests/ai/beliefGuidedPlanPolicy.test.ts only to observe GREEN behavior
+Implement the exact contracts/imports from section 4; ordered snapshot validation; D2b privacy call; classification; six-field finite validation; fractional formula and roundD2cScore; compareStableText; complete familyPriority; positive-only familyQuotas; Math.floor allocator; recursive deep freeze; and no input references in output.
 
-**Interfaces:**
+Do not import AiRuntimeState, PlanSelectionMode, HandPlanner, room, powerGroupPolicy, planner modules, decision engine, or any third source. Do not create a HandPlan, write caller state, or generate action data.
 
-- Consumes: D2cPlanPolicyInput with D2b evidence, 0–5 D2cPlanCandidate wrappers, optional activePlanId, disabled/shadow mode, and D2cQuotaConfig.
-- Produces: D2cPlanPolicyResult with immutable annotations, family priority/quota and aggregate diagnostics.
-
-- [ ] **Step 1: Implement the exact type declarations.**
-
-Copy the contracts in section 4 verbatim into the module. Import LightweightPublicEvidence and HandPlan as type-only imports. Do not import AiRuntimeState, PlanSelectionMode, HandPlanner, room, powerGroupPolicy, or any module outside the two-item allowlist.
-
-- [ ] **Step 2: Implement validation and disabled semantics.**
-
-Implement validateEvidence, validateCandidateKeys, and validateQuotaConfig as private functions. deriveD2cPlanPriorityQuota must return the disabled result for every listed fallback reason and must not mutate input. mode === "disabled" must return before classification. The disabled result must contain no annotations or candidate plans.
-
-- [ ] **Step 3: Implement pure family classification.**
-
-Implement the predicates and labels in section 5. Use explicit fixed family order, Set de-duplication, candidate metric validation, protected group ID validation, and no hidden-state inference. Return the labels sorted by descending family tier and ascending family name.
-
-- [ ] **Step 4: Implement priority and owner-family selection.**
-
-Implement the exact integer candidateQuality formula and tuple comparison in section 6. Use HandPlan.id as the stable key. Choose one owner family for quota accounting while retaining all deduplicated labels in each annotation.
-
-- [ ] **Step 5: Implement the fixed quota allocator.**
-
-Implement the eight-step algorithm in section 7. The allocator must use only candidate counts, family tiers, stable names and integer budget fields. It must never create a HandPlan, call a planner, or write caller state.
-
-- [ ] **Step 6: Implement deep freeze and output construction.**
-
-Construct records in sorted key order, deep-freeze the full graph, and scan the result's keys against the D2c forbidden set. Return shadow only after all invariants pass. Do not return plan objects, groups, cards, action scores, runtime, or evidence.
-
-- [ ] **Step 7: Run the focused GREEN gate.**
-
-Run:
+Commands:
 
     npx vitest run tests/ai/beliefGuidedPlanPolicy.test.ts --exclude ".worktrees/**" --testTimeout=120000 --reporter=verbose
-
-Expected result: all Task 1 tests pass; no test is skipped or marked todo; no module-resolution, fixture, privacy, or action-path failure is present.
-
-- [ ] **Step 8: Run TypeScript and commit the pure policy.**
-
-Run:
-
     npx tsc --noEmit --pretty false
     git diff --check
 
-Expected result: TypeScript exit 0 and diff-check exit 0. Commit only the two allowlisted files:
+Expected GREEN: all focused tests, TypeScript, and diff-check pass; no skipped/todo/module-resolution/privacy/fixture/action-path failure.
 
-    git add src/ai/planning/beliefGuidedPlanPolicy.ts tests/ai/beliefGuidedPlanPolicy.test.ts
-    git commit -m "feat: derive deterministic D2c shadow priorities"
+Future commit: feat: derive deterministic D2c shadow priorities.
+Stop if import, snapshot, fractional score, quota, freeze, or no-op boundaries are violated.
 
-Stop if the module imports a forbidden source or if any output can alter candidate/action/runtime state.
+### Task 3: Boundary, privacy, and malformed-input hardening
 
-### Task 3: Privacy, immutability and malformed-input hardening
+Files: modify only the two future allowlisted files.
 
-**Files:**
+Named negative matrix:
 
-- Modify: src/ai/planning/beliefGuidedPlanPolicy.ts
-- Modify: tests/ai/beliefGuidedPlanPolicy.test.ts
+- unknown evidence schema -> unknown-evidence-schema;
+- invalid evidence structure -> invalid-evidence;
+- malformed snapshot -> invalid-evidence;
+- older/newer event index and identity mismatch -> stale-evidence;
+- count 6 -> candidate-count-overflow;
+- duplicate/missing key -> duplicate-plan-key/missing-plan-key;
+- invalid family/protected group -> invalid-family-annotation;
+- non-number/non-finite used metric -> invalid-family-annotation;
+- malformed quota -> invalid-quota-config;
+- zero budget -> valid shadow with zero quotas;
+- allocator postcondition -> quota-exceeds-budget;
+- unknown mode -> unknown-mode;
+- recursive privacy violation -> privacy-violation.
 
-**Interfaces:**
+Each asserts exact reason, disabled result, unchanged input JSON, no candidate object, and no quota on annotations. Add recursive deep-freeze, repeated-call bytes, permutation, complete familyPriority, positive-only quota, and conservation assertions. The authorized fractional values remain accepted and PlanMetrics is not modified.
 
-- Consumes: the Task 2 pure policy contracts and malformed unknown inputs cast only inside tests.
-- Produces: fail-closed, deeply frozen, input-non-mutating shadow/disabled behavior with complete negative coverage.
-
-- [ ] **Step 1: Add the complete negative matrix.**
-
-Use these exact test cases and expected reasons:
-
-    unknown evidence schema -> unknown-evidence-schema
-    negative/non-integer evidence count -> invalid-evidence
-    stale event index -> stale-evidence
-    candidate count 6 -> candidate-count-overflow
-    duplicate id -> duplicate-plan-key
-    empty id -> missing-plan-key
-    invalid protected group id -> invalid-family-annotation
-    unknown quota schema or fractional quota -> invalid-quota-config
-    negative quota or min greater than max -> invalid-quota-config
-    minimum quota larger than expansion budget -> quota-exceeds-budget
-    unknown mode -> unknown-mode
-    recursive forbidden output key -> privacy-violation
-
-Each case must assert the old input JSON is unchanged, the result is disabled, the exact reason is stable, and no annotation/quota is emitted.
-
-- [ ] **Step 2: Add full graph freeze checks.**
-
-Traverse arrays and records recursively and assert every result node is frozen. Attempt mutation of evidence, candidate wrapper, plan metrics, annotation record, family quota array, diagnostics and result record; in strict mode each attempted output mutation must fail or leave JSON bytes unchanged.
-
-- [ ] **Step 3: Add permutation and byte-stability checks.**
-
-Run the same candidate set in at least three permutations, compare JSON.stringify(result), annotation key order, family order, owner family, and quota records. Confirm repeated equal input produces identical bytes.
-
-- [ ] **Step 4: Re-run focused and D2b regression gates.**
-
-Run:
+Commands:
 
     npx vitest run tests/ai/beliefGuidedPlanPolicy.test.ts --exclude ".worktrees/**" --testTimeout=120000 --reporter=verbose
     npx vitest run tests/ai/lightweightPublicEvidence.test.ts tests/ai/publicEvent.test.ts tests/ai/publicEventHash.test.ts tests/ai/publicLedger.test.ts tests/ai/publicLedgerDependency.test.ts tests/ai/publicLedgerPrivacy.test.ts tests/ai/publicLedgerReplay.test.ts tests/ai/publicLedgerTributeReset.test.ts tests/ai/publicLedgerTrickFinish.test.ts tests/game/publicEventIdentity.test.ts tests/game/publicEventReplayIdentity.test.ts tests/game/publicEventRoomAdapter.test.ts --exclude ".worktrees/**" --testTimeout=120000 --reporter=verbose
 
-Expected result: focused D2c and the 12-file D2a/D2b gate pass with no .worktrees/ collection and no production decision-path change.
+Expected: focused D2c and the 12-file D2a/D2b gate pass.
+Future commit: test: harden D2c privacy and source boundaries.
+Stop on hidden-state input, privacy failure, action-path mutation, or file outside allowlist.
 
-- [ ] **Step 5: Commit hardening.**
+### Task 4: Detached shadow integration characterization
 
-    git add src/ai/planning/beliefGuidedPlanPolicy.ts tests/ai/beliefGuidedPlanPolicy.test.ts
-    git commit -m "test: harden D2c privacy and source boundaries"
+Files: modify tests/ai/beliefGuidedPlanPolicy.test.ts only; no adapter.
 
-Stop if any malformed input changes the old action path or if output privacy requires reading hidden state.
+Actual contract:
 
-### Task 4: Shadow integration characterization
+    decideAiAction(
+      observation: AiObservation,
+      runtime: AiRuntimeState,
+      config: AiDecisionConfig,
+      invocation: AiDecisionInvocationOptions = {},
+    ): AiDecision
 
-**Files:**
+AiDecision fields are action, runtime, optional selectedPlan, optional selectedPlanId, score, optional scoreBreakdown, candidateCount, optional consideredActions, elapsedMs, and reasonCodes. Candidate plans are decision.runtime.candidatePlans, and active ID is decision.runtime.activePlanId. Do not invent top-level candidatePlans fields.
 
-- Modify: tests/ai/beliefGuidedPlanPolicy.test.ts
-- No production adapter file is authorized in this task.
+The reviewed tests provide spies for selector/evaluator functions in tests/ai/planSelectionMode.test.ts, but no stable reusable spy seam for generateFastHandPlans, HandPlanner, or ensurePlans. Therefore Task 4 uses the AST source boundary, production grep, and decision byte equality; it must not add a production spy seam.
 
-**Interfaces:**
+Detached flow:
 
-- Consumes: the pure D2c result, existing deterministic decideAiAction test fixtures, cloned AiRuntimeState, and public D2b evidence.
-- Produces: test evidence that a separately computed shadow result is observable without becoming a decision input.
+1. Prepare one observation and two byte-identical cloned AiRuntimeState values with candidatePlans and activePlanId.
+2. Call decideAiAction with runtime A and record baseline action bytes, returned runtime bytes, selectedPlanId, candidateCount, candidate order, and input runtime bytes.
+3. Wrap baselineDecision.runtime.candidatePlans as D2cPlanCandidate with existing protected-group fixture IDs; use D2b evidence and its expected snapshot.
+4. Call deriveD2cPlanPriorityQuota in shadow and retain the result only in the test.
+5. Call decideAiAction with identical runtime B.
+6. Compare baseline/comparison action bytes, returned runtime bytes, selectedPlanId, candidateCount, reason data, input candidate count/order, and input runtime bytes.
+7. Assert D2c result lacks action, legalActions, candidatePlans, selectedPlan, selectedPlanId, runtime, and actionScore.
+8. Assert D2c source has no planner/decision-engine import and production path grep has no D2c import.
 
-- [ ] **Step 1: Capture the existing action boundary.**
+Named tests:
 
-Call the existing decideAiAction with an unchanged fixture twice, capture action, canonical runtime JSON, candidate IDs/order, legal candidate/action keys, and the existing public event/hash/replay bytes. Do not add a D2c call to room.ts or aiDecisionEngine.ts.
+- emits shadow family and quota diagnostics without changing the existing action;
+- preserves candidate order and runtime bytes beside detached shadow output;
+- does not increase planner calls when a stable existing spy seam is available;
+- disabled mode performs no classification and no decision side effect;
+- D2c result has no action-control fields.
 
-- [ ] **Step 2: Compute a detached shadow result.**
+Task 4 does not assert that decideAiAction creates public event hash, replay bytes, or room transitions. Task 5 owns public event/ledger/replay regression and frozen evidence.
 
-After the first decision returns, wrap its existing selectedPlan/candidate plans as D2cPlanCandidate values with protected group IDs supplied by the existing policy fixture, call deriveD2cPlanPriorityQuota in shadow, and retain the result only in the test. The test must never pass annotations or quotas back to decideAiAction.
-
-- [ ] **Step 3: Assert no-op invariants.**
-
-Add these exact test names:
-
-    emits shadow family and quota diagnostics without changing the existing action
-    preserves candidate order runtime bytes public hash and replay bytes beside shadow output
-    does not increase planner calls or HandPlanner calls when shadow output is computed
-    disabled mode performs no classification and no decision side effect
-
-Assert candidate count/order, action bytes, runtime bytes, random seed/config, public event/hash, replay schema, and D0 keep-current fixture bytes are unchanged. The test must explicitly assert that no D2c result property can be used as an action or candidate list.
-
-- [ ] **Step 4: Run the boundary gate.**
-
-Run:
+Command:
 
     npx vitest run tests/ai/beliefGuidedPlanPolicy.test.ts --exclude ".worktrees/**" --testTimeout=120000 --reporter=verbose
 
-Expected result: all shadow boundary tests pass, with no production source modification and no action difference.
-
-- [ ] **Step 5: Commit only characterization changes.**
-
-    git add tests/ai/beliefGuidedPlanPolicy.test.ts
-    git commit -m "test: characterize D2c shadow integration boundary"
-
-Stop if a detached shadow call changes action, candidate order, runtime, public hash, replay bytes, planner-call count, or D0 fixture bytes. Do not add an adapter in response; obtain a separate integration authorization.
+Expected: all detached tests pass; no action/runtime/candidate difference.
+Future commit: test: characterize D2c shadow integration boundary.
+Stop on any detached difference or production change.
 
 ### Task 5: Local non-restricted verification
 
-**Files:**
+Files: none.
 
-- No source, test, package, fixture, artifact, or configuration changes are allowed.
+Run focused D2c tests, the D2a/D2b 12-file regression, TypeScript, build, and npm test only after confirming package.json excludes tests/benchmark/**, tests/simulation/**, and tests/performance/**. Also run git diff --check, frozen fixture/artifact diff, and production action-path scan.
 
-**Interfaces:**
+Expected: every permitted gate exits 0 with natural completion, no unhandled rejection, worker crash, forced termination, restricted workload, or worktree side effect. Public event/ledger/replay responsibility is verified here, not claimed by Task 4.
 
-- Consumes: committed Task 1–4 D2c policy/test files and existing D2a/D2b baseline.
-- Produces: local verification evidence only.
-
-- [ ] **Step 1: Run focused D2c.**
-
-    npx vitest run tests/ai/beliefGuidedPlanPolicy.test.ts --exclude ".worktrees/**" --testTimeout=120000 --reporter=verbose
-
-Expected result: all D2c tests pass, no skipped/todo tests, natural completion.
-
-- [ ] **Step 2: Run D2a/D2b regression.**
-
-    npx vitest run tests/ai/lightweightPublicEvidence.test.ts tests/ai/publicEvent.test.ts tests/ai/publicEventHash.test.ts tests/ai/publicLedger.test.ts tests/ai/publicLedgerDependency.test.ts tests/ai/publicLedgerPrivacy.test.ts tests/ai/publicLedgerReplay.test.ts tests/ai/publicLedgerTributeReset.test.ts tests/ai/publicLedgerTrickFinish.test.ts tests/game/publicEventIdentity.test.ts tests/game/publicEventReplayIdentity.test.ts tests/game/publicEventRoomAdapter.test.ts --exclude ".worktrees/**" --testTimeout=120000 --reporter=verbose
-
-Expected result: all 12 files pass and no .worktrees/ path is collected.
-
-- [ ] **Step 3: Run TypeScript and build.**
-
-    npx tsc --noEmit --pretty false
-    npm run build
-
-Expected result: both exit 0 and natural completion. Build output must not modify tracked files or create unexpected untracked files.
-
-- [ ] **Step 4: Run the approved non-restricted regression.**
-
-    npm run test:d2a1-regression -- --exclude ".worktrees/**"
-
-The script must retain its built-in exclusions for tests/benchmark/**, tests/simulation/**, and tests/performance/**. Do not run the repository's npm test because its second command executes the performance test. Record file/test counts, failures, skipped/todo count, duration, natural completion, unhandled rejection, worker crash, and forced termination.
-
-- [ ] **Step 5: Run boundary and artifact checks.**
-
-    git diff --check
-    git diff --exit-code -- tests/ai/fixtures/d0KeepCurrentCases.json docs/benchmark-approvals artifacts
-    git grep -n "deriveD2cPlanPriorityQuota\|D2cPlanPolicy\|beliefGuidedPlanPolicy" -- src/game/room.ts src/ai/contracts.ts src/ai/runtimeContracts.ts src/ai/aiDecisionEngine.ts src/ai/planning/handPlanner.ts
-
-Expected result: diff-check and frozen diff exit 0; the production path scan returns 0 matches. The D2c module itself is not included in the production path scan because its existence is allowed and its own AST boundary is tested separately.
-
-- [ ] **Step 6: Stop at the active-mode gate.**
-
-Record that no active mode, action reducer, particle, likelihood, rollout, team utility, treatment, benchmark, or production adapter was implemented. Any request to use shadow output to filter/reorder candidates must stop and require D2d authorization.
+Commit: none.
+Stop on any real failure, restricted workload inclusion, artifact change, production D2c import, or dirty worktree.
 
 ### Task 6: D2c-active remains prohibited
 
-**Files:**
+Files: none.
 
-- No files are modified by this task.
+Active mode is not implemented. Shadow output must not filter/reorder candidates, alter evaluator scores, provide an action prior to D2d, or enter the formal path. Before active authorization, D2d bounded action backend must be complete or separately approved.
 
-**Interfaces:**
-
-- Consumes: the D2c plan policy result only as a documented boundary.
-- Produces: an authorization stop condition, not an implementation.
-
-- [ ] **Step 1: Preserve the closed mode type.**
-
-The only permitted type remains:
-
-    export type PlanPruningMode = "disabled" | "shadow";
-
-Do not add active, an active config branch, candidate filtering, candidate reordering, action prior consumption, or runtime sidecar.
-
-- [ ] **Step 2: Require a separate gate before active work.**
-
-Active mode cannot begin until D2d's bounded representative-action backend is implemented and separately approved, or a new architecture decision explicitly authorizes active behavior. D2c shadow output must never be used to filter or reorder candidates in the current implementation.
-
-- [ ] **Step 3: Stop and report if active behavior is requested.**
-
-The stop report must state D2C_ACTIVE_MODE_NOT_AUTHORIZED and leave the old keep-current action path unchanged.
+Expected: no implementation action.
+Commit: none.
+Stop if active mode or D2d–D2g work is requested.
 
 ## 15. Exact test matrix
 
-The concentrated test file must contain these groups and exact observable assertions:
-
-| Group | Test names / assertions |
+| Group | Required assertions |
 |---|---|
-| cardinality | zero action-only disabled; one no expansion; 2–5 all annotated; 6 rejected |
-| taxonomy | active marker; urgent-defense; finishability; power-preserving; uncertainty-cover; alternative; other |
-| priority | urgent > active > public high-value family > uncertainty > alternative/other; numeric tuple and stable key tie-break |
-| quota | max family count; max expansion count; min/max quota; unique owner charging; conservation; budget shortage/drop order; remaining-budget allocation |
-| determinism | candidate permutation, repeated JSON bytes, stable family/name key order |
-| disabled | no classification, no plan generation, no side effect, stable disabled reason |
-| malformed | invalid evidence, stale evidence, unknown schema, overflow, duplicate/missing key, invalid family/config, over-budget, unknown mode, privacy violation |
-| immutability | complete deep freeze and unchanged input JSON |
-| source boundary | exact type-only imports, denylist, no dynamic import/require/side effect |
-| shadow boundary | shadow result exists, candidate/action/runtime/public hash/replay/D0 bytes unchanged, no extra planner calls |
+| cardinality | 0 action-only disabled; 1 no expansion; 2–5 annotated; 6 rejected |
+| taxonomy | active; urgent-defense; finishability; power-preserving; uncertainty-cover; alternative; other; multi-family de-duplication |
+| priority | urgent-defense; active; public high-value; uncertainty; other; numeric tuple and stable key tie-break |
+| fractional quality | authorized fractional values; exact formula; six-decimal rounding; non-number/non-finite rejection; unused metrics not narrowed |
+| quota | family/expansion bounds; minimum/maximum; unique owner charging; conservation; positive-only records; zero budget; shortage; remaining allocation |
+| determinism | candidate permutation; repeated JSON bytes; UTF-16 comparator; stable insertion order |
+| snapshot | malformed ref; older/newer eventIndex; identity mismatch; exact validation order |
+| disabled | no classification/privacy call/planner generation; stable reason; no decision side effect |
+| malformed | unknown schema; invalid evidence; stale evidence; overflow; duplicate/missing key; invalid family/config; allocator postcondition; unknown mode; privacy |
+| immutability | recursive deep freeze and unchanged input JSON |
+| source boundary | exact two specifiers; sole runtime D2b binding; type bindings; no default/namespace/side-effect/third/dynamic/CommonJS import; denylist |
+| detached shadow | shadow exists; action/runtime/candidate bytes/order unchanged; no action-control fields; no production import; spy only with stable seam |
 
-Each row must have a named it/test case in tests/ai/beliefGuidedPlanPolicy.test.ts; broad loop-only assertions are insufficient for the malformed reason matrix.
+Every row requires named tests in tests/ai/beliefGuidedPlanPolicy.test.ts.
 
 ## 16. Commit boundaries
 
-The future atomic sequence is:
+Future implementation sequence:
 
-1. test: characterize D2c plan priority and quota — test file only; RED collection gate.
-2. feat: derive deterministic D2c shadow priorities — policy module plus focused test updates; GREEN focused gate and TypeScript.
-3. test: harden D2c privacy and source boundaries — policy/test hardening only; focused plus D2a/D2b regression gate.
-4. test: characterize D2c shadow integration boundary — test file only; detached shadow no-op gate.
+1. test: characterize D2c plan priority and quota — test only, RED gate.
+2. feat: derive deterministic D2c shadow priorities — policy plus focused tests, GREEN and TypeScript.
+3. test: harden D2c privacy and source boundaries — policy/test hardening, focused plus D2a/D2b regression.
+4. test: characterize D2c shadow integration boundary — detached test only, no-op gate.
+5. docs: resolve D2c plan review findings — this plan-only remediation commit, only this document.
 
-No active integration, D2d reducer, D2e particle, D2f rollout, or D2g treatment/benchmark change may enter any of these commits. Each commit is reviewed independently and must satisfy its listed stop condition before the next commit.
+No active integration, D2d reducer, D2e particle, D2f rollout, or D2g treatment/benchmark enters these commits. Each is independently reviewed.
 
 ## 17. Allowed and forbidden files
 
-### Future D2c implementation allowlist
+### Future implementation allowlist
 
     src/ai/planning/beliefGuidedPlanPolicy.ts
     tests/ai/beliefGuidedPlanPolicy.test.ts
 
-Task 1 and Task 4 may modify only the test file. Task 2 and Task 3 may modify both allowlisted files. Task 5 and Task 6 modify nothing.
+### Current remediation allowlist
 
-### Forbidden in every D2c task
+    docs/superpowers/plans/2026-07-23-d2c-plan-priority-quota-shadow.md
+
+The current remediation modifies only the plan document. It does not create or modify source/test/package files.
+
+### Forbidden
 
     src/game/room.ts
     src/ai/aiDecisionEngine.ts
@@ -852,78 +736,90 @@ Task 1 and Task 4 may modify only the test file. Task 2 and Task 3 may modify bo
     docs/benchmark-approvals/**
     artifacts/**
 
-No D2c task deletes or modifies existing D2a/D2b worktrees or branches, pushes, pulls, fetches, creates a PR, generates fixtures, regenerates artifacts, or registers a treatment.
+No D2c task deletes/modifies existing worktrees or branches, pushes, pulls, fetches, creates a PR, generates fixtures, regenerates artifacts, or registers treatment.
 
 ## 18. Verification gates
 
-Every implementation handoff must show:
+Every future handoff must show:
 
 1. focused D2c tests with .worktrees/** excluded;
 2. D2a/D2b 12-file regression with .worktrees/** excluded;
 3. npx tsc --noEmit --pretty false exit 0;
 4. npm run build exit 0 and natural completion;
-5. npm run test:d2a1-regression -- --exclude ".worktrees/**" with restricted paths absent;
+5. npm test only after confirming exclusion of benchmark, simulation, and performance paths;
 6. git diff --check exit 0;
 7. frozen fixture/artifact diff exit 0;
 8. production action-path grep with zero D2c references;
-9. source-boundary AST test with exact import allowlist and denylist;
-10. deep-freeze, input-nonmutation, permutation, quota-conservation, and detached shadow no-op tests.
+9. source-boundary AST test with exact allowlist/denylist;
+10. deep-freeze, input-nonmutation, permutation, fractional-quality, snapshot-staleness, quota-conservation, and detached shadow no-op tests.
 
-The final local gate must also inspect git status --short --untracked-files=all and git diff --name-only, requiring only the two future allowlisted files before their commit and a clean worktree after each commit.
+Also check git status --short --untracked-files=all and git diff --name-only. No benchmark, simulation, performance, smoke, calibration, treatment, or formal workload is part of this plan.
 
 ## 19. Stop conditions
 
-Stop the D2c effort and report the exact blocking condition if any of the following occurs:
+Stop and report if:
 
-- D2c needs a hidden/private input, RoomState, any player's hand, deck, private runtime, particle bank, or rollout state.
-- D2c needs to call unbounded HandPlanner or regenerate a candidate to satisfy quota.
-- Shadow output changes candidate count/order, legal actions, evaluator score/order, final action, runtime, random seed, public event/hash, replay schema, PublicRoom, or D0 fixture bytes.
-- D2c requires a public event, ledger, or replay schema change.
-- D2c requires a D0/D1 artifact, fixture, approval, benchmark, simulation, performance, smoke, calibration, formal, or treatment change.
-- D2c requires D2d reducer, D2e particle/likelihood/ESS, D2f CRN/rollout/team utility, or D2g engine/treatment behavior before its separately approved gate.
-- Any Critical or Important review finding remains open.
-- A source, test, package, fixture, artifact, or branch changes outside the allowlist.
-- Candidate count exceeds five, stable plan key is missing/duplicated, evidence is stale/unknown, quota is invalid/over-budget, or privacy scan fails.
+- D2c needs hidden/private input, RoomState, any hand, deck, private runtime, particle bank, or rollout state;
+- D2c needs unbounded HandPlanner or candidate regeneration;
+- shadow changes candidate count/order, legal actions, evaluator score/order, final action, runtime, random seed, public event/hash, replay schema, PublicRoom, or D0 fixture bytes;
+- a public event/ledger/replay schema change is needed;
+- a D0/D1 fixture/artifact/approval, restricted workload, treatment, D2d, D2e, D2f, or D2g change is needed;
+- any Critical or Important finding remains open;
+- any source, test, package, fixture, artifact, branch, or worktree changes outside its allowlist;
+- candidate count exceeds five, key is missing/duplicated, snapshot is malformed/stale, quota config is invalid, allocator postcondition fails, or privacy scan fails.
 
 ## 20. Self-review
 
-The plan was checked against the D2 design, D2b contract, actual HandPlan/D1/runtime types, current room-to-decision path, protected-group policy, D2b tests, plan manager/selector/evaluator tests, planQuality.test.ts, and protectedGroups.test.ts.
+The revision was checked against the latest D2 order, D2b contract/privacy assertion, actual HandPlan/PlanMetrics/D1/runtime types, the fractional fixture in tests/ai/planIdentity.test.ts, actual decideAiAction/AiDecision types, room-to-decision path, protected-group policy, D2a/D2b tests, plan manager/selector/evaluator tests, tests/engine/planQuality.test.ts, and tests/game/protectedGroups.test.ts.
 
-Coverage result:
+Coverage:
 
-- 0/1/2–5 cardinalities: Task 1, sections 7–8, and the test matrix.
-- active/urgent/uncertainty/multi-family taxonomy: section 5 and Task 1.
-- stable priority/tie-break/permutation: section 6 and Tasks 1/3.
-- fixed quota bounds/conservation/shortage/remaining budget: section 7 and Task 1.
-- disabled/shadow no-op and active prohibition: sections 9–10 and Task 6.
-- privacy/source AST/deep freeze/malformed matrix: sections 11–12 and Task 3.
-- shadow integration boundary: Task 4.
-- local verification and restricted-workload exclusions: Task 5 and section 18.
-- exact future file/commit allowlist: sections 13, 14, 16, and 17.
+- 0/1/2–5 cardinalities: sections 7–8, Task 1, matrix.
+- family taxonomy: section 5, Task 1.
+- stable priority, UTF-16 ordering, permutation, and fractional quality: section 6, Tasks 1–3.
+- complete familyPriority, positive-only familyQuotas, zero budget, conservation, shortage, allocation: section 7, Tasks 1–3.
+- disabled/shadow no-op and active prohibition: section 9, Task 4, Task 6.
+- runtime/type-only import contract and AST boundary: sections 4/11, Tasks 1–3.
+- snapshot order and stale semantics: sections 4/12, Tasks 1/3.
+- privacy, deep freeze, malformed matrix: sections 11/12, Task 3.
+- actual AiDecision shape and detached boundary: Task 4.
+- public event/ledger/replay and frozen artifact responsibility: Task 5.
+- local verification and restricted exclusion: Task 5, section 18.
 
-Placeholder scan: every implementation step has a concrete file, interface, test name, command, expected result, allowlist, commit subject, and stop condition; no unresolved template marker remains.
+Placeholder scan: every task has exact files, interfaces, named tests, command, expected result, allowlist, commit subject, and stop condition; no unresolved template marker or generic unbound task remains.
 
-Type consistency: PlanPruningMode, D2cPlanFamily, D2cFallbackReason, D2cQuotaConfig, D2cPlanCandidate, D2cPlanPolicyInput, D2cPlanAnnotation, D2cFamilyQuota, D2cDiagnostics, D2cDisabledResult, D2cShadowResult, D2cPlanPolicyResult, and deriveD2cPlanPriorityQuota are used consistently in the contract, tasks, tests, and verification gates.
+Contradiction scan:
 
-Ordering review: no old particle-first ordering is present. D2c does not implement active mode, D2d reducer, D2e particle, D2f rollout, D2g treatment/benchmark, hidden/private input, production action change, public schema change, or formal workload.
+- D2b has one runtime named privacy import and type bindings; the plan does not describe all imports as type-only.
+- expectedEvidenceSnapshot is explicit and caller-provided.
+- D2cPlanAnnotation has no quota; family priority and family quota are separate.
+- fractional PlanMetrics values are authorized; only six formula fields require number and finite value; derived quality is rounded to six decimals.
+- invalid quota config and allocator postcondition have distinct reasons; zero budget is valid shadow.
+- Task 4 uses decision.runtime.candidatePlans and decision.runtime.activePlanId.
+- Task 4 proves detached action/runtime/candidate invariants; public event/ledger/replay ownership is Task 5.
+- Planner-spy feasibility is resolved: selector/evaluator spies exist, but no stable planner/ensurePlans seam was found; no production seam is added.
+- No old particle-first ordering, active mode, D2d reducer, D2e particle, D2f rollout, D2g treatment/benchmark, hidden/private input, production action change, or formal workload is included.
 
-Review findings:
+Review result:
 
     Critical: none
     Important: none
-    Minor: The current repository has no production shadow adapter and no D2c semantic family type; the plan records the minimum pure read-only representation and keeps any adapter as a separately authorized boundary.
+    Minor: none
+
+The five Important findings are closed. The metric-domain blocker is closed because the existing D1 fixture authorizes fractional values and D2c defines deterministic six-decimal derived-score normalization without changing PlanMetrics.
 
 ## 21. Final authorization status
 
-This document is plan-only. No D2c implementation, active mode, production integration, D2d–D2g work, restricted workload, remote operation, or formal workload is authorized by the plan itself.
+This document is plan-only. No D2c implementation, active mode, production shadow adapter, D2d–D2g work, restricted workload, remote operation, or formal workload is authorized.
 
-    MAIN_POST_D2B_VERIFICATION_COMPLETE
-    MAIN_DEPENDENCY_ENVIRONMENT_RECONCILED
-    D2C_PLAN_READY_FOR_REVIEW
+    D2C_PLAN_REMEDIATED_AWAITING_REVIEW
+    D2C_FRACTIONAL_METRIC_DOMAIN_CONFIRMED
+    D2C_METRIC_DOMAIN_BLOCKER_CLOSED
     D2C_IMPLEMENTATION_NOT_AUTHORIZED
     D2C_ACTIVE_MODE_NOT_AUTHORIZED
-    D2B_D2C_ACTION_CONTROL_NOT_AUTHORIZED
+    D2C_PRODUCTION_SHADOW_ADAPTER_NOT_AUTHORIZED
     D2D_TO_D2G_NOT_AUTHORIZED
+    RESTRICTED_WORKLOAD_NOT_AUTHORIZED
     D2_REMOTE_OPERATIONS_NOT_AUTHORIZED
     D2_FORMAL_EXECUTION_NOT_AUTHORIZED
     formalExecutionAllowed=false
