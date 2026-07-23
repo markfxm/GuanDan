@@ -158,10 +158,7 @@ export function deriveLightweightPublicEvidence(
     seatMap,
     hardPublicFacts: {
       remainingCardCounts: mapHandCounts(ledger.handCounts, seatMap),
-      currentTrick: {
-        ...ledger.currentTrick,
-        passSeats: [...ledger.currentTrick.passSeats],
-      },
+      currentTrick: projectPublicCurrentTrick(ledger.currentTrick),
       initiativeRelation: seatToRelation[ledger.currentTrick.lastPlaySeat ?? ledger.currentTrick.leadSeat],
       playedCardIds: [...ledger.playedCardIds],
       playedCardClasses: ledger.playedCardIds.map((cardId) => cardId.replace(/-(?:1|2)$/, "")),
@@ -177,6 +174,7 @@ export function deriveLightweightPublicEvidence(
     provenance: buildProvenance(),
   };
 
+  assertLightweightPublicEvidencePrivacy(evidence);
   return deepFreeze(evidence);
 }
 
@@ -227,6 +225,31 @@ function normalizePrivacyKey(key: string): string {
 
 function hasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function projectPublicCurrentTrick(
+  currentTrick: HardPublicLedger["currentTrick"],
+): HardPublicLedger["currentTrick"] {
+  const projected: {
+    trickIndex: number;
+    leadSeat: PublicSeat;
+    lastPlaySeat?: PublicSeat;
+    lastPlayStableKey?: string;
+    passSeats: PublicSeat[];
+  } = {
+    trickIndex: currentTrick.trickIndex,
+    leadSeat: currentTrick.leadSeat,
+    passSeats: [...currentTrick.passSeats],
+  };
+
+  if (currentTrick.lastPlaySeat !== undefined) {
+    projected.lastPlaySeat = currentTrick.lastPlaySeat;
+  }
+  if (currentTrick.lastPlayStableKey !== undefined) {
+    projected.lastPlayStableKey = currentTrick.lastPlayStableKey;
+  }
+
+  return projected;
 }
 
 function assertSeat(value: unknown, reason: string): asserts value is PublicSeat {

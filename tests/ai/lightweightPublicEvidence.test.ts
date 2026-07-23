@@ -752,6 +752,43 @@ describe("D2b lightweight public evidence characterization", () => {
     expect(after.hardPublicFacts.finishOrder).toEqual(before.hardPublicFacts.finishOrder);
   });
 
+  it("does not project unknown currentTrick fields into public evidence", () => {
+    const validLedger = initialLedger();
+    const beforeJson = JSON.stringify(validLedger);
+    const beforeHash = canonicalPublicLedgerHash(validLedger);
+    const injectedLedger = {
+      ...validLedger,
+      currentTrick: {
+        ...validLedger.currentTrick,
+        hiddenState: {
+          privateHands: ["secret"],
+          injected: "sentinel",
+        },
+      },
+    } as unknown as HardPublicLedger;
+
+    const evidence = evidenceFor(injectedLedger, [], 0);
+
+    expect(evidence.hardPublicFacts.currentTrick).toEqual({
+      trickIndex: 0,
+      leadSeat: 0,
+      passSeats: [],
+    });
+    expect(Object.getOwnPropertyNames(evidence.hardPublicFacts.currentTrick).sort()).toEqual([
+      "leadSeat",
+      "passSeats",
+      "trickIndex",
+    ]);
+    expect("hiddenState" in evidence.hardPublicFacts.currentTrick).toBe(false);
+    expect(JSON.stringify(evidence)).not.toContain("secret");
+    expect(JSON.stringify(evidence)).not.toContain("sentinel");
+    expect(() => assertLightweightPublicEvidencePrivacy(evidence)).not.toThrow();
+    expect(collectUnfrozenPaths(evidence)).toEqual([]);
+    expect(JSON.stringify(validLedger)).toBe(beforeJson);
+    expect(canonicalPublicLedgerHash(validLedger)).toBe(beforeHash);
+    expect(validLedger.currentTrick).not.toHaveProperty("hiddenState");
+  });
+
   it("keeps the evidence module within the public-only source boundary", () => {
     const source = readFileSync(
       resolve(
