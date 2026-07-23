@@ -170,6 +170,7 @@ const OUTPUT_FORBIDDEN_KEYS = new Set(
     ["pro", "vider", "Identity"],
     ["installation", "Identity"],
     ["idempotency", "Key"],
+    ["roll", "out", "State"],
     ["game", "Sequence"],
     ["room", "Transport", "Id"],
     ["private", "Runtime"],
@@ -299,7 +300,8 @@ function validateCandidateEnvelope(
   for (const value of candidatePlans) {
     const candidate = asRecord(value);
     const plan = asRecord(candidate?.plan);
-    if (!candidate || !plan || !isNonEmptyString(plan.id)) return "missing-plan-key";
+    if (!candidate || !plan) return "invalid-family-annotation";
+    if (!isNonEmptyString(plan.id)) return "missing-plan-key";
     if (seen.has(plan.id)) return "duplicate-plan-key";
     seen.add(plan.id);
     const metrics = asRecord(plan.metrics);
