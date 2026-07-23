@@ -513,7 +513,13 @@ Every task below has exact files, interfaces, named tests, command, expected res
 
 ### Task 1: RED characterization
 
-Files: create tests/ai/beliefGuidedPlanPolicy.test.ts only.
+Files:
+- Create tests/ai/beliefGuidedPlanPolicy.test.ts first.
+- Create src/ai/planning/beliefGuidedPlanPolicy.ts second as a contract-only NOT_IMPLEMENTED skeleton.
+
+Task 1 has two RED observations. The first run occurs before the production module exists and records module-resolution/setup failure as D2C_TASK1_SETUP_FAILURE_OBSERVED; that observation is not an accepted RED gate. After the skeleton exists, the same suite must collect normally and fail in behavior execution because deriveD2cPlanPriorityQuota throws D2C_PLAN_POLICY_NOT_IMPLEMENTED. The accepted gate is behavior assertion failure, not module resolution.
+
+The Task 1 skeleton may contain only the two approved imports, the frozen D2c type contracts, D2C_PLAN_POLICY_NOT_IMPLEMENTED, the deriveD2cPlanPriorityQuota signature, void input/privacy references required by compilation, and the explicit throw. It must not contain evidence validation, family classification, priority/comparator logic, score normalization, quota allocation, deep freeze, privacy scanning, fallback result construction, candidate iteration, sorting, or active/shadow behavior.
 
 Add named tests for:
 
@@ -537,16 +543,19 @@ Add named tests for:
 - invalid quota configuration;
 - disabled no-op and immutable outputs.
 
-The source-boundary test uses the TypeScript AST against the future source path and requires the exact imports in section 4, the sole runtime D2b binding, type bindings, and rejection of default/namespace/side-effect/third-source/dynamic/CommonJS imports. It scans production files for D2c imports.
+The source-boundary test uses the TypeScript AST against the production source path and requires the exact imports in section 4, the sole runtime D2b binding, type bindings, and rejection of default/namespace/side-effect/third-source/dynamic/CommonJS imports. It scans production files for D2c imports.
 
-Command:
+First command, before the skeleton exists:
 
     npx vitest run tests/ai/beliefGuidedPlanPolicy.test.ts --exclude ".worktrees/**" --testTimeout=120000 --reporter=verbose
 
-Expected RED: collection fails only because src/ai/planning/beliefGuidedPlanPolicy.ts is absent. No fixture/setup, URL-scheme, or unrelated production failure.
+Expected first observation: module-resolution/setup failure. Record D2C_TASK1_SETUP_FAILURE_OBSERVED and D2C_TASK1_BEHAVIORAL_RED_NOT_YET_REACHED. Do not count this as Task 1 completion. If the first failure is fixture, syntax, wrong path, URL scheme, dependency, or old-worktree collection, repair only the test setup and rerun the setup observation.
 
+Create the skeleton, then run the same command again. Expected accepted RED: the file collects, the module resolves, there is no fixture/setup/import failure, the suite exits non-zero, and at least one behavior test fails because D2C_PLAN_POLICY_NOT_IMPLEMENTED. AST/source-shape tests may pass; the suite must remain RED. If the suite passes completely, stop because the tests do not lock the future behavior.
+
+Allowed files: the two Task 1 files only.
 Commit: test: characterize D2c plan priority and quota.
-Stop if another file is staged or RED is not module resolution.
+Stop if a third file changes, if module resolution remains after the skeleton, or if RED is not caused by the explicit NOT_IMPLEMENTED behavior.
 
 ### Task 2: Minimal pure D2c policy
 
@@ -688,7 +697,7 @@ Every row requires named tests in tests/ai/beliefGuidedPlanPolicy.test.ts.
 
 Future implementation sequence:
 
-1. test: characterize D2c plan priority and quota — test only, RED gate.
+1. test: characterize D2c plan priority and quota — test plus contract-only NOT_IMPLEMENTED skeleton; setup failure is recorded but behavioral RED is the gate.
 2. feat: derive deterministic D2c shadow priorities — policy plus focused tests, GREEN and TypeScript.
 3. test: harden D2c privacy and source boundaries — policy/test hardening, focused plus D2a/D2b regression.
 4. test: characterize D2c shadow integration boundary — detached test only, no-op gate.
