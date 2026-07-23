@@ -816,7 +816,7 @@ describe("D2c Task 3 malformed-input hardening", () => {
     for (const id of ["__proto__", "constructor", "prototype"]) {
       const result = expectShadow(deriveD2cPlanPriorityQuota(inputFor([candidate(id)])));
       expect(Object.getPrototypeOf(result.annotations)).toBeNull();
-      expect(Object.prototype.polluted).toBeUndefined();
+      expect((Object.prototype as Record<string, unknown>).polluted).toBeUndefined();
       expect(Object.prototype.hasOwnProperty.call(result.annotations, id)).toBe(true);
       expect(result.annotations[id]?.stablePlanKey).toBe(id);
     }
