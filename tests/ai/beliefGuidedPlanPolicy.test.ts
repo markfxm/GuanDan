@@ -553,9 +553,9 @@ describe("D2c plan priority and quota Task 1 RED characterization", () => {
     expect(result.annotations[active.plan.id].familyIds).toEqual(
       expect.arrayContaining(["urgent-defense", "uncertainty-cover"]),
     );
-    expect(result.annotations[challenger.plan.id].familyIds).toEqual([
+    expect(result.annotations[challenger.plan.id].familyIds).toContain(
       "uncertainty-cover",
-    ]);
+    );
     expect(result.annotations[challenger.plan.id].familyIds).toContain("alternative");
   });
 
