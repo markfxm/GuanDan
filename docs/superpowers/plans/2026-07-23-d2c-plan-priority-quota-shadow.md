@@ -459,7 +459,9 @@ Exact future imports:
     } from "../belief/lightweightPublicEvidence";
     import type { HandPlan } from "../contracts";
 
-The AST test requires exactly these two module specifiers; assertLightweightPublicEvidencePrivacy is the only runtime binding, LightweightPublicEvidence is a type binding, and HandPlan is type-only. It rejects default, namespace, side-effect, third-source, dynamic, and CommonJS imports.
+The stable source-boundary AST test requires exactly these two module specifiers; assertLightweightPublicEvidencePrivacy is the only runtime binding, LightweightPublicEvidence is a type binding, and HandPlan is type-only. It rejects default, namespace, side-effect, third-source, dynamic, and CommonJS imports. It also rejects the complete privacy/dependency denylist: RoomState, PublicRoom, AiRuntimeState, HandPlanner, generateHandPlans, generateFastHandPlans, generateRapidHandPlan, ensurePlans, decideAiAction, runAiStep, hands, initialHands, partnerHand, opponentsHands, deck, hiddenState, privateRuntime, ParticleBank, particles, rollout, likelihood, server, provider, store, treatment, benchmark, simulation, performance, smoke, calibration, and formal.
+
+The stable boundary permits private helpers and JavaScript/TypeScript built-ins, including Math.round, Math.floor, Object.is, Object.freeze, Set, Map, and Array. Task 1's skeleton-content assertions are temporary RED setup assertions only; they must not remain as Task 2 implementation prohibitions. In particular, Task 2 is allowed to add private roundD2cScore, compareStableText, and Math.floor usage while retaining the exact import and privacy boundaries above.
 
 The module must not import or read RoomState, hands, partnerHand, opponentsHands, initialHands, deck, hiddenState, particle bank, rollout state, server provider/store identity internals, room.ts, aiDecisionEngine.ts, HandPlanner, or planner modules. The recursive D2b privacy assertion is reused. Output contains only schema, mode, aggregate counts, family labels, stable keys, numeric priority/quota data, and fallback reason; no evidence object, cards, groups, runtime, private state, or action data.
 
@@ -543,7 +545,7 @@ Add named tests for:
 - invalid quota configuration;
 - disabled no-op and immutable outputs.
 
-The source-boundary test uses the TypeScript AST against the production source path and requires the exact imports in section 4, the sole runtime D2b binding, type bindings, and rejection of default/namespace/side-effect/third-source/dynamic/CommonJS imports. It scans production files for D2c imports.
+The Task 1 source-boundary test uses the TypeScript AST against the production source path and requires the exact imports in section 4, the sole runtime D2b binding, type bindings, and rejection of default/namespace/side-effect/third-source/dynamic/CommonJS imports. During Task 1 it additionally asserts the temporary skeleton contents. Before Task 2, the skeleton-content assertions are replaced by the stable import/privacy/dependency boundary in section 11; the stable test must allow the private helpers required by Task 2.
 
 First command, before the skeleton exists:
 
@@ -559,7 +561,7 @@ Stop if a third file changes, if module resolution remains after the skeleton, o
 
 ### Task 2: Minimal pure D2c policy
 
-Files: create src/ai/planning/beliefGuidedPlanPolicy.ts; modify the focused test only for GREEN assertions.
+Files: modify src/ai/planning/beliefGuidedPlanPolicy.ts only after the contract-reconciliation commit. The focused test is frozen for implementation after reconciliation; normal Task 2 implementation does not modify behavior expectations, test names, fixtures, or test count.
 
 Implement the exact contracts/imports from section 4; ordered snapshot validation; D2b privacy call; classification; six-field finite validation; fractional formula and roundD2cScore; compareStableText; complete familyPriority; positive-only familyQuotas; Math.floor allocator; recursive deep freeze; and no input references in output.
 
@@ -571,7 +573,7 @@ Commands:
     npx tsc --noEmit --pretty false
     git diff --check
 
-Expected GREEN: all focused tests, TypeScript, and diff-check pass; no skipped/todo/module-resolution/privacy/fixture/action-path failure.
+Expected GREEN: all focused tests, TypeScript, and diff-check pass; no skipped/todo/module-resolution/privacy/fixture/action-path failure. The stable source-boundary test permits the private helpers and built-ins required by this task while continuing to enforce the exact import and privacy denylist.
 
 Future commit: feat: derive deterministic D2c shadow priorities.
 Stop if import, snapshot, fractional score, quota, freeze, or no-op boundaries are violated.
@@ -698,10 +700,12 @@ Every row requires named tests in tests/ai/beliefGuidedPlanPolicy.test.ts.
 Future implementation sequence:
 
 1. test: characterize D2c plan priority and quota — test plus contract-only NOT_IMPLEMENTED skeleton; setup failure is recorded but behavioral RED is the gate.
-2. feat: derive deterministic D2c shadow priorities — policy plus focused tests, GREEN and TypeScript.
-3. test: harden D2c privacy and source boundaries — policy/test hardening, focused plus D2a/D2b regression.
-4. test: characterize D2c shadow integration boundary — detached test only, no-op gate.
-5. docs: resolve D2c plan review findings — this plan-only remediation commit, only this document.
+2. docs: align D2c Task 2 test boundaries — clarify that Task 1 skeleton assertions are temporary and Task 2 permits private helpers.
+3. test: reconcile D2c Task 2 contracts — replace the temporary skeleton-content assertions and repair the inconsistent uncertainty fixture; re-establish behavioral RED.
+4. feat: derive deterministic D2c shadow priorities — policy only after reconciliation; GREEN and TypeScript.
+5. test: harden D2c privacy and source boundaries — policy/test hardening, focused plus D2a/D2b regression.
+6. test: characterize D2c shadow integration boundary — detached test only, no-op gate.
+7. docs: resolve D2c plan review findings — the earlier plan-only remediation commit.
 
 No active integration, D2d reducer, D2e particle, D2f rollout, or D2g treatment/benchmark enters these commits. Each is independently reviewed.
 
@@ -717,6 +721,10 @@ No active integration, D2d reducer, D2e particle, D2f rollout, or D2g treatment/
     docs/superpowers/plans/2026-07-23-d2c-plan-priority-quota-shadow.md
 
 The current remediation modifies only the plan document. It does not create or modify source/test/package files.
+
+### Pre-Task 2 contract-reconciliation allowlist
+
+Before the pure policy implementation, one independent reconciliation may modify the plan document and tests/ai/beliefGuidedPlanPolicy.test.ts. It may only replace temporary Task 1 skeleton-content assertions with the stable source/privacy boundary and make the public uncertainty fixture internally consistent. It may not modify the production skeleton or any other file. After that reconciliation commit, the focused test is frozen for Task 2 implementation.
 
 ### Forbidden
 
