@@ -132,7 +132,7 @@ Every commit from main to the verified D2c source tip is preserved. No commit ma
 
 ### D2c planning
 
-1. `0b5f5b3ab983163eafa0008d7f9a73033f17a6c3 docs: plan D2c priority quota shadow`
+1. `0b5f5b3ab983163eafa0008d7f9a73033f17a6c6 docs: plan D2c priority quota shadow`
 2. `681607c274f2336539cffe410cefc40f4ce3778e docs: resolve D2c plan review findings`
 
 ### Task 1 behavioral RED
@@ -142,7 +142,7 @@ Every commit from main to the verified D2c source tip is preserved. No commit ma
 
 ### Task 2 contract reconciliation
 
-5. `89fa090104daee952c228c51a1784ea91f69c78cbf docs: align D2c Task 2 test boundaries`
+5. `89fbdae1aa173762cf28b23bd2eaf567248549a8 docs: align D2c Task 2 test boundaries`
 6. `fa090104daee952c228c51a1784ea91f69c78cbf test: reconcile D2c Task 2 contracts`
 
 ### Task 2 implementation
@@ -298,6 +298,13 @@ planning worktree clean
 main is an ancestor of the approved integration tip
 ```
 
+The planning ref/tree check in §9 must also pass before the command below is considered. The ref and tree must equal the frozen `APPROVED_INTEGRATION_TIP` and `APPROVED_INTEGRATION_TREE`.
+
+```bash
+git rev-parse codex/d2c-main-integration-plan
+git rev-parse "codex/d2c-main-integration-plan^{tree}"
+```
+
 If main moves before approval or before the command is run, do not fast-forward. Stop and re-plan the integration/conflict boundary.
 
 ## 9. Future integration-verification branch/worktree
@@ -322,6 +329,55 @@ npm ci --include=dev
 ```
 
 After dependency installation, package and lock blobs must still match the approved integration tip and main base. Dependency installation is future-only and is not authorized by this plan commit.
+
+### Approved integration tip/tree capture
+
+The verified D2c source tree and the final approved integration tree are different identities:
+
+```text
+D2C_SOURCE_TREE
+= tree of verified source tip 4a136e4890ff70262a426530f4252e5030bdc23c
+
+APPROVED_INTEGRATION_TREE
+= tree of the finally approved planning tip
+```
+
+The planning tip contains this main-integration plan document, so `D2C_SOURCE_TREE` must never be reused as the expected post-fast-forward main tree.
+
+At the start of future formal verification, read and freeze the planning branch ref and its tree:
+
+```bash
+APPROVED_INTEGRATION_TIP="$(
+  git rev-parse codex/d2c-main-integration-plan
+)"
+
+APPROVED_INTEGRATION_TREE="$(
+  git rev-parse "${APPROVED_INTEGRATION_TIP}^{tree}"
+)"
+```
+
+If the shell does not support the assignment form, run these commands separately:
+
+```bash
+git rev-parse codex/d2c-main-integration-plan
+git rev-parse "codex/d2c-main-integration-plan^{tree}"
+```
+
+The verification report must freeze the exact values:
+
+```text
+APPROVED_INTEGRATION_TIP=<exact 40-char SHA>
+APPROVED_INTEGRATION_TREE=<exact tree SHA>
+```
+
+Before future fast-forward, read both values again:
+
+```bash
+git rev-parse codex/d2c-main-integration-plan
+git rev-parse "codex/d2c-main-integration-plan^{tree}"
+```
+
+Both results must equal the frozen `APPROVED_INTEGRATION_TIP` and `APPROVED_INTEGRATION_TREE`. If either ref or tree moved, stop and re-review; do not fast-forward.
 
 ## 10. Future complete verification Gate 1–8
 
@@ -510,6 +566,18 @@ main tree = verified integration tree
 main worktree clean
 ```
 
+The post-fast-forward identity and tree must equal the frozen approved integration values:
+
+```text
+git -C "E:/workspace/掼蛋游戏开发" rev-parse HEAD
+  = APPROVED_INTEGRATION_TIP
+
+git -C "E:/workspace/掼蛋游戏开发" rev-parse "HEAD^{tree}"
+  = APPROVED_INTEGRATION_TREE
+```
+
+Do not use `D2C_SOURCE_TREE` as the expected post-fast-forward main tree; it belongs only to the verified source tip.
+
 No extra merge commit may be created on main.
 
 ## 12. Production, restricted, and remote boundaries
@@ -584,6 +652,8 @@ The review specifically confirms:
 - `--no-ff`, cherry-pick, squash, rebase, patch copy, manual copy, and history rewrite are prohibited;
 - the main-moved stop gate is present;
 - the complete 17-commit inventory is present;
+- the Task 2 contract-boundary commit uses the real SHA `89fbdae1aa173762cf28b23bd2eaf567248549a8`;
+- every inventory SHA is a unique 40-character lowercase hexadecimal value and the subject/order match real `git log` output;
 - the exact three-path D2c inventory is present;
 - package/lock, frozen paths, and existing production source scope checks are present;
 - detached shadow characterization is not described as production integration;
@@ -591,6 +661,8 @@ The review specifically confirms:
 - restricted workloads and remote operations remain excluded;
 - Task 5 historical verification is not used as a substitute for future integration verification;
 - Gate 3 names the three fixture test files from source and preserves the 3 files / 6 tests expectation;
+- future verification captures and freezes `APPROVED_INTEGRATION_TIP` and `APPROVED_INTEGRATION_TREE` separately from `D2C_SOURCE_TREE`;
+- future post-fast-forward main HEAD/tree are compared to the approved integration tip/tree, never to the D2c source tree;
 - the plan does not authorize tests, build, `npm ci`, or any workload in the current turn.
 
 ## 14. Current-turn submission boundary
@@ -615,16 +687,16 @@ Only the plan file may be shown as changed. Commit only this file:
 git add \
   docs/superpowers/plans/2026-07-24-d2c-main-integration.md
 
-git commit -m "docs: plan D2c main integration"
+git commit -m "docs: correct D2c integration inventory"
 ```
 
-Do not amend any existing D2c commit. After commit, verify only with Git:
+Do not amend `c056533e3f4904cbc32748583d83af87e4e91b2a` or any existing D2c commit. After commit, verify only with Git:
 
 ```bash
 git show --stat --oneline HEAD
 
 git diff \
-  4a136e4890ff70262a426530f4252e5030bdc23c..HEAD \
+  c056533e3f4904cbc32748583d83af87e4e91b2a..HEAD \
   --name-only
 
 git status --short --untracked-files=all
@@ -645,18 +717,67 @@ main base remains an ancestor of planning HEAD
 main was not moved
 ```
 
-## 15. Final status after this plan commit
+Record the final planning identities after this remediation commit:
+
+```bash
+git rev-parse HEAD
+git rev-parse "HEAD^{tree}"
+```
+
+Report them as:
+
+```text
+FINAL_PLANNING_TIP=<exact 40-char SHA>
+FINAL_PLANNING_TREE=<exact tree SHA>
+```
+
+These values are for this plan review only. Future formal verification must re-read the planning branch ref and tree and then freeze `APPROVED_INTEGRATION_TIP` and `APPROVED_INTEGRATION_TREE` again.
+
+## 15. Remediation final report and status
+
+The remediation report must include:
+
+```text
+Starting planning HEAD
+Corrected plan commit SHA/subject
+Final planning HEAD
+Final planning tree
+
+Actual SHA for:
+docs: align D2c Task 2 test boundaries
+
+Actual source commit count
+All source SHA lengths = 40: yes/no
+Duplicate SHA count
+Missing commit count
+Extra commit count
+Subject/order comparison result
+
+D2C_SOURCE_TREE
+APPROVED_INTEGRATION_TIP/TREE capture step added: yes/no
+Source tree and integration tree distinguished: yes/no
+
+Changed-file allowlist
+git diff --check
+Final worktree clean
+Main HEAD unchanged
+```
+
+Self-review must remain:
+
+```text
+Critical: none
+Important: none
+Minor: none
+```
+
+The current turn finishes in this state:
 
 The current turn finishes in this state:
 
 ```text
-D2C_TASK2_FINAL_APPROVED
-D2C_TASK3_FINAL_APPROVED
-D2C_TASK4_FINAL_APPROVED
-D2C_TASK5_FINAL_APPROVED
-
-D2C_MAIN_INTEGRATION_PLAN_COMPLETE
-D2C_MAIN_INTEGRATION_PLAN_AWAITING_REVIEW
+D2C_MAIN_INTEGRATION_PLAN_INVENTORY_CORRECTED
+D2C_MAIN_INTEGRATION_PLAN_AWAITING_FINAL_REVIEW
 D2C_MAIN_INTEGRATION_NOT_AUTHORIZED
 
 D2C_PRODUCTION_SHADOW_ADAPTER_NOT_AUTHORIZED
