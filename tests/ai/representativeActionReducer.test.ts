@@ -180,8 +180,14 @@ it("returns typed cap-unsatisfied failure without representatives", () => {
 });
 
 it("keeps follow pass as an independent exact class from play", () => {
-  const result = reduceRepresentativeActions(reducerInput([passCandidate(), playCandidate("S8-1")], 2));
+  const result = reduceRepresentativeActions({
+    actions: [passCandidate(), playCandidate("S8-1")],
+    gameRank,
+    lastPlay: singleGroup("S7-1"),
+    hardCap: 2,
+  });
 
+  expect(result.status).toBe("unchanged");
   expect(result.representativeInputIndices).toEqual([0, 1]);
   expect(result.representativeByInputIndex).toEqual({ 0: 0, 1: 1 });
 });
