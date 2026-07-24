@@ -86,8 +86,34 @@ function reducerInput(actions: readonly ActionCandidate[], hardCap: number): Rep
   return { actions, gameRank, hardCap };
 }
 
-function representedStableKeys(actions: readonly ActionCandidate[], result: { representativeInputIndices: readonly number[] }): string[] {
-  return result.representativeInputIndices.map((index) => actions[index]!.stableKey).sort();
+function candidatePayloadKey(candidate: ActionCandidate): string {
+  if (candidate.action.type === "pass") {
+    return JSON.stringify({
+      action: "pass",
+      source: candidate.source,
+      policyVerdict: candidate.policyVerdict,
+      alignedPlanIds: candidate.alignedPlanIds,
+      stableKey: candidate.stableKey,
+      reasonCodes: candidate.reasonCodes,
+    });
+  }
+
+  return JSON.stringify({
+    action: "play",
+    groupType: candidate.action.group.type,
+    groupId: candidate.action.group.id,
+    cardIds: candidate.action.group.cards.map((card) => card.id).sort(),
+    wildcardIds: candidate.action.group.wildcards.map((card) => card.id).sort(),
+    source: candidate.source,
+    policyVerdict: candidate.policyVerdict,
+    alignedPlanIds: candidate.alignedPlanIds,
+    stableKey: candidate.stableKey,
+    reasonCodes: candidate.reasonCodes,
+  });
+}
+
+function representedPayloadKeys(actions: readonly ActionCandidate[], result: { representativeInputIndices: readonly number[] }): string[] {
+  return result.representativeInputIndices.map((index) => candidatePayloadKey(actions[index]!)).sort();
 }
 
 it("maps an exact duplicate payload to one representative index without active reduction under cap", () => {
@@ -109,19 +135,18 @@ it("does not merge candidates whose physical card IDs differ", () => {
   expect(result.representativeByInputIndex).toEqual({ 0: 0, 1: 1 });
 });
 
-it("does not merge candidates with different evaluator-visible metadata", () => {
-  const base = playCandidate("S4-1");
-  const differentPolicy = cloneCandidate(base);
-  differentPolicy.policyVerdict = { allowed: true, hardViolation: false, reasonCodes: ["IMMEDIATE_FINISH"] };
-  const differentPlan = cloneCandidate(base);
-  differentPlan.alignedPlanIds = ["plan-a"];
-  const differentReasons = cloneCandidate(base);
-  differentReasons.reasonCodes = ["IMMEDIATE_FINISH"];
+it("fails closed when one legal stable key has different evaluator-visible metadata", () => {
+  const first = playCandidate("S4-1");
+  const second = cloneCandidate(first);
+  second.alignedPlanIds = ["plan-a"];
 
-  const result = reduceRepresentativeActions(reducerInput([base, differentPolicy, differentPlan, differentReasons], 4));
+  const result = reduceRepresentativeActions(reducerInput([first, second], 2));
 
-  expect(result.representativeInputIndices).toEqual([0, 1, 2, 3]);
-  expect(result.diagnostics.equivalenceClassCount).toBe(4);
+  expect(result.status).toBe("failed");
+  expect(result.failureReason).toBe("stable-key-collision");
+  expect(result.representativeInputIndices).toEqual([]);
+  expect(result.representativeByInputIndex).toEqual({});
+  expect(result.fallback).toBe("use-original-candidates");
 });
 
 it("returns unchanged with a complete one-to-one mapping when under cap without duplicates", () => {
@@ -161,23 +186,36 @@ it("keeps follow pass as an independent exact class from play", () => {
   expect(result.representativeByInputIndex).toEqual({ 0: 0, 1: 1 });
 });
 
-it("fails closed when one stable key maps to different payloads", () => {
-  const result = reduceRepresentativeActions(reducerInput([
-    playCandidate("S9-1", { stableKey: "collision" }),
-    playCandidate("C9-1", { stableKey: "collision" }),
-  ], 2));
+it("fails closed when one legal stable key maps to a different complete payload", () => {
+  const first = playCandidate("S9-1");
+  const second = cloneCandidate(first);
+  second.policyVerdict = { allowed: true, hardViolation: false, reasonCodes: ["IMMEDIATE_FINISH"] };
+  const result = reduceRepresentativeActions(reducerInput([first, second], 2));
 
   expect(result.status).toBe("failed");
   expect(result.failureReason).toBe("stable-key-collision");
+  expect(result.representativeInputIndices).toEqual([]);
+  expect(result.representativeByInputIndex).toEqual({});
   expect(result.fallback).toBe("use-original-candidates");
 });
 
 it("does not treat identical payloads sharing one stable key as a collision", () => {
-  const first = playCandidate("S10-1", { stableKey: "same-payload" });
+  const first = playCandidate("S10-1");
   const result = reduceRepresentativeActions(reducerInput([first, cloneCandidate(first)], 2));
 
   expect(result.failureReason).not.toBe("stable-key-collision");
   expect(result.representativeByInputIndex).toEqual({ 0: 0, 1: 0 });
+});
+
+it("fails closed when a play stable key does not match its group ID", () => {
+  const malformed = playCandidate("S9-1", { stableKey: "wrong-key" });
+  const result = reduceRepresentativeActions(reducerInput([malformed], 1));
+
+  expect(result.status).toBe("failed");
+  expect(result.failureReason).toBe("stable-key-mismatch");
+  expect(result.representativeInputIndices).toEqual([]);
+  expect(result.representativeByInputIndex).toEqual({});
+  expect(result.fallback).toBe("use-original-candidates");
 });
 
 it("preserves input bytes and returns metadata without action-control references", () => {
@@ -193,10 +231,21 @@ it("preserves input bytes and returns metadata without action-control references
   expect(result).not.toHaveProperty("activePlanId");
   expect(result).not.toHaveProperty("D2c");
   expect(Object.isFrozen(result)).toBe(true);
+  expect(Object.isFrozen(result.representativeInputIndices)).toBe(true);
+  expect(Object.isFrozen(result.representativeByInputIndex)).toBe(true);
   expect(Object.isFrozen(result.diagnostics)).toBe(true);
   expect(() => {
     (result.representativeInputIndices as number[]).push(9);
   }).toThrow();
+  let mappingMutationThrew = false;
+  try {
+    (result.representativeByInputIndex as Record<number, number>)[0] = 99;
+  } catch {
+    mappingMutationThrew = true;
+  }
+  if (!mappingMutationThrew) {
+    expect(result.representativeByInputIndex[0]).not.toBe(99);
+  }
 });
 
 it("is deterministic for repeated calls and preserves semantic representatives across permutations", () => {
@@ -211,5 +260,5 @@ it("is deterministic for repeated calls and preserves semantic representatives a
   expect(JSON.stringify(originalResult)).toBe(JSON.stringify(repeatedResult));
   expect(originalResult.representativeInputIndices).toEqual([0, 2]);
   expect(permutedResult.representativeInputIndices).toEqual([0, 1]);
-  expect(representedStableKeys(original, originalResult)).toEqual(representedStableKeys(permuted, permutedResult));
+  expect(representedPayloadKeys(original, originalResult)).toEqual(representedPayloadKeys(permuted, permutedResult));
 });
