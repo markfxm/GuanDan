@@ -75,6 +75,10 @@ function expectFailure(result: ReturnType<typeof reduceRepresentativeActions>, r
   expect(Object.isFrozen(result.diagnostics)).toBe(true);
 }
 
+function sparseStringArray(): string[] {
+  return new Array<string>(1);
+}
+
 function passCandidate(): ActionCandidate {
   return {
     action: { type: "pass" },
@@ -241,12 +245,34 @@ it("rejects a candidate whose semantic strength was tampered before follow compa
   expectFailure(result, "legality-inconsistency");
 });
 
-it("uses canonical lastPlay fields instead of a tampered lastPlay strength", () => {
+it.each(["id", "label", "purpose", "strength"] as const)("rejects tampered canonical lastPlay %s", (field) => {
   const canonicalLastPlay = singleGroup("S7-1");
+  const tamperedLastPlay = { ...canonicalLastPlay };
+  if (field === "id") {
+    tamperedLastPlay.id = `tampered:${canonicalLastPlay.id}`;
+  } else if (field === "label") {
+    tamperedLastPlay.label = `${canonicalLastPlay.label} tampered`;
+  } else if (field === "purpose") {
+    tamperedLastPlay.purpose = "engine";
+  } else {
+    tamperedLastPlay.strength = canonicalLastPlay.strength + 1000;
+  }
+
   const result = reduceRepresentativeActions({
     actions: [playCandidate("S8-1")],
     gameRank,
-    lastPlay: { ...canonicalLastPlay, strength: 9999 },
+    lastPlay: tamperedLastPlay,
+    hardCap: 1,
+  });
+
+  expectFailure(result, "legality-inconsistency");
+});
+
+it("accepts an unmodified canonical lastPlay", () => {
+  const result = reduceRepresentativeActions({
+    actions: [playCandidate("S8-1")],
+    gameRank,
+    lastPlay: singleGroup("S7-1"),
     hardCap: 1,
   });
 
@@ -311,6 +337,33 @@ it("returns legality-inconsistency for duplicate physical IDs in a group", () =>
   expectFailure(result, "legality-inconsistency");
 });
 
+it("returns legality-inconsistency for duplicate physical IDs in wildcards", () => {
+  const candidate = playCandidate("H10-1");
+  const wildcard = candidate.action.type === "play" ? candidate.action.group.wildcards[0]! : undefined;
+  candidate.action = {
+    type: "play",
+    group: { ...candidate.action.group, wildcards: [{ ...wildcard! }, { ...wildcard! }] },
+  };
+  const result = reduceRepresentativeActions(reducerInput([candidate], 1));
+
+  expectFailure(result, "legality-inconsistency");
+});
+
+it("returns legality-inconsistency for duplicate physical IDs in lastPlay cards", () => {
+  const canonicalLastPlay = singleGroup("S7-1");
+  const result = reduceRepresentativeActions({
+    actions: [playCandidate("S8-1")],
+    gameRank,
+    lastPlay: {
+      ...canonicalLastPlay,
+      cards: [canonicalLastPlay.cards[0]!, { ...canonicalLastPlay.cards[0]! }],
+    },
+    hardCap: 1,
+  });
+
+  expectFailure(result, "legality-inconsistency");
+});
+
 it("returns legality-inconsistency when wildcards are not part of the group", () => {
   const candidate = playCandidate("S3-1");
   candidate.action = {
@@ -361,6 +414,18 @@ it("returns hand-ownership-mismatch when a candidate card is absent from hand", 
 });
 
 it.each([
+  ["alignedPlanIds", (candidate: ActionCandidate) => { candidate.alignedPlanIds = sparseStringArray(); }],
+  ["candidate reasonCodes", (candidate: ActionCandidate) => { candidate.reasonCodes = sparseStringArray(); }],
+  ["policy reasonCodes", (candidate: ActionCandidate) => { candidate.policyVerdict.reasonCodes = sparseStringArray() as ActionCandidate["policyVerdict"]["reasonCodes"]; }],
+] as const)("returns invalid-candidate for a sparse %s", (_name, mutate) => {
+  const candidate = playCandidate("S3-1");
+  mutate(candidate);
+  const result = reduceRepresentativeActions(reducerInput([candidate], 1));
+
+  expectFailure(result, "invalid-candidate");
+});
+
+it.each([
   ["alignedPlanIds order", (candidate: ActionCandidate) => { candidate.alignedPlanIds = ["a", "b"]; }, (candidate: ActionCandidate) => { candidate.alignedPlanIds = ["b", "a"]; }],
   ["alignedPlanIds duplicate", (candidate: ActionCandidate) => { candidate.alignedPlanIds = ["a"]; }, (candidate: ActionCandidate) => { candidate.alignedPlanIds = ["a", "a"]; }],
   ["policy reasonCodes order", (candidate: ActionCandidate) => { candidate.policyVerdict.reasonCodes = ["IMMEDIATE_FINISH", "ENDGAME_APPROVED"]; }, (candidate: ActionCandidate) => { candidate.policyVerdict.reasonCodes = ["ENDGAME_APPROVED", "IMMEDIATE_FINISH"]; }],
@@ -392,6 +457,18 @@ it("keeps natural, wildcard, bomb, straight-flush, and joker-bomb payloads disti
   expect(result.diagnostics.equivalenceClassCount).toBe(6);
 });
 
+it("keeps two real wildcard substitutions distinct", () => {
+  const actions = [
+    playCandidateFromCards(["S4-1", "H10-1"]),
+    playCandidateFromCards(["S4-1", "H10-2"]),
+  ];
+  const result = reduceRepresentativeActions(reducerInput(actions, actions.length));
+
+  expect(result.status).toBe("unchanged");
+  expect(result.representativeInputIndices).toEqual([0, 1]);
+  expect(result.diagnostics.equivalenceClassCount).toBe(2);
+});
+
 it("deep-freezes and detaches a non-empty success result deterministically", () => {
   const actions = [playCandidate("S3-1"), playCandidate("C3-1")];
   const input = reducerInput(actions, 2);
@@ -414,7 +491,7 @@ it("deep-freezes and detaches a non-empty success result deterministically", () 
 it("keeps reducer production imports and calls inside the approved AST boundary", () => {
   const fileName = resolve(process.cwd(), "src/ai/tactics/representativeActionReducer.ts");
   const sourceFile = ts.createSourceFile(fileName, readFileSync(fileName, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const forbiddenImportTokens = ["room", "game/ai", "aiDecisionEngine", "planManager", "handPlanner", "D2c", "benchmark", "simulation", "server", "test"];
+  const forbiddenImportTokens = ["node:fs", "node:path", "node:net", "node:http", "node:https", "node:child_process", "room", "game/ai", "aiDecisionEngine", "planManager", "handPlanner", "D2c", "benchmark", "simulation", "server", "test"];
   const importPaths = sourceFile.statements
     .filter(ts.isImportDeclaration)
     .map((statement) => (statement.moduleSpecifier as ts.StringLiteral).text);
@@ -429,6 +506,17 @@ it("keeps reducer production imports and calls inside the approved AST boundary"
     "evaluateActionCandidate",
     "planner",
     "runtime",
+    "readFileSync",
+    "writeFileSync",
+    "existsSync",
+    "readdirSync",
+    "createReadStream",
+    "createWriteStream",
+    "connect",
+    "request",
+    "exec",
+    "spawn",
+    "fork",
   ]);
   const forbiddenCalls: string[] = [];
   const visit = (node: ts.Node): void => {

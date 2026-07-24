@@ -1,4 +1,4 @@
-import { createDeck, RANKS, SUITS, type Card, type GameRank } from "../../engine/cards";
+import { createDeck, RANKS, type Card, type GameRank } from "../../engine/cards";
 import type { CardGroup, GroupPurpose, GroupType } from "../../engine/groups";
 import type { ActionCandidate, AiAction } from "../contracts";
 import { canBeatPlay, classifyPlay } from "../../game/playRules";
@@ -141,7 +141,17 @@ function validateCardArray(value: unknown): "invalid" | "duplicate" | "valid" {
 }
 
 function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
+  if (!Array.isArray(value)) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(value, index) || typeof value[index] !== "string") {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function isValidGroupType(value: unknown): value is GroupType {
@@ -152,7 +162,7 @@ function isValidGroupPurpose(value: unknown): value is GroupPurpose {
   return typeof value === "string" && VALID_GROUP_PURPOSES.includes(value as GroupPurpose);
 }
 
-function isGroupShape(value: unknown): value is CardGroup {
+function hasGroupMetadataShape(value: unknown): value is CardGroup {
   if (!isRecord(value)
     || typeof value.id !== "string"
     || value.id.length === 0
@@ -163,7 +173,19 @@ function isGroupShape(value: unknown): value is CardGroup {
     return false;
   }
 
-  return validateCardArray(value.cards) !== "invalid" && validateCardArray(value.wildcards) !== "invalid";
+  return true;
+}
+
+function isGroupShape(value: unknown): value is CardGroup {
+  return hasGroupMetadataShape(value)
+    && validateCardArray(value.cards) === "valid"
+    && validateCardArray(value.wildcards) === "valid";
+}
+
+function isCandidateGroupShape(value: unknown): value is CardGroup {
+  return hasGroupMetadataShape(value)
+    && validateCardArray(value.cards) !== "invalid"
+    && validateCardArray(value.wildcards) !== "invalid";
 }
 
 function isValidPolicyVerdict(value: unknown): boolean {
@@ -178,7 +200,7 @@ function isValidAction(value: unknown): value is AiAction {
     return false;
   }
 
-  return value.type === "pass" || isGroupShape(value.group);
+  return value.type === "pass" || isCandidateGroupShape(value.group);
 }
 
 function isValidCandidateShape(value: unknown): value is ActionCandidate {
@@ -197,22 +219,20 @@ function sameIds(left: readonly string[], right: readonly string[]): boolean {
   return leftIds.length === rightIds.length && leftIds.every((id, index) => id === rightIds[index]);
 }
 
-function canonicalGroup(group: unknown, gameRank: GameRank, requireMetadataMatch = true): CardGroup | undefined {
+function canonicalGroup(group: unknown, gameRank: GameRank): CardGroup | undefined {
   if (!isGroupShape(group)) {
     return undefined;
   }
 
   const classified = classifyPlay(group.cards, gameRank);
   if (classified === undefined
-    || !sameIds(group.wildcards.map((card) => card.id), classified.wildcards.map((card) => card.id))
-    || (requireMetadataMatch && (
-      group.id !== classified.id
-      || group.type !== classified.type
-      || group.label !== classified.label
-      || group.purpose !== classified.purpose
-      || group.strength !== classified.strength
-      || !sameIds(group.cards.map((card) => card.id), classified.cards.map((card) => card.id))
-    ))) {
+    || group.id !== classified.id
+    || group.type !== classified.type
+    || group.label !== classified.label
+    || group.purpose !== classified.purpose
+    || group.strength !== classified.strength
+    || !sameIds(group.cards.map((card) => card.id), classified.cards.map((card) => card.id))
+    || !sameIds(group.wildcards.map((card) => card.id), classified.wildcards.map((card) => card.id))) {
     return undefined;
   }
 
@@ -289,7 +309,7 @@ function validateCandidate(candidate: ActionCandidate, input: ValidatedReducerIn
     return { failureReason: "policy-inconsistency" };
   }
 
-  const canonicalLastPlay = input.lastPlay === undefined ? undefined : canonicalGroup(input.lastPlay, input.gameRank, false);
+  const canonicalLastPlay = input.lastPlay === undefined ? undefined : canonicalGroup(input.lastPlay, input.gameRank);
   if (input.lastPlay !== undefined && canonicalLastPlay === undefined) {
     return { failureReason: "legality-inconsistency" };
   }
