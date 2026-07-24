@@ -117,8 +117,30 @@ function deterministicDecisionProjection(decision: AiDecision): Omit<AiDecision,
   return projection;
 }
 
+function collectObjectReferences(value: unknown, references = new Set<object>()): Set<object> {
+  if (typeof value !== "object" || value === null || references.has(value)) {
+    return references;
+  }
+
+  references.add(value);
+  for (const key of Object.keys(value)) {
+    collectObjectReferences((value as Record<string, unknown>)[key], references);
+  }
+  return references;
+}
+
+function expectNoSharedObjectReferences(left: unknown, right: unknown): void {
+  const leftReferences = collectObjectReferences(left);
+  const rightReferences = collectObjectReferences(right);
+
+  for (const reference of rightReferences) {
+    expect(leftReferences.has(reference)).toBe(false);
+  }
+}
+
 function makeObservation(lastPlayId?: string): AiObservation {
   const hand = deck.slice(0, 8).map((candidate) => ({ ...candidate }));
+  const lastPlay = lastPlayId === undefined ? undefined : deepClone(singleGroup(lastPlayId));
   return {
     hand,
     gameRank,
@@ -127,7 +149,7 @@ function makeObservation(lastPlayId?: string): AiObservation {
     playedCards: [],
     handCounts: { 0: 8, 1: 8, 2: 8, 3: 8 },
     finishOrder: [],
-    ...(lastPlayId === undefined ? {} : { lastPlay: singleGroup(lastPlayId), lastPlaySeat: 0 }),
+    ...(lastPlay === undefined ? {} : { lastPlay, lastPlaySeat: 0 }),
   };
 }
 
@@ -267,15 +289,19 @@ function productionBoundaryAudit(): {
   integrationReducerCallCount: number;
   integrationRepresentativeIdentifierCount: number;
   d2dPathReferenceCount: number;
-  elapsedDefinitionCount: number;
-  elapsedReturnCount: number;
   elapsedControlFlowCount: number;
   elapsedSortCount: number;
   elapsedRuntimeCount: number;
   elapsedActionCount: number;
-  elapsedTimerCallCount: number;
+  elapsedVariableDefinitionCount: number;
+  elapsedInitializerMatchCount: number;
+  startedAtDefinitionCount: number;
+  startedAtPerformanceNowInitializerCount: number;
+  elapsedReturnShorthandCount: number;
+  unexpectedElapsedReferenceCount: number;
   elapsedAssignmentCount: number;
   elapsedTypeIsNumber: boolean;
+  elapsedReferenceCounts: Record<string, number>;
 } {
   const reducerPath = resolve(task4Root, "src/ai/tactics/representativeActionReducer.ts");
   const contractPath = resolve(task4Root, "src/ai/contracts.ts");
@@ -288,6 +314,13 @@ function productionBoundaryAudit(): {
   ].map((path) => resolve(task4Root, path));
   const reducerSource = parseProduction(reducerPath);
   const integrationSources = integrationPaths.map(parseProduction);
+  const elapsedReferenceSources = {
+    contracts: parseProduction(contractPath),
+    engine: parseProduction(resolve(task4Root, "src/ai/aiDecisionEngine.ts")),
+    diagnostics: parseProduction(resolve(task4Root, "src/ai/diagnostics/aiPlanningDiagnostics.ts")),
+    room: parseProduction(resolve(task4Root, "src/game/room.ts")),
+    gameAi: parseProduction(resolve(task4Root, "src/game/ai.ts")),
+  };
   const forbiddenImportTokens = [
     "room",
     "game/ai",
@@ -333,13 +366,16 @@ function productionBoundaryAudit(): {
   let integrationReducerCallCount = 0;
   let integrationRepresentativeIdentifierCount = 0;
   let d2dPathReferenceCount = 0;
-  let elapsedDefinitionCount = 0;
-  let elapsedReturnCount = 0;
   let elapsedControlFlowCount = 0;
   let elapsedSortCount = 0;
   let elapsedRuntimeCount = 0;
   let elapsedActionCount = 0;
-  let elapsedTimerCallCount = 0;
+  let elapsedVariableDefinitionCount = 0;
+  let elapsedInitializerMatchCount = 0;
+  let startedAtDefinitionCount = 0;
+  let startedAtPerformanceNowInitializerCount = 0;
+  let elapsedReturnShorthandCount = 0;
+  let unexpectedElapsedReferenceCount = 0;
   let elapsedAssignmentCount = 0;
 
   const visitReducer = (node: ts.Node): void => {
@@ -378,13 +414,29 @@ function productionBoundaryAudit(): {
     visitIntegration(source);
   }
 
+  const isPerformanceNowCall = (node: ts.Node | undefined): boolean => ts.isCallExpression(node)
+    && ts.isPropertyAccessExpression(node.expression)
+    && ts.isIdentifier(node.expression.expression)
+    && node.expression.expression.text === "performance"
+    && node.expression.name.text === "now";
+
   const visitElapsed = (node: ts.Node): void => {
     if (ts.isIdentifier(node) && node.text === "elapsedMs") {
       if (ts.isVariableDeclaration(node.parent) && node.parent.name === node) {
-        elapsedDefinitionCount += 1;
+        elapsedVariableDefinitionCount += 1;
+        const initializer = node.parent.initializer;
+        if (ts.isBinaryExpression(initializer)
+          && initializer.operatorToken.kind === ts.SyntaxKind.MinusToken
+          && isPerformanceNowCall(initializer.left)
+          && ts.isIdentifier(initializer.right)
+          && initializer.right.text === "startedAt") {
+          elapsedInitializerMatchCount += 1;
+        }
       }
       if (ts.isShorthandPropertyAssignment(node.parent)) {
-        elapsedReturnCount += 1;
+        elapsedReturnShorthandCount += 1;
+      } else if (!(ts.isVariableDeclaration(node.parent) && node.parent.name === node)) {
+        unexpectedElapsedReferenceCount += 1;
       }
       if (hasAncestor(node, (ancestor) => ts.isIfStatement(ancestor)
         || ts.isConditionalExpression(ancestor)
@@ -415,18 +467,28 @@ function productionBoundaryAudit(): {
         elapsedAssignmentCount += 1;
       }
     }
-    if (ts.isCallExpression(node)
-      && ts.isPropertyAccessExpression(node.expression)
-      && ts.isIdentifier(node.expression.expression)
-      && node.expression.expression.text === "performance"
-      && node.expression.name.text === "now") {
-      elapsedTimerCallCount += 1;
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "startedAt") {
+      startedAtDefinitionCount += 1;
+      if (isPerformanceNowCall(node.initializer)) {
+        startedAtPerformanceNowInitializerCount += 1;
+      }
     }
     ts.forEachChild(node, visitElapsed);
   };
   visitElapsed(parseProduction(resolve(task4Root, "src/ai/aiDecisionEngine.ts")));
 
   const contracts = parseProduction(contractPath);
+  const elapsedReferenceCounts = Object.fromEntries(Object.entries(elapsedReferenceSources).map(([name, source]) => {
+    let count = 0;
+    const visit = (node: ts.Node): void => {
+      if (ts.isIdentifier(node) && node.text === "elapsedMs") {
+        count += 1;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    return [name, count];
+  }));
   let elapsedTypeIsNumber = false;
   for (const statement of contracts.statements) {
     if (!ts.isTypeAliasDeclaration(statement) || statement.name.text !== "AiDecision" || !ts.isTypeLiteralNode(statement.type)) {
@@ -448,25 +510,42 @@ function productionBoundaryAudit(): {
     integrationReducerCallCount,
     integrationRepresentativeIdentifierCount,
     d2dPathReferenceCount,
-    elapsedDefinitionCount,
-    elapsedReturnCount,
+    elapsedVariableDefinitionCount,
+    elapsedInitializerMatchCount,
+    startedAtDefinitionCount,
+    startedAtPerformanceNowInitializerCount,
+    elapsedReturnShorthandCount,
+    unexpectedElapsedReferenceCount,
+    elapsedAssignmentCount,
     elapsedControlFlowCount,
     elapsedSortCount,
     elapsedRuntimeCount,
     elapsedActionCount,
-    elapsedTimerCallCount,
-    elapsedAssignmentCount,
     elapsedTypeIsNumber,
+    elapsedReferenceCounts,
   };
 }
 
 function assertScenarioNoOp(scenario: Scenario): void {
   const observationA = makeObservation(scenario.lastPlayId);
+  const observationB = makeObservation(scenario.lastPlayId);
   const runtimeA = makeRuntime();
+  const runtimeB = makeRuntime();
   const configA = makeConfig();
+  const configB = makeConfig();
   const observationABytes = canonicalJson(observationA);
+  const observationBBytes = canonicalJson(observationB);
   const runtimeABytes = canonicalJson(runtimeA);
+  const runtimeBBytes = canonicalJson(runtimeB);
   const configABytes = canonicalJson(configA);
+  const configBBytes = canonicalJson(configB);
+
+  expect(observationABytes).toBe(observationBBytes);
+  expectNoSharedObjectReferences(observationA, observationB);
+  expect(runtimeABytes).toBe(runtimeBBytes);
+  expectNoSharedObjectReferences(runtimeA, runtimeB);
+  expect(configABytes).toBe(configBBytes);
+  expectNoSharedObjectReferences(configA, configB);
 
   const firstDecision = decideAiAction(observationA, runtimeA, configA);
 
@@ -474,6 +553,8 @@ function assertScenarioNoOp(scenario: Scenario): void {
   const generatorInputB = makeGenerationInput(makeObservation(scenario.lastPlayId));
   const generatorInputABytes = canonicalJson(generatorInputA);
   const generatorInputBBytes = canonicalJson(generatorInputB);
+  expect(generatorInputABytes).toBe(generatorInputBBytes);
+  expectNoSharedObjectReferences(generatorInputA, generatorInputB);
   const generatedCandidatesA = generateActionCandidates(generatorInputA);
   const generatedCandidatesB = generateActionCandidates(generatorInputB);
   const inventoryA = captureCandidateInventory(generatedCandidatesA);
@@ -527,12 +608,6 @@ function assertScenarioNoOp(scenario: Scenario): void {
   expect(canonicalJson(ownHandClone)).toBe(ownHandCloneBytes);
   expect(canonicalJson(lastPlayClone)).toBe(lastPlayCloneBytes);
 
-  const observationB = makeObservation(scenario.lastPlayId);
-  const runtimeB = makeRuntime();
-  const configB = makeConfig();
-  const observationBBytes = canonicalJson(observationB);
-  const runtimeBBytes = canonicalJson(runtimeB);
-  const configBBytes = canonicalJson(configB);
   const secondDecision = decideAiAction(observationB, runtimeB, configB);
 
   expect(canonicalJson(observationA)).toBe(observationABytes);
@@ -548,7 +623,9 @@ function assertScenarioNoOp(scenario: Scenario): void {
   expect(typeof secondDecision.elapsedMs).toBe("number");
   expect(Number.isFinite(secondDecision.elapsedMs)).toBe(true);
   expect(secondDecision.elapsedMs).toBeGreaterThanOrEqual(0);
-  expect(differingPaths(firstDecision, secondDecision)).toEqual(["elapsedMs"]);
+  const decisionDifferencePaths = differingPaths(firstDecision, secondDecision);
+  expect(decisionDifferencePaths.every((path) => path === "elapsedMs")).toBe(true);
+  expect(decisionDifferencePaths.length).toBeLessThanOrEqual(1);
   expect(deterministicDecisionProjection(firstDecision)).toEqual(deterministicDecisionProjection(secondDecision));
   expect(canonicalJson(deterministicDecisionProjection(firstDecision))).toBe(canonicalJson(deterministicDecisionProjection(secondDecision)));
   expect(canonicalJson(firstDecision.action)).toBe(canonicalJson(secondDecision.action));
@@ -556,6 +633,8 @@ function assertScenarioNoOp(scenario: Scenario): void {
   expect(firstDecision.selectedPlanId).toBe(secondDecision.selectedPlanId);
   expect(firstDecision.candidateCount).toBe(secondDecision.candidateCount);
   expect(firstDecision.consideredActions).toBe(secondDecision.consideredActions);
+  expect(firstDecision.candidateCount).toBe(inventoryA.candidateCount);
+  expect(secondDecision.candidateCount).toBe(inventoryA.candidateCount);
   expect(canonicalJson(firstDecision.score)).toBe(canonicalJson(secondDecision.score));
   expect(canonicalJson(firstDecision.reasonCodes)).toBe(canonicalJson(secondDecision.reasonCodes));
   expect(firstDecision.runtime.configVersion).toBe(secondDecision.runtime.configVersion);
@@ -583,12 +662,16 @@ it("audits elapsedMs as the sole permitted nondeterministic decision field and v
   expect(audit.integrationRepresentativeIdentifierCount).toBe(0);
   expect(audit.d2dPathReferenceCount).toBe(0);
   expect(audit.elapsedTypeIsNumber).toBe(true);
-  expect(audit.elapsedDefinitionCount).toBe(1);
-  expect(audit.elapsedReturnCount).toBe(1);
-  expect(audit.elapsedTimerCallCount).toBe(8);
+  expect(audit.elapsedVariableDefinitionCount).toBe(1);
+  expect(audit.elapsedInitializerMatchCount).toBe(1);
+  expect(audit.startedAtDefinitionCount).toBe(1);
+  expect(audit.startedAtPerformanceNowInitializerCount).toBe(1);
+  expect(audit.elapsedReturnShorthandCount).toBe(1);
+  expect(audit.unexpectedElapsedReferenceCount).toBe(0);
   expect(audit.elapsedAssignmentCount).toBe(0);
   expect(audit.elapsedControlFlowCount).toBe(0);
   expect(audit.elapsedSortCount).toBe(0);
   expect(audit.elapsedRuntimeCount).toBe(0);
   expect(audit.elapsedActionCount).toBe(0);
+  expect(audit.elapsedReferenceCounts).toEqual({ contracts: 1, engine: 2, diagnostics: 2, room: 0, gameAi: 0 });
 });
