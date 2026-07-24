@@ -1,6 +1,6 @@
-import type { Card, GameRank } from "../../engine/cards";
-import type { CardGroup } from "../../engine/groups";
-import type { ActionCandidate } from "../contracts";
+import { createDeck, RANKS, SUITS, type Card, type GameRank } from "../../engine/cards";
+import type { CardGroup, GroupPurpose, GroupType } from "../../engine/groups";
+import type { ActionCandidate, AiAction } from "../contracts";
 import { canBeatPlay, classifyPlay } from "../../game/playRules";
 
 export type RepresentativeActionReducerInput = Readonly<{
@@ -41,6 +41,49 @@ export type RepresentativeActionReducerResult = Readonly<{
   fallback: "use-original-candidates";
 }>;
 
+type UnknownRecord = Record<string, unknown>;
+
+type ValidatedReducerInput = {
+  actions: readonly ActionCandidate[];
+  hand?: readonly Card[];
+  gameRank: GameRank;
+  lastPlay?: unknown;
+  hardCap: number;
+};
+
+type CandidateValidation = {
+  failureReason?: RepresentativeFailureReason;
+  canonicalGroup?: CardGroup;
+};
+
+const VALID_GROUP_TYPES: readonly GroupType[] = [
+  "single",
+  "pair",
+  "triple",
+  "full-house",
+  "straight",
+  "consecutive-pairs",
+  "plate",
+  "bomb",
+  "straight-flush",
+  "joker-bomb",
+];
+
+const VALID_GROUP_PURPOSES: readonly GroupPurpose[] = [
+  "attack",
+  "engine",
+  "recovery",
+  "tail-control",
+  "risk",
+  "filler",
+];
+
+const VALID_CARDS_BY_ID = new Map(createDeck().map((card) => [card.id, card]));
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function compareCodeUnits(left: string, right: string): number {
   if (left === right) {
     return 0;
@@ -51,6 +94,129 @@ function compareCodeUnits(left: string, right: string): number {
 
 function sortedIds(ids: readonly string[]): string[] {
   return [...ids].sort(compareCodeUnits);
+}
+
+function isValidGameRank(value: unknown): value is GameRank {
+  return typeof value === "string" && RANKS.includes(value as GameRank);
+}
+
+function isValidCard(value: unknown): value is Card {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id.length === 0) {
+    return false;
+  }
+
+  const canonical = VALID_CARDS_BY_ID.get(value.id);
+  if (canonical === undefined || value.kind !== canonical.kind || value.rank !== canonical.rank || value.copy !== canonical.copy) {
+    return false;
+  }
+
+  return value.kind !== "suited" || value.suit === canonical.suit;
+}
+
+function validateCardArray(value: unknown): "invalid" | "duplicate" | "valid" {
+  if (!Array.isArray(value)) {
+    return "invalid";
+  }
+
+  const payloadById = new Map<string, string>();
+  let duplicate = false;
+
+  for (const card of value) {
+    if (!isValidCard(card)) {
+      return "invalid";
+    }
+
+    const payload = JSON.stringify([card.id, card.kind, card.rank, card.kind === "suited" ? card.suit : null, card.copy]);
+    const previous = payloadById.get(card.id);
+    if (previous !== undefined && previous !== payload) {
+      return "invalid";
+    }
+    if (previous !== undefined) {
+      duplicate = true;
+    }
+    payloadById.set(card.id, payload);
+  }
+
+  return duplicate ? "duplicate" : "valid";
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isValidGroupType(value: unknown): value is GroupType {
+  return typeof value === "string" && VALID_GROUP_TYPES.includes(value as GroupType);
+}
+
+function isValidGroupPurpose(value: unknown): value is GroupPurpose {
+  return typeof value === "string" && VALID_GROUP_PURPOSES.includes(value as GroupPurpose);
+}
+
+function isGroupShape(value: unknown): value is CardGroup {
+  if (!isRecord(value)
+    || typeof value.id !== "string"
+    || value.id.length === 0
+    || !isValidGroupType(value.type)
+    || typeof value.label !== "string"
+    || !isValidGroupPurpose(value.purpose)
+    || !Number.isFinite(value.strength)) {
+    return false;
+  }
+
+  return validateCardArray(value.cards) !== "invalid" && validateCardArray(value.wildcards) !== "invalid";
+}
+
+function isValidPolicyVerdict(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.allowed === "boolean"
+    && typeof value.hardViolation === "boolean"
+    && isStringArray(value.reasonCodes);
+}
+
+function isValidAction(value: unknown): value is AiAction {
+  if (!isRecord(value) || (value.type !== "pass" && value.type !== "play")) {
+    return false;
+  }
+
+  return value.type === "pass" || isGroupShape(value.group);
+}
+
+function isValidCandidateShape(value: unknown): value is ActionCandidate {
+  return isRecord(value)
+    && isValidAction(value.action)
+    && (value.source === "PLAN" || value.source === "HAND_ANALYSIS" || value.source === "FALLBACK")
+    && typeof value.stableKey === "string"
+    && isValidPolicyVerdict(value.policyVerdict)
+    && isStringArray(value.alignedPlanIds)
+    && isStringArray(value.reasonCodes);
+}
+
+function sameIds(left: readonly string[], right: readonly string[]): boolean {
+  const leftIds = sortedIds(left);
+  const rightIds = sortedIds(right);
+  return leftIds.length === rightIds.length && leftIds.every((id, index) => id === rightIds[index]);
+}
+
+function canonicalGroup(group: unknown, gameRank: GameRank, requireMetadataMatch = true): CardGroup | undefined {
+  if (!isGroupShape(group)) {
+    return undefined;
+  }
+
+  const classified = classifyPlay(group.cards, gameRank);
+  if (classified === undefined
+    || !sameIds(group.wildcards.map((card) => card.id), classified.wildcards.map((card) => card.id))
+    || (requireMetadataMatch && (
+      group.id !== classified.id
+      || group.type !== classified.type
+      || group.label !== classified.label
+      || group.purpose !== classified.purpose
+      || group.strength !== classified.strength
+      || !sameIds(group.cards.map((card) => card.id), classified.cards.map((card) => card.id))
+    ))) {
+    return undefined;
+  }
+
+  return classified;
 }
 
 function freezeResult(
@@ -94,28 +260,14 @@ function failedResult(
   );
 }
 
-function exactPayloadKey(candidate: ActionCandidate): string {
-  if (candidate.action.type === "pass") {
-    return JSON.stringify([
-      "pass",
-      null,
-      null,
-      [],
-      [],
-      candidate.source,
-      [candidate.policyVerdict.allowed, candidate.policyVerdict.hardViolation, [...candidate.policyVerdict.reasonCodes]],
-      [...candidate.alignedPlanIds],
-      candidate.stableKey,
-      [...candidate.reasonCodes],
-    ]);
-  }
-
+function exactPayloadKey(candidate: ActionCandidate, canonicalCandidateGroup?: CardGroup): string {
+  const group = candidate.action.type === "play" ? canonicalCandidateGroup ?? candidate.action.group : undefined;
   return JSON.stringify([
-    "play",
-    candidate.action.group.type,
-    candidate.action.group.id,
-    sortedIds(candidate.action.group.cards.map((card) => card.id)),
-    sortedIds(candidate.action.group.wildcards.map((card) => card.id)),
+    candidate.action.type,
+    group?.type ?? null,
+    group?.id ?? null,
+    group === undefined ? [] : sortedIds(group.cards.map((card) => card.id)),
+    group === undefined ? [] : sortedIds(group.wildcards.map((card) => card.id)),
     candidate.source,
     [candidate.policyVerdict.allowed, candidate.policyVerdict.hardViolation, [...candidate.policyVerdict.reasonCodes]],
     [...candidate.alignedPlanIds],
@@ -124,94 +276,104 @@ function exactPayloadKey(candidate: ActionCandidate): string {
   ]);
 }
 
-function sameIds(left: readonly string[], right: readonly string[]): boolean {
-  const leftIds = sortedIds(left);
-  const rightIds = sortedIds(right);
-  return leftIds.length === rightIds.length && leftIds.every((id, index) => id === rightIds[index]);
-}
+function validateCandidate(candidate: ActionCandidate, input: ValidatedReducerInput): CandidateValidation {
+  if (candidate.action.type === "pass") {
+    if (candidate.stableKey !== "pass") {
+      return { failureReason: "stable-key-mismatch" };
+    }
+  } else if (candidate.stableKey !== candidate.action.group.id) {
+    return { failureReason: "stable-key-mismatch" };
+  }
 
-function validateCandidate(
-  candidate: ActionCandidate,
-  input: RepresentativeActionReducerInput,
-): RepresentativeFailureReason | undefined {
   if (candidate.policyVerdict.allowed !== true || candidate.policyVerdict.hardViolation !== false) {
-    return "policy-inconsistency";
+    return { failureReason: "policy-inconsistency" };
+  }
+
+  const canonicalLastPlay = input.lastPlay === undefined ? undefined : canonicalGroup(input.lastPlay, input.gameRank, false);
+  if (input.lastPlay !== undefined && canonicalLastPlay === undefined) {
+    return { failureReason: "legality-inconsistency" };
   }
 
   if (candidate.action.type === "pass") {
-    if (candidate.stableKey !== "pass") {
-      return "stable-key-mismatch";
+    if (canonicalLastPlay === undefined) {
+      return { failureReason: "legality-inconsistency" };
     }
-
-    if (input.lastPlay === undefined) {
-      return "legality-inconsistency";
-    }
-
-    return undefined;
+    return {};
   }
 
-  if (candidate.stableKey !== candidate.action.group.id) {
-    return "stable-key-mismatch";
-  }
-
-  const classified = classifyPlay(candidate.action.group.cards, input.gameRank);
-  if (classified === undefined
-    || classified.type !== candidate.action.group.type
-    || classified.id !== candidate.action.group.id
-    || !sameIds(classified.cards.map((card) => card.id), candidate.action.group.cards.map((card) => card.id))
-    || !sameIds(classified.wildcards.map((card) => card.id), candidate.action.group.wildcards.map((card) => card.id))) {
-    return "legality-inconsistency";
-  }
-
-  if (!canBeatPlay(candidate.action.group, input.lastPlay, input.gameRank)) {
-    return "legality-inconsistency";
+  const canonicalCandidate = canonicalGroup(candidate.action.group, input.gameRank);
+  if (canonicalCandidate === undefined || !canBeatPlay(canonicalCandidate, canonicalLastPlay, input.gameRank)) {
+    return { failureReason: "legality-inconsistency" };
   }
 
   if (input.hand !== undefined) {
     const handIds = new Set(input.hand.map((card) => card.id));
-    if (!candidate.action.group.cards.every((card) => handIds.has(card.id))) {
-      return "hand-ownership-mismatch";
+    if (!canonicalCandidate.cards.every((card) => handIds.has(card.id))) {
+      return { failureReason: "hand-ownership-mismatch" };
     }
   }
 
-  return undefined;
+  return { canonicalGroup: canonicalCandidate };
+}
+
+function validHand(hand: unknown): hand is readonly Card[] {
+  if (!Array.isArray(hand)) {
+    return false;
+  }
+
+  const validation = validateCardArray(hand);
+  return validation === "valid";
 }
 
 export function reduceRepresentativeActions(
   input: RepresentativeActionReducerInput,
 ): RepresentativeActionReducerResult {
-  if (!Array.isArray(input.actions)) {
-    return failedResult("invalid-input", 0);
+  const rawInput: unknown = input;
+  if (!isRecord(rawInput) || !Array.isArray(rawInput.actions) || !isValidGameRank(rawInput.gameRank)) {
+    return failedResult("invalid-input", isRecord(rawInput) && Array.isArray(rawInput.actions) ? rawInput.actions.length : 0);
   }
 
-  if (!Number.isFinite(input.hardCap) || !Number.isInteger(input.hardCap) || input.hardCap < 1) {
-    return failedResult("invalid-hard-cap", input.actions.length);
+  const actions = rawInput.actions;
+  const inputCount = actions.length;
+  if (typeof rawInput.hardCap !== "number"
+    || !Number.isFinite(rawInput.hardCap)
+    || !Number.isInteger(rawInput.hardCap)
+    || rawInput.hardCap < 1) {
+    return failedResult("invalid-hard-cap", inputCount);
   }
 
-  if (input.hand !== undefined && !Array.isArray(input.hand)) {
-    return failedResult("invalid-hand", input.actions.length);
+  if (rawInput.hand !== undefined && !validHand(rawInput.hand)) {
+    return failedResult("invalid-hand", inputCount);
   }
 
+  const validatedInput: ValidatedReducerInput = {
+    actions: actions as ActionCandidate[],
+    hand: rawInput.hand as readonly Card[] | undefined,
+    gameRank: rawInput.gameRank,
+    lastPlay: rawInput.lastPlay,
+    hardCap: rawInput.hardCap,
+  };
   const stableKeys = new Map<string, string>();
   const representativesByPayload = new Map<string, number>();
   const representativeInputIndices: number[] = [];
   const representativeByInputIndex: Record<number, number> = {};
 
-  for (let index = 0; index < input.actions.length; index += 1) {
-    const candidate = input.actions[index];
-    if (candidate === undefined) {
-      return failedResult("invalid-candidate", input.actions.length, index);
+  for (let index = 0; index < actions.length; index += 1) {
+    const rawCandidate = actions[index];
+    if (!isValidCandidateShape(rawCandidate)) {
+      return failedResult("invalid-candidate", inputCount, index);
     }
 
-    const validationFailure = validateCandidate(candidate, input);
-    if (validationFailure !== undefined) {
-      return failedResult(validationFailure, input.actions.length, index);
+    const candidate = rawCandidate;
+    const validation = validateCandidate(candidate, validatedInput);
+    if (validation.failureReason !== undefined) {
+      return failedResult(validation.failureReason, inputCount, index);
     }
 
-    const payloadKey = exactPayloadKey(candidate);
+    const payloadKey = exactPayloadKey(candidate, validation.canonicalGroup);
     const previousPayloadKey = stableKeys.get(candidate.stableKey);
     if (previousPayloadKey !== undefined && previousPayloadKey !== payloadKey) {
-      return failedResult("stable-key-collision", input.actions.length, index);
+      return failedResult("stable-key-collision", inputCount, index);
     }
     stableKeys.set(candidate.stableKey, payloadKey);
 
@@ -225,11 +387,10 @@ export function reduceRepresentativeActions(
     }
   }
 
-  const inputCount = input.actions.length;
   const equivalenceClassCount = representativeInputIndices.length;
   const duplicateCount = inputCount - equivalenceClassCount;
 
-  if (equivalenceClassCount > input.hardCap) {
+  if (equivalenceClassCount > validatedInput.hardCap) {
     return failedResult("cap-unsatisfied", inputCount, inputCount, equivalenceClassCount, duplicateCount);
   }
 
@@ -242,7 +403,7 @@ export function reduceRepresentativeActions(
   };
 
   return freezeResult(
-    inputCount > input.hardCap ? "reduced" : "unchanged",
+    inputCount > validatedInput.hardCap ? "reduced" : "unchanged",
     representativeInputIndices,
     representativeByInputIndex,
     diagnostics,
