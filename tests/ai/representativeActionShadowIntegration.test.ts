@@ -51,12 +51,23 @@ it("keeps disabled mode at zero observer/reducer counts", () => {
 
   expect(decision.candidateCount).toBeGreaterThan(0);
   expect(diagnostics.representativeActionShadow).toMatchObject({ observerInvocationCount: 0, reducerAttemptCount: 0, reducerResultCount: 0 });
+  expect(diagnostics.representativeActionShadow.records).toHaveLength(0);
 });
 
-it("RED: observes once after real candidate generation", () => {
+it("observes once after real candidate generation", () => {
   const diagnostics = createAiPlanningDiagnostics();
   const decision = decideAiAction(observation(), emptyRuntime(), configFor("shadow", diagnostics));
 
   expect(decision.candidateCount).toBeGreaterThan(0);
   expect(diagnostics.representativeActionShadow).toMatchObject({ observerInvocationCount: 1, reducerAttemptCount: 1, reducerResultCount: 1 });
+  const [record] = diagnostics.representativeActionShadow.records;
+  expect(diagnostics.representativeActionShadow.records).toHaveLength(1);
+  expect(record).toMatchObject({
+    schemaVersion: "d2e-shadow-v1",
+    status: "observed",
+    reducerStatus: "unchanged",
+    hardCap: 256,
+    inputCandidateCount: decision.candidateCount,
+  });
+  expect(Object.isFrozen(record)).toBe(true);
 });

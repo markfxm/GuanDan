@@ -212,6 +212,55 @@ export function createAiPlanningDiagnostics(): AiPlanningDiagnostics {
   };
 }
 
+export function recordRepresentativeActionShadowInvocation(
+  diagnostics: AiPlanningDiagnostics | undefined,
+): void {
+  try {
+    if (diagnostics !== undefined) {
+      diagnostics.representativeActionShadow.observerInvocationCount += 1;
+    }
+  } catch {
+    // Private diagnostics are fail-open.
+  }
+}
+
+export function recordRepresentativeActionShadowReducerAttempt(
+  diagnostics: AiPlanningDiagnostics | undefined,
+): void {
+  try {
+    if (diagnostics !== undefined) {
+      diagnostics.representativeActionShadow.reducerAttemptCount += 1;
+    }
+  } catch {
+    // Private diagnostics are fail-open.
+  }
+}
+
+export function recordRepresentativeActionShadowReducerResult(
+  diagnostics: AiPlanningDiagnostics | undefined,
+): void {
+  try {
+    if (diagnostics !== undefined) {
+      diagnostics.representativeActionShadow.reducerResultCount += 1;
+    }
+  } catch {
+    // Private diagnostics are fail-open.
+  }
+}
+
+export function recordRepresentativeActionShadowRecord(
+  diagnostics: AiPlanningDiagnostics | undefined,
+  record: RepresentativeActionShadowDiagnostic,
+): void {
+  try {
+    if (diagnostics !== undefined) {
+      diagnostics.representativeActionShadow.records.push(Object.freeze({ ...record }));
+    }
+  } catch {
+    // Private diagnostics are fail-open.
+  }
+}
+
 export function recordPath(diagnostics: AiPlanningDiagnostics | undefined, reason: string): void {
   if (diagnostics !== undefined) diagnostics.pathReasons[reason] = (diagnostics.pathReasons[reason] ?? 0) + 1;
 }

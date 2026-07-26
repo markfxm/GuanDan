@@ -38,6 +38,23 @@ it("keeps action, runtime, candidate count and score bytes locked across disable
   expect(canonicalJson(shadow.decision.action)).toBe(canonicalJson(disabled.decision.action));
   expect(canonicalJson(shadow.decision.runtime)).toBe(canonicalJson(disabled.decision.runtime));
   expect(shadow.decision.candidateCount).toBe(disabled.decision.candidateCount);
+  expect(shadow.decision.consideredActions).toBe(disabled.decision.consideredActions);
   expect(canonicalJson(shadow.decision.score)).toBe(canonicalJson(disabled.decision.score));
+  expect(canonicalJson(shadow.decision.reasonCodes)).toBe(canonicalJson(disabled.decision.reasonCodes));
   expect(shadow.diagnostics.representativeActionShadow).toMatchObject({ observerInvocationCount: 1, reducerAttemptCount: 1, reducerResultCount: 1 });
+  const [record] = shadow.diagnostics.representativeActionShadow.records;
+  expect(record).toBeDefined();
+  expect(Object.keys(record ?? {})).not.toEqual(expect.arrayContaining([
+    "representativeInputIndices",
+    "representativeByInputIndex",
+    "stableKey",
+    "action",
+    "candidate",
+    "group",
+    "cards",
+    "hand",
+    "lastPlay",
+    "runtime",
+    "Room",
+  ]));
 });

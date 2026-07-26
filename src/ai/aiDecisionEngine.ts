@@ -11,6 +11,8 @@ import type { PlanValidation, SelectorConstants, SelectorScore } from "./plannin
 import { evaluateActionCandidate } from "./tactics/actionEvaluator";
 import { generateActionCandidates, type ActionGenerationInput } from "./tactics/actionGenerator";
 import { evaluateAiRole } from "./tactics/roleEvaluator";
+import { DEFAULT_REPRESENTATIVE_ACTION_SHADOW } from "./config";
+import { observeRepresentativeActions } from "./tactics/representativeActionShadowObserver";
 import { measureGroupDetection, recordD1PlanSelection, recordTiming } from "./diagnostics/aiPlanningDiagnostics";
 
 const analysisCache = new HandAnalysisCache(64);
@@ -62,6 +64,16 @@ export function decideAiAction(observation: AiObservation, runtime: AiRuntimeSta
   const candidates = generateActionCandidates(generationInput);
   if (diagnostics !== undefined) diagnostics.candidateCountSamples.push(candidates.length);
   recordTiming(diagnostics, "actionGeneration", generationStartedAt);
+  const shadowConfig = config.representativeActionShadow ?? DEFAULT_REPRESENTATIVE_ACTION_SHADOW;
+  observeRepresentativeActions({
+    mode: shadowConfig.mode,
+    candidates,
+    ownHand: observation.hand,
+    gameRank: observation.gameRank,
+    lastPlay: observation.lastPlay,
+    hardCap: shadowConfig.hardCap,
+    diagnostics,
+  });
   const evaluationStartedAt = diagnostics === undefined ? 0 : performance.now();
   const scored = candidates.map((candidate) => ({ candidate, score: evaluateActionCandidate(candidate, generationInput) }));
   recordTiming(diagnostics, "actionEvaluation", evaluationStartedAt);
