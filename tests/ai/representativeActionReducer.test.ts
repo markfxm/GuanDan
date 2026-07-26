@@ -46,6 +46,14 @@ function playCandidate(
   };
 }
 
+function requirePlayGroup(candidate: ActionCandidate): CardGroup {
+  const action: AiAction = candidate.action;
+  if (action.type !== "play") {
+    throw new Error("Expected play action candidate");
+  }
+  return action.group;
+}
+
 function playCandidateFromCards(cardIds: string[]): ActionCandidate {
   const cards = cardIds.map((id) => card(id));
   const group = classifyPlay(cards, gameRank);
@@ -231,9 +239,10 @@ it("returns policy-inconsistency after a valid stable key", () => {
 
 it("rejects a candidate whose semantic strength was tampered before follow comparison", () => {
   const candidate = playCandidate("S6-1");
+  const group = requirePlayGroup(candidate);
   candidate.action = {
     type: "play",
-    group: { ...candidate.action.group, strength: 9999 },
+    group: { ...group, strength: 9999 },
   };
   const result = reduceRepresentativeActions({
     actions: [candidate],
@@ -300,10 +309,14 @@ it("returns legality-inconsistency for a malformed lastPlay without throwing", (
 
 it.each([
   ["card ID is not a string", (candidate: ActionCandidate) => {
-    candidate.action = { type: "play", group: { ...candidate.action.group, cards: [{ ...candidate.action.group.cards[0]!, id: 7 }] as Card[] } };
+    const group = requirePlayGroup(candidate);
+    const malformedCard = { ...group.cards[0]! };
+    Object.assign(malformedCard, { id: 7 });
+    candidate.action = { type: "play", group: { ...group, cards: [malformedCard] } };
   }],
   ["card ID is empty", (candidate: ActionCandidate) => {
-    candidate.action = { type: "play", group: { ...candidate.action.group, cards: [{ ...candidate.action.group.cards[0]!, id: "" }] as Card[] } };
+    const group = requirePlayGroup(candidate);
+    candidate.action = { type: "play", group: { ...group, cards: [{ ...group.cards[0]!, id: "" }] as Card[] } };
   }],
 ] as const)("returns invalid-candidate for %s", (_name, mutate) => {
   const candidate = playCandidate("S3-1");
@@ -315,10 +328,12 @@ it.each([
 
 it("returns invalid-candidate for conflicting card payloads sharing one physical ID", () => {
   const candidate = playCandidate("S3-1");
-  const conflictingCard = { ...candidate.action.group.cards[0]!, rank: "4" as const };
+  const group = requirePlayGroup(candidate);
+  const conflictingCard = { ...group.cards[0]! };
+  Object.assign(conflictingCard, { rank: "4" });
   candidate.action = {
     type: "play",
-    group: { ...candidate.action.group, cards: [candidate.action.group.cards[0]!, conflictingCard] },
+    group: { ...group, cards: [group.cards[0]!, conflictingCard] },
   };
   const result = reduceRepresentativeActions(reducerInput([candidate], 1));
 
@@ -327,10 +342,11 @@ it("returns invalid-candidate for conflicting card payloads sharing one physical
 
 it("returns legality-inconsistency for duplicate physical IDs in a group", () => {
   const candidate = playCandidate("S3-1");
-  const duplicateCard = { ...candidate.action.group.cards[0]! };
+  const group = requirePlayGroup(candidate);
+  const duplicateCard = { ...group.cards[0]! };
   candidate.action = {
     type: "play",
-    group: { ...candidate.action.group, cards: [duplicateCard, { ...duplicateCard }] },
+    group: { ...group, cards: [duplicateCard, { ...duplicateCard }] },
   };
   const result = reduceRepresentativeActions(reducerInput([candidate], 1));
 
@@ -339,10 +355,11 @@ it("returns legality-inconsistency for duplicate physical IDs in a group", () =>
 
 it("returns legality-inconsistency for duplicate physical IDs in wildcards", () => {
   const candidate = playCandidate("H10-1");
+  const group = requirePlayGroup(candidate);
   const wildcard = candidate.action.type === "play" ? candidate.action.group.wildcards[0]! : undefined;
   candidate.action = {
     type: "play",
-    group: { ...candidate.action.group, wildcards: [{ ...wildcard! }, { ...wildcard! }] },
+    group: { ...group, wildcards: [{ ...wildcard! }, { ...wildcard! }] },
   };
   const result = reduceRepresentativeActions(reducerInput([candidate], 1));
 
@@ -366,9 +383,10 @@ it("returns legality-inconsistency for duplicate physical IDs in lastPlay cards"
 
 it("returns legality-inconsistency when wildcards are not part of the group", () => {
   const candidate = playCandidate("S3-1");
+  const group = requirePlayGroup(candidate);
   candidate.action = {
     type: "play",
-    group: { ...candidate.action.group, wildcards: [card("H10-1")] },
+    group: { ...group, wildcards: [card("H10-1")] },
   };
   const result = reduceRepresentativeActions(reducerInput([candidate], 1));
 
@@ -377,9 +395,10 @@ it("returns legality-inconsistency when wildcards are not part of the group", ()
 
 it("returns legality-inconsistency when wildcard metadata disagrees with classifyPlay", () => {
   const candidate = playCandidate("H10-1");
+  const group = requirePlayGroup(candidate);
   candidate.action = {
     type: "play",
-    group: { ...candidate.action.group, wildcards: [] },
+    group: { ...group, wildcards: [] },
   };
   const result = reduceRepresentativeActions(reducerInput([candidate], 1));
 

@@ -110,7 +110,11 @@ function isValidCard(value: unknown): value is Card {
     return false;
   }
 
-  return value.kind !== "suited" || value.suit === canonical.suit;
+  if (value.kind === "suited") {
+    return canonical.kind === "suited" && value.suit === canonical.suit;
+  }
+
+  return value.kind === "joker" && canonical.kind === "joker";
 }
 
 function validateCardArray(value: unknown): "invalid" | "duplicate" | "valid" {

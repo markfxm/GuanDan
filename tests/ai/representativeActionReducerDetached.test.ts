@@ -414,17 +414,26 @@ function productionBoundaryAudit(): {
     visitIntegration(source);
   }
 
-  const isPerformanceNowCall = (node: ts.Node | undefined): boolean => ts.isCallExpression(node)
-    && ts.isPropertyAccessExpression(node.expression)
-    && ts.isIdentifier(node.expression.expression)
-    && node.expression.expression.text === "performance"
-    && node.expression.name.text === "now";
+  const isPerformanceNowCall = (node: ts.Node | undefined): boolean => {
+    if (node === undefined) {
+      return false;
+    }
+
+    return ts.isCallExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+      && ts.isIdentifier(node.expression.expression)
+      && node.expression.expression.text === "performance"
+      && node.expression.name.text === "now";
+  };
 
   const visitElapsed = (node: ts.Node): void => {
     if (ts.isIdentifier(node) && node.text === "elapsedMs") {
       if (ts.isVariableDeclaration(node.parent) && node.parent.name === node) {
         elapsedVariableDefinitionCount += 1;
         const initializer = node.parent.initializer;
+        if (initializer === undefined) {
+          throw new Error("Expected audited initializer");
+        }
         if (ts.isBinaryExpression(initializer)
           && initializer.operatorToken.kind === ts.SyntaxKind.MinusToken
           && isPerformanceNowCall(initializer.left)
