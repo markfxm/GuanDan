@@ -1,10 +1,15 @@
-import type { AiPerformanceConfig } from "./contracts";
+import type { AiPerformanceConfig, RepresentativeActionShadowConfig } from "./contracts";
 
 export const DEFAULT_AI_PERFORMANCE_CONFIG: AiPerformanceConfig = {
   analysisCacheSize: 64,
   planning: { maxPlans: 5, beamWidth: 1, timeBudgetMs: 0 },
   version: "ai-core-v1",
 };
+
+export const DEFAULT_REPRESENTATIVE_ACTION_SHADOW: RepresentativeActionShadowConfig = Object.freeze({
+  mode: "shadow",
+  hardCap: 256,
+});
 
 export const ACTION_SCORE_WEIGHTS = {
   PASS_WHEN_PARTNER_WINNING: 70,

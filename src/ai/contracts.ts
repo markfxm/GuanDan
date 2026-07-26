@@ -91,6 +91,15 @@ export type AiPerformanceConfig = {
   version: string;
 };
 
+export type RepresentativeActionShadowMode =
+  | "disabled"
+  | "shadow";
+
+export type RepresentativeActionShadowConfig = Readonly<{
+  mode: RepresentativeActionShadowMode;
+  hardCap: number;
+}>;
+
 export type AiRuntimeState = {
   handKey?: string;
   activePlanId?: string;
@@ -114,4 +123,8 @@ export type AiDecision = {
   reasonCodes: BreakReason[];
 };
 
-export type AiDecisionConfig = AiPerformanceConfig & { turn: number; diagnostics?: AiPlanningDiagnostics };
+export type AiDecisionConfig = AiPerformanceConfig & {
+  turn: number;
+  diagnostics?: AiPlanningDiagnostics;
+  representativeActionShadow?: RepresentativeActionShadowConfig;
+};

@@ -1,4 +1,27 @@
 import { getDetectGroupsCallCount } from "../../engine/groups";
+import type { RepresentativeFailureReason } from "../tactics/representativeActionReducer";
+
+export type RepresentativeActionShadowDiagnostic = Readonly<{
+  schemaVersion: "d2e-shadow-v1";
+  status: "disabled" | "observed" | "failed";
+  reducerStatus?: "unchanged" | "reduced" | "failed";
+  failureReason?: RepresentativeFailureReason | "adapter-error";
+  fallback?: "use-original-candidates";
+  inputCandidateCount: number;
+  validatedCount?: number;
+  equivalenceClassCount?: number;
+  duplicateCount?: number;
+  capSatisfied?: boolean;
+  hardCap: number;
+}>;
+
+export type RepresentativeActionShadowDiagnostics = {
+  schemaVersion: "d2e-shadow-v1";
+  observerInvocationCount: number;
+  reducerAttemptCount: number;
+  reducerResultCount: number;
+  records: RepresentativeActionShadowDiagnostic[];
+};
 
 export type AiPlanningTiming = {
   handAnalysis: number;
@@ -150,6 +173,7 @@ export type AiPlanningDiagnostics = {
   pathReasons: Record<string, number>;
   d1PlanSelectionRecords: D1PlanSelectionRecord[];
   d1DiagnosticsError?: string;
+  representativeActionShadow: RepresentativeActionShadowDiagnostics;
 };
 
 const TIMING_KEYS: Array<keyof AiPlanningTiming> = [
@@ -178,6 +202,13 @@ export function createAiPlanningDiagnostics(): AiPlanningDiagnostics {
     timingMs: Object.fromEntries(TIMING_KEYS.map((key) => [key, 0])) as AiPlanningTiming,
     pathReasons: {},
     d1PlanSelectionRecords: [],
+    representativeActionShadow: {
+      schemaVersion: "d2e-shadow-v1",
+      observerInvocationCount: 0,
+      reducerAttemptCount: 0,
+      reducerResultCount: 0,
+      records: [],
+    },
   };
 }
 
