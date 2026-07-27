@@ -53,9 +53,12 @@ function decisionProjection(decision: AiDecision): unknown {
   return {
     action: decision.action,
     runtime: decision.runtime,
+    selectedPlan: decision.selectedPlan,
+    selectedPlanId: decision.selectedPlanId,
+    score: decision.score,
+    scoreBreakdown: decision.scoreBreakdown,
     candidateCount: decision.candidateCount,
     consideredActions: decision.consideredActions,
-    score: decision.score,
     reasonCodes: decision.reasonCodes,
   };
 }
@@ -208,6 +211,164 @@ async function runIsolatedShadowDecision(options: IsolatedShadowRunOptions = {})
     vi.resetModules();
   }
 }
+
+type CapturedEvaluatorCall = Readonly<{
+  candidate: ActionCandidate;
+  stableKey: string;
+  candidateBytes: string;
+  scoreBytes: string;
+}>;
+
+type CapturedDecisionRun = Readonly<{
+  mode: RepresentativeActionShadowMode;
+  decision: AiDecision;
+  diagnostics: AiPlanningDiagnostics;
+  generatedCandidates: ActionCandidate[];
+  generatedCandidateElements: readonly ActionCandidate[];
+  generatedStableKeys: readonly string[];
+  generatedCandidateBytesBefore: string;
+  generatedCandidateBytesAfter: string;
+  observedCandidates: readonly ActionCandidate[] | undefined;
+  evaluatorCalls: readonly CapturedEvaluatorCall[];
+}>;
+
+async function runCapturedDecision(mode: RepresentativeActionShadowMode): Promise<CapturedDecisionRun> {
+  const configModulePath = "../../src/ai/config";
+  const generatorModulePath = "../../src/ai/tactics/actionGenerator";
+  const evaluatorModulePath = "../../src/ai/tactics/actionEvaluator";
+  const observerModulePath = "../../src/ai/tactics/representativeActionShadowObserver";
+  let generatedCandidates: ActionCandidate[] | undefined;
+  let generatedCandidateElements: readonly ActionCandidate[] | undefined;
+  let generatedCandidateBytesBefore = "";
+  let observedCandidates: readonly ActionCandidate[] | undefined;
+  const evaluatorCalls: CapturedEvaluatorCall[] = [];
+
+  vi.resetModules();
+  vi.doMock(configModulePath, async () => {
+    const actual = await vi.importActual<typeof import("../../src/ai/config")>(configModulePath);
+    return {
+      ...actual,
+      DEFAULT_REPRESENTATIVE_ACTION_SHADOW: Object.freeze({ mode, hardCap: 256 }),
+    };
+  });
+  vi.doMock(generatorModulePath, async () => {
+    const actual = await vi.importActual<typeof import("../../src/ai/tactics/actionGenerator")>(generatorModulePath);
+    return {
+      ...actual,
+      generateActionCandidates: (input: Parameters<typeof actual.generateActionCandidates>[0]) => {
+        const result = actual.generateActionCandidates(input);
+        generatedCandidates = result;
+        generatedCandidateElements = [...result];
+        generatedCandidateBytesBefore = canonicalJson(result);
+        return result;
+      },
+    };
+  });
+  vi.doMock(evaluatorModulePath, async () => {
+    const actual = await vi.importActual<typeof import("../../src/ai/tactics/actionEvaluator")>(evaluatorModulePath);
+    return {
+      ...actual,
+      evaluateActionCandidate: (candidate: ActionCandidate, input: Parameters<typeof actual.evaluateActionCandidate>[1]) => {
+        const score = actual.evaluateActionCandidate(candidate, input);
+        evaluatorCalls.push({
+          candidate,
+          stableKey: candidate.stableKey,
+          candidateBytes: canonicalJson(candidate),
+          scoreBytes: canonicalJson(score),
+        });
+        return score;
+      },
+    };
+  });
+  vi.doMock(observerModulePath, async () => {
+    const actual = await vi.importActual<typeof import("../../src/ai/tactics/representativeActionShadowObserver")>(observerModulePath);
+    return {
+      ...actual,
+      observeRepresentativeActions: (input: Parameters<typeof actual.observeRepresentativeActions>[0]) => {
+        observedCandidates = input.candidates;
+        return actual.observeRepresentativeActions(input);
+      },
+    };
+  });
+
+  try {
+    const { decideAiAction: isolatedDecideAiAction } = await import("../../src/ai/aiDecisionEngine");
+    const diagnosticsModule = await import("../../src/ai/diagnostics/aiPlanningDiagnostics");
+    const diagnostics = diagnosticsModule.createAiPlanningDiagnostics();
+    const decision = isolatedDecideAiAction(observation(), emptyRuntime(), {
+      ...DEFAULT_AI_PERFORMANCE_CONFIG,
+      turn: 1,
+      diagnostics,
+    });
+    if (generatedCandidates === undefined || generatedCandidateElements === undefined) {
+      throw new Error("D2E_CAPTURE_GENERATOR_NOT_CALLED");
+    }
+    return {
+      mode,
+      decision,
+      diagnostics,
+      generatedCandidates,
+      generatedCandidateElements,
+      generatedStableKeys: generatedCandidates.map((candidate) => candidate.stableKey),
+      generatedCandidateBytesBefore,
+      generatedCandidateBytesAfter: canonicalJson(generatedCandidates),
+      observedCandidates,
+      evaluatorCalls: [...evaluatorCalls],
+    };
+  } finally {
+    vi.doUnmock(configModulePath);
+    vi.doUnmock(generatorModulePath);
+    vi.doUnmock(evaluatorModulePath);
+    vi.doUnmock(observerModulePath);
+    vi.resetModules();
+  }
+}
+
+function assertCapturedDecisionRun(run: CapturedDecisionRun): void {
+  expect(run.observedCandidates).toBe(run.generatedCandidates);
+  expect(run.generatedCandidateBytesAfter).toBe(run.generatedCandidateBytesBefore);
+  expect(run.evaluatorCalls).toHaveLength(run.generatedCandidates.length);
+  for (let index = 0; index < run.generatedCandidates.length; index += 1) {
+    expect(run.generatedCandidates[index]).toBe(run.generatedCandidateElements[index]);
+    expect(run.evaluatorCalls[index]?.candidate).toBe(run.generatedCandidates[index]);
+    expect(run.evaluatorCalls[index]?.stableKey).toBe(run.generatedStableKeys[index]);
+  }
+}
+
+it("characterizes independent disabled and shadow engine captures", async () => {
+  const disabled = await runCapturedDecision("disabled");
+  const shadow = await runCapturedDecision("shadow");
+
+  assertCapturedDecisionRun(disabled);
+  assertCapturedDecisionRun(shadow);
+  expect(disabled.generatedCandidates).not.toBe(shadow.generatedCandidates);
+  expect(disabled.generatedCandidateElements[0]).not.toBe(shadow.generatedCandidateElements[0]);
+  expect(canonicalJson(disabled.generatedCandidates)).toBe(canonicalJson(shadow.generatedCandidates));
+  expect(disabled.generatedStableKeys).toEqual(shadow.generatedStableKeys);
+  expect(disabled.evaluatorCalls.map((call) => call.candidateBytes)).toEqual(shadow.evaluatorCalls.map((call) => call.candidateBytes));
+  expect(disabled.evaluatorCalls.map((call) => call.scoreBytes)).toEqual(shadow.evaluatorCalls.map((call) => call.scoreBytes));
+  expect(canonicalJson(decisionProjection(disabled.decision))).toBe(canonicalJson(decisionProjection(shadow.decision)));
+
+  expect(disabled.diagnostics.representativeActionShadow).toMatchObject({ observerInvocationCount: 0, reducerAttemptCount: 0, reducerResultCount: 0 });
+  expect(disabled.diagnostics.representativeActionShadow.records).toHaveLength(0);
+  expect(shadow.diagnostics.representativeActionShadow).toMatchObject({ observerInvocationCount: 1, reducerAttemptCount: 1, reducerResultCount: 1 });
+  expect(shadow.diagnostics.representativeActionShadow.records).toHaveLength(1);
+  const [record] = shadow.diagnostics.representativeActionShadow.records;
+  expect(Object.isFrozen(record)).toBe(true);
+  expect(Object.keys(record ?? {})).not.toEqual(expect.arrayContaining([
+    "representativeInputIndices",
+    "representativeByInputIndex",
+    "stableKey",
+    "candidate",
+    "action",
+    "group",
+    "cards",
+    "hand",
+    "lastPlay",
+    "runtime",
+    "Room",
+  ]));
+});
 
 it("keeps disabled mode at zero observer/reducer counts", () => {
   const diagnostics = createAiPlanningDiagnostics();
