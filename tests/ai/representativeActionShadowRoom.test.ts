@@ -1,6 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import fixtureData from "./fixtures/d0KeepCurrentCases.json";
 import { buildPublicGameIdentity } from "../../src/game/publicEvent";
 import { createRoom, getPublicRoom, type PublicRoom, type RoomState } from "../../src/game/room";
 import { canonicalPublicLedgerHash } from "../../src/game/publicLedger";
@@ -169,10 +168,12 @@ async function runCapturedDecision(mode: RepresentativeActionShadowMode, options
     const { decideAiAction } = await import("../../src/ai/aiDecisionEngine");
     const { createAiPlanningDiagnostics } = await import("../../src/ai/diagnostics/aiPlanningDiagnostics");
     const diagnostics = createAiPlanningDiagnostics();
+    const baseConfig = options.config ?? (await import("../../src/ai/config")).DEFAULT_AI_PERFORMANCE_CONFIG;
     const decision = decideAiAction(options.observation ?? observation(), options.runtime ?? emptyRuntime(), {
-      ...(options.config ?? (await import("../../src/ai/config")).DEFAULT_AI_PERFORMANCE_CONFIG),
+      ...baseConfig,
       turn: options.config?.turn ?? 1,
       diagnostics,
+      representativeActionShadow: { mode, hardCap: 256 },
     });
     if (generatorCalls.length !== 1) throw new Error(`D2E_EXPECTED_ONE_GENERATOR_CALL_${generatorCalls.length}`);
     const [generatorCall] = generatorCalls;
@@ -343,7 +344,7 @@ function readD2cDecisionFixture(): {
   runtime: AiRuntimeState;
   config: AiDecisionConfig;
 } {
-  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), "tests/ai/fixtures/d0KeepCurrentCases.json"), "utf8")) as {
+  const fixture = fixtureData as {
     cases: Array<{ observation: AiObservation; runtimeInput: AiRuntimeState; config: AiDecisionConfig }>;
   };
   const firstCase = fixture.cases[0];
@@ -534,6 +535,18 @@ it("characterizes D2e engine and Room no-op across independent disabled and shad
   const d2cFixture = readD2cDecisionFixture();
   const d2cDisabledDecision = await runCapturedDecision("disabled", d2cFixture);
   const d2cShadowDecision = await runCapturedDecision("shadow", d2cFixture);
+  expect(d2cDisabledDecision.diagnostics.representativeActionShadow).toMatchObject({
+    observerInvocationCount: 0,
+    reducerAttemptCount: 0,
+    reducerResultCount: 0,
+  });
+  expect(d2cDisabledDecision.diagnostics.representativeActionShadow.records).toHaveLength(0);
+  expect(d2cShadowDecision.diagnostics.representativeActionShadow).toMatchObject({
+    observerInvocationCount: 1,
+    reducerAttemptCount: 1,
+    reducerResultCount: 1,
+  });
+  expect(d2cShadowDecision.diagnostics.representativeActionShadow.records).toHaveLength(1);
   const evidence = d2cEvidenceWith();
   for (const d2cMode of ["disabled", "shadow"] as const) {
     const disabledInput = d2cInputFromDecision(d2cDisabledDecision.decision, d2cMode, evidence);
