@@ -111,6 +111,7 @@ type IsolatedShadowRunOptions = Readonly<{
   invalidMode?: boolean;
   reducerMode?: "capture" | "throw";
   sinkMode?: "throw";
+  lastPlayId?: string;
 }>;
 
 async function runIsolatedShadowDecision(options: IsolatedShadowRunOptions = {}): Promise<IsolatedShadowRun> {
@@ -172,7 +173,7 @@ async function runIsolatedShadowDecision(options: IsolatedShadowRunOptions = {})
     const { decideAiAction: isolatedDecideAiAction } = await import("../../src/ai/aiDecisionEngine");
     const diagnosticsModule = await import("../../src/ai/diagnostics/aiPlanningDiagnostics");
     const diagnostics = diagnosticsModule.createAiPlanningDiagnostics();
-    const isolatedObservation = observation();
+    const isolatedObservation = observation(options.lastPlayId);
     const isolatedRuntime = emptyRuntime();
     const observationBytes = canonicalJson(isolatedObservation);
     const runtimeBytes = canonicalJson(isolatedRuntime);
@@ -315,6 +316,23 @@ it("keeps production objects separate from the frozen reducer input", async () =
   expectNoSharedObjectReferences(isolated.diagnostics, captured);
 });
 
+it("keeps a real follow lastPlay detached and decision-neutral", async () => {
+  const disabledDiagnostics = createAiPlanningDiagnostics();
+  const disabled = decideAiAction(observation("S7-1"), emptyRuntime(), configFor("disabled", disabledDiagnostics));
+  const isolated = await runIsolatedShadowDecision({ lastPlayId: "S7-1", reducerMode: "capture" });
+  const captured = isolated.capturedReducerInput;
+
+  expect(isolated.observation.lastPlay).toBeDefined();
+  expect(captured?.lastPlay).toBeDefined();
+  expect(canonicalJson(captured!.lastPlay)).toBe(canonicalJson(isolated.observation.lastPlay));
+  expectNoSharedObjectReferences(isolated.observation.lastPlay, captured!.lastPlay);
+  expectAllObjectNodesFrozen(captured!.lastPlay);
+  expect(canonicalJson(decisionProjection(isolated.decision))).toBe(canonicalJson(decisionProjection(disabled)));
+  expect(isolated.diagnostics.representativeActionShadow).toMatchObject({ observerInvocationCount: 1, reducerAttemptCount: 1, reducerResultCount: 1 });
+  expect(canonicalJson(isolated.observation)).toBe(isolated.observationBytes);
+  expect(canonicalJson(isolated.generatedCandidates)).toBe(isolated.generatedCandidateBytes);
+});
+
 it("does not escape when the detached builder reads a throwing candidate", () => {
   const diagnostics = createAiPlanningDiagnostics();
   const throwingCandidate = {
@@ -339,7 +357,7 @@ it("does not escape when the detached builder reads a throwing candidate", () =>
   expect(diagnostics.representativeActionShadow.records.at(-1)).toMatchObject({ failureReason: "adapter-error" });
 });
 
-it("RED: keeps formal decision flow alive when the diagnostics sink throws", async () => {
+it("keeps formal decision flow alive when the diagnostics sink throws", async () => {
   const disabledDiagnostics = createAiPlanningDiagnostics();
   const disabled = decideAiAction(observation(), emptyRuntime(), configFor("disabled", disabledDiagnostics));
   let thrown: unknown;
