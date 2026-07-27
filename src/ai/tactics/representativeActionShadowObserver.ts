@@ -156,12 +156,16 @@ function recordAdapterError(
   inputCandidateCount: number,
   hardCap: number,
 ): void {
-  recordRepresentativeActionShadowRecord(diagnostics, {
-    schemaVersion: "d2e-shadow-v1",
-    status: "failed",
-    failureReason: "adapter-error",
-    fallback: "use-original-candidates",
-    inputCandidateCount,
-    hardCap,
-  });
+  try {
+    recordRepresentativeActionShadowRecord(diagnostics, {
+      schemaVersion: "d2e-shadow-v1",
+      status: "failed",
+      failureReason: "adapter-error",
+      fallback: "use-original-candidates",
+      inputCandidateCount,
+      hardCap,
+    });
+  } catch {
+    // The fallback diagnostics sink cannot interrupt formal decision flow.
+  }
 }
