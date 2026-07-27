@@ -1,13 +1,15 @@
 import { expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { buildPublicGameIdentity } from "../../src/game/publicEvent";
 import { createRoom, getPublicRoom, type PublicRoom, type RoomState } from "../../src/game/room";
 import { canonicalPublicLedgerHash } from "../../src/game/publicLedger";
-import { deriveLightweightPublicEvidence } from "../../src/ai/belief/lightweightPublicEvidence";
 import { deriveD2cPlanPriorityQuota, type D2cPlanPolicyInput, type PlanPruningMode } from "../../src/ai/planning/beliefGuidedPlanPolicy";
 import { createDeck, type GameRank } from "../../src/engine/cards";
 import type {
   ActionCandidate,
   AiDecision,
+  AiDecisionConfig,
   AiObservation,
   AiRuntimeState,
   RepresentativeActionShadowMode,
@@ -77,9 +79,17 @@ type CapturedEvaluatorCall = Readonly<{
   scoreBytes: string;
 }>;
 
+type CapturedGeneratorCall = Readonly<{
+  candidates: ActionCandidate[];
+  elements: readonly ActionCandidate[];
+  stableKeys: readonly string[];
+  bytesBefore: string;
+}>;
+
 type CapturedDecisionRun = Readonly<{
   decision: AiDecision;
   diagnostics: AiPlanningDiagnostics;
+  generatorInvocationCount: number;
   generatedCandidates: ActionCandidate[];
   generatedCandidateElements: readonly ActionCandidate[];
   observedCandidates: readonly ActionCandidate[] | undefined;
@@ -89,15 +99,19 @@ type CapturedDecisionRun = Readonly<{
   evaluatorCalls: readonly CapturedEvaluatorCall[];
 }>;
 
-async function runCapturedDecision(mode: RepresentativeActionShadowMode): Promise<CapturedDecisionRun> {
+type CapturedDecisionOptions = Readonly<{
+  observation?: AiObservation;
+  runtime?: AiRuntimeState;
+  config?: AiDecisionConfig;
+}>;
+
+async function runCapturedDecision(mode: RepresentativeActionShadowMode, options: CapturedDecisionOptions = {}): Promise<CapturedDecisionRun> {
   const configModulePath = "../../src/ai/config";
   const generatorModulePath = "../../src/ai/tactics/actionGenerator";
   const evaluatorModulePath = "../../src/ai/tactics/actionEvaluator";
   const observerModulePath = "../../src/ai/tactics/representativeActionShadowObserver";
-  let generatedCandidates: ActionCandidate[] | undefined;
-  let generatedCandidateElements: readonly ActionCandidate[] | undefined;
   let observedCandidates: readonly ActionCandidate[] | undefined;
-  let generatedCandidateBytesBefore = "";
+  const generatorCalls: CapturedGeneratorCall[] = [];
   const evaluatorCalls: CapturedEvaluatorCall[] = [];
 
   vi.resetModules();
@@ -113,11 +127,14 @@ async function runCapturedDecision(mode: RepresentativeActionShadowMode): Promis
     return {
       ...actual,
       generateActionCandidates: (input: Parameters<typeof actual.generateActionCandidates>[0]) => {
-        const result = actual.generateActionCandidates(input);
-        generatedCandidates = result;
-        generatedCandidateElements = [...result];
-        generatedCandidateBytesBefore = canonicalJson(result);
-        return result;
+        const candidates = actual.generateActionCandidates(input);
+        generatorCalls.push({
+          candidates,
+          elements: [...candidates],
+          stableKeys: candidates.map((candidate) => candidate.stableKey),
+          bytesBefore: canonicalJson(candidates),
+        });
+        return candidates;
       },
     };
   });
@@ -152,21 +169,24 @@ async function runCapturedDecision(mode: RepresentativeActionShadowMode): Promis
     const { decideAiAction } = await import("../../src/ai/aiDecisionEngine");
     const { createAiPlanningDiagnostics } = await import("../../src/ai/diagnostics/aiPlanningDiagnostics");
     const diagnostics = createAiPlanningDiagnostics();
-    const decision = decideAiAction(observation(), emptyRuntime(), {
-      ...(await import("../../src/ai/config")).DEFAULT_AI_PERFORMANCE_CONFIG,
-      turn: 1,
+    const decision = decideAiAction(options.observation ?? observation(), options.runtime ?? emptyRuntime(), {
+      ...(options.config ?? (await import("../../src/ai/config")).DEFAULT_AI_PERFORMANCE_CONFIG),
+      turn: options.config?.turn ?? 1,
       diagnostics,
     });
-    if (generatedCandidates === undefined || generatedCandidateElements === undefined) throw new Error("D2E_CAPTURE_GENERATOR_NOT_CALLED");
+    if (generatorCalls.length !== 1) throw new Error(`D2E_EXPECTED_ONE_GENERATOR_CALL_${generatorCalls.length}`);
+    const [generatorCall] = generatorCalls;
+    if (generatorCall === undefined) throw new Error("D2E_CAPTURE_GENERATOR_NOT_CALLED");
     return {
       decision,
       diagnostics,
-      generatedCandidates,
-      generatedCandidateElements,
+      generatorInvocationCount: generatorCalls.length,
+      generatedCandidates: generatorCall.candidates,
+      generatedCandidateElements: generatorCall.elements,
       observedCandidates,
-      generatedStableKeys: generatedCandidates.map((candidate) => candidate.stableKey),
-      generatedCandidateBytesBefore,
-      generatedCandidateBytesAfter: canonicalJson(generatedCandidates),
+      generatedStableKeys: generatorCall.stableKeys,
+      generatedCandidateBytesBefore: generatorCall.bytesBefore,
+      generatedCandidateBytesAfter: canonicalJson(generatorCall.candidates),
       evaluatorCalls: [...evaluatorCalls],
     };
   } finally {
@@ -194,6 +214,7 @@ type RoomRunCapture = Readonly<{
   diagnostics: AiPlanningDiagnostics;
   aiSeat: number;
   action: "play" | "pass" | undefined;
+  generatorInvocationCount: number;
   generatedCandidates: ActionCandidate[];
   generatedCandidateElements: readonly ActionCandidate[];
   generatedStableKeys: readonly string[];
@@ -209,10 +230,8 @@ async function runRoomOnce(mode: RepresentativeActionShadowMode, room: RoomState
   const generatorModulePath = "../../src/ai/tactics/actionGenerator";
   const evaluatorModulePath = "../../src/ai/tactics/actionEvaluator";
   const observerModulePath = "../../src/ai/tactics/representativeActionShadowObserver";
-  let generatedCandidates: ActionCandidate[] | undefined;
-  let generatedCandidateElements: readonly ActionCandidate[] | undefined;
   let observedCandidates: readonly ActionCandidate[] | undefined;
-  let generatedCandidateBytesBefore = "";
+  const generatorCalls: CapturedGeneratorCall[] = [];
   const evaluatorCalls: CapturedEvaluatorCall[] = [];
 
   vi.resetModules();
@@ -225,11 +244,14 @@ async function runRoomOnce(mode: RepresentativeActionShadowMode, room: RoomState
     return {
       ...actual,
       generateActionCandidates: (input: Parameters<typeof actual.generateActionCandidates>[0]) => {
-        const result = actual.generateActionCandidates(input);
-        generatedCandidates = result;
-        generatedCandidateElements = [...result];
-        generatedCandidateBytesBefore = canonicalJson(result);
-        return result;
+        const candidates = actual.generateActionCandidates(input);
+        generatorCalls.push({
+          candidates,
+          elements: [...candidates],
+          stableKeys: candidates.map((candidate) => candidate.stableKey),
+          bytesBefore: canonicalJson(candidates),
+        });
+        return candidates;
       },
     };
   });
@@ -262,18 +284,21 @@ async function runRoomOnce(mode: RepresentativeActionShadowMode, room: RoomState
     const aiSeat = room.currentTurn;
     const priorPlayCount = room.playHistory.length;
     runAiStep(room, diagnostics);
-    if (generatedCandidates === undefined || generatedCandidateElements === undefined) throw new Error("D2E_ROOM_CAPTURE_GENERATOR_NOT_CALLED");
+    if (generatorCalls.length !== 1) throw new Error(`D2E_EXPECTED_ONE_GENERATOR_CALL_${generatorCalls.length}`);
+    const [generatorCall] = generatorCalls;
+    if (generatorCall === undefined) throw new Error("D2E_ROOM_CAPTURE_GENERATOR_NOT_CALLED");
     const newPlay = room.playHistory.slice(priorPlayCount).at(-1);
     return {
       room,
       diagnostics,
       aiSeat,
       action: newPlay?.action,
-      generatedCandidates,
-      generatedCandidateElements,
-      generatedStableKeys: generatedCandidates.map((candidate) => candidate.stableKey),
-      generatedCandidateBytesBefore,
-      generatedCandidateBytesAfter: canonicalJson(generatedCandidates),
+      generatorInvocationCount: generatorCalls.length,
+      generatedCandidates: generatorCall.candidates,
+      generatedCandidateElements: generatorCall.elements,
+      generatedStableKeys: generatorCall.stableKeys,
+      generatedCandidateBytesBefore: generatorCall.bytesBefore,
+      generatedCandidateBytesAfter: canonicalJson(generatorCall.candidates),
       observedCandidates,
       evaluatorCalls: [...evaluatorCalls],
       publicRoom: getPublicRoom(room, 0, { ensurePlans: false }),
@@ -311,6 +336,56 @@ function publicBytes(room: RoomState): string {
 
 function handCounts(room: RoomState): Record<number, number> {
   return Object.fromEntries(room.players.map((player) => [player.seat, room.hands[player.seat].length]));
+}
+
+function readD2cDecisionFixture(): {
+  observation: AiObservation;
+  runtime: AiRuntimeState;
+  config: AiDecisionConfig;
+} {
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), "tests/ai/fixtures/d0KeepCurrentCases.json"), "utf8")) as {
+    cases: Array<{ observation: AiObservation; runtimeInput: AiRuntimeState; config: AiDecisionConfig }>;
+  };
+  const firstCase = fixture.cases[0];
+  if (firstCase === undefined) throw new Error("D2C_TASK4_FIXTURE_EMPTY");
+  return {
+    observation: structuredClone(firstCase.observation),
+    runtime: structuredClone(firstCase.runtimeInput),
+    config: structuredClone(firstCase.config),
+  };
+}
+
+function d2cEvidenceWith(): D2cPlanPolicyInput["evidence"] {
+  return {
+    schemaVersion: "d2-lightweight-evidence-v1",
+    gameId: "d2c-test-game",
+    roundIdentity: "d2c-test-round",
+    handIdentity: "d2c-test-hand",
+    eventIndex: 7,
+    perspectiveSeat: 0,
+    seatMap: { self: 0, partner: 2, leftOpponent: 1, rightOpponent: 3 },
+    hardPublicFacts: {
+      remainingCardCounts: { self: 20, partner: 20, leftOpponent: 2, rightOpponent: 5 },
+      currentTrick: { trickIndex: 2, leadSeat: 0, passSeats: [] },
+      initiativeRelation: "self",
+      playedCardIds: [],
+      playedCardClasses: [],
+      publicTransfers: [],
+      publicTributeEvents: [],
+      finishOrder: ["leftOpponent"],
+    },
+    derivedSignals: {
+      recentActions: [],
+      recentPassStreakByRelation: { self: 0, partner: 0, leftOpponent: 0, rightOpponent: 0 },
+      recentActionTendencies: {
+        self: { playCount: 1, passCount: 0, lastActionKind: "play" },
+        partner: { playCount: 0, passCount: 1, lastActionKind: "pass" },
+        leftOpponent: { playCount: 0, passCount: 0 },
+        rightOpponent: { playCount: 0, passCount: 0 },
+      },
+    },
+    provenance: [],
+  };
 }
 
 function d2cInputFromDecision(
@@ -373,6 +448,8 @@ it("characterizes D2e engine and Room no-op across independent disabled and shad
 
   const disabledDecision = await runCapturedDecision("disabled");
   const shadowDecision = await runCapturedDecision("shadow");
+  expect(disabledDecision.generatorInvocationCount).toBe(1);
+  expect(shadowDecision.generatorInvocationCount).toBe(1);
   assertCapturedDecisionRun(disabledDecision);
   assertCapturedDecisionRun(shadowDecision);
   expect(disabledDecision.generatedCandidates).not.toBe(shadowDecision.generatedCandidates);
@@ -412,6 +489,13 @@ it("characterizes D2e engine and Room no-op across independent disabled and shad
 
   assertCapturedRoomRun(disabledRun!);
   assertCapturedRoomRun(shadowRun!);
+  expect(disabledRun!.generatorInvocationCount).toBe(1);
+  expect(shadowRun!.generatorInvocationCount).toBe(1);
+  expect(disabledRun!.generatedCandidates).not.toBe(shadowRun!.generatedCandidates);
+  expect(disabledRun!.generatedCandidateElements[0]).not.toBe(shadowRun!.generatedCandidateElements[0]);
+  expectNoSharedObjectReferences(disabledRun!.generatedCandidates, shadowRun!.generatedCandidates);
+  expect(disabledRun!.generatedCandidates.length).toBeGreaterThan(0);
+  expect(shadowRun!.generatedCandidates.length).toBeGreaterThan(0);
   expect(randomTraces.shadow).toEqual(randomTraces.disabled);
   expect(randomTraces.shadow.length).toBe(randomTraces.disabled.length);
   expect(canonicalJson(shadowRun!.room)).toBe(canonicalJson(disabledRun!.room));
@@ -438,11 +522,25 @@ it("characterizes D2e engine and Room no-op across independent disabled and shad
   expect(shadowRun!.evaluatorCalls.map((call) => call.scoreBytes)).toEqual(disabledRun!.evaluatorCalls.map((call) => call.scoreBytes));
   expect(shadowRun!.diagnostics.representativeActionShadow).toMatchObject({ observerInvocationCount: 1, reducerAttemptCount: 1, reducerResultCount: 1 });
   expect(disabledRun!.diagnostics.representativeActionShadow).toMatchObject({ observerInvocationCount: 0, reducerAttemptCount: 0, reducerResultCount: 0 });
+  expect(disabledRun!.diagnostics.representativeActionShadow.records).toHaveLength(0);
+  expect(shadowRun!.diagnostics.representativeActionShadow.records).toHaveLength(1);
+  const [roomShadowRecord] = shadowRun!.diagnostics.representativeActionShadow.records;
+  expect(roomShadowRecord).toBeDefined();
+  expect(Object.isFrozen(roomShadowRecord)).toBe(true);
+  expect([...allKeys(roomShadowRecord)]).not.toEqual(expect.arrayContaining([
+    "representativeInputIndices", "representativeByInputIndex", "stableKey", "candidate", "action", "group", "card", "cards", "hand", "lastPlay", "runtime", "Room",
+  ]));
 
-  const evidence = deriveLightweightPublicEvidence(canonicalRoom.publicLedger!, canonicalRoom.publicEvents!, 0);
+  const d2cFixture = readD2cDecisionFixture();
+  const d2cDisabledDecision = await runCapturedDecision("disabled", d2cFixture);
+  const d2cShadowDecision = await runCapturedDecision("shadow", d2cFixture);
+  const evidence = d2cEvidenceWith();
   for (const d2cMode of ["disabled", "shadow"] as const) {
-    const disabledInput = d2cInputFromDecision(disabledDecision.decision, d2cMode, evidence);
-    const shadowInput = d2cInputFromDecision(shadowDecision.decision, d2cMode, evidence);
+    const disabledInput = d2cInputFromDecision(d2cDisabledDecision.decision, d2cMode, evidence);
+    const shadowInput = d2cInputFromDecision(d2cShadowDecision.decision, d2cMode, evidence);
+    expect(disabledInput.candidatePlans.length).toBeGreaterThan(0);
+    expect(shadowInput.candidatePlans.length).toBe(disabledInput.candidatePlans.length);
+    expect(shadowInput.candidatePlans.map((candidate) => candidate.plan.id)).toEqual(disabledInput.candidatePlans.map((candidate) => candidate.plan.id));
     const disabledResult = deriveD2cPlanPriorityQuota(disabledInput);
     const shadowResult = deriveD2cPlanPriorityQuota(shadowInput);
     expect(canonicalJson(disabledResult)).toBe(canonicalJson(shadowResult));
@@ -450,7 +548,23 @@ it("characterizes D2e engine and Room no-op across independent disabled and shad
     expect(canonicalJson(disabledResult.familyPriority)).toBe(canonicalJson(shadowResult.familyPriority));
     expect(canonicalJson(disabledResult.familyQuotas)).toBe(canonicalJson(shadowResult.familyQuotas));
     expect(canonicalJson(Object.keys(disabledResult.kind === "shadow" ? disabledResult.annotations : {}))).toBe(canonicalJson(Object.keys(shadowResult.kind === "shadow" ? shadowResult.annotations : {})));
-    expect(disabledInput.candidatePlans.map((candidate) => candidate.plan.id)).toEqual(shadowInput.candidatePlans.map((candidate) => candidate.plan.id));
+    if (d2cMode === "disabled") {
+      expect(disabledResult.kind).toBe("disabled");
+      expect(shadowResult.kind).toBe("disabled");
+      expect(disabledResult.mode).toBe("disabled");
+      expect(shadowResult.mode).toBe("disabled");
+      expect(disabledResult.candidateCount).toBeGreaterThan(0);
+      expect(shadowResult.candidateCount).toBe(disabledResult.candidateCount);
+    } else {
+      expect(disabledResult.kind).toBe("shadow");
+      expect(shadowResult.kind).toBe("shadow");
+      expect(disabledResult.familyPriority.length).toBeGreaterThan(0);
+      expect(shadowResult.familyPriority.length).toBeGreaterThan(0);
+      expect(disabledResult.familyQuotas.length).toBeGreaterThan(0);
+      expect(shadowResult.familyQuotas.length).toBeGreaterThan(0);
+      expect(disabledResult.familyQuotas.some((quota) => quota.quota > 0)).toBe(true);
+      expect(shadowResult.familyQuotas.some((quota) => quota.quota > 0)).toBe(true);
+    }
     expect([...allKeys(disabledResult)]).not.toEqual(expect.arrayContaining(["representativeInputIndices", "representativeByInputIndex"]));
     expectNoInputReference(disabledResult, disabledInput);
     expectNoInputReference(shadowResult, shadowInput);
@@ -459,12 +573,12 @@ it("characterizes D2e engine and Room no-op across independent disabled and shad
   console.info(JSON.stringify({
     randomTraceLengths: randomTraces,
     engine: {
-      disabled: { generatorInvocations: 1, candidateCount: disabledDecision.generatedCandidates.length, evaluatorInvocations: disabledDecision.evaluatorCalls.length, stableKeyHash: sha256(canonicalJson(disabledDecision.generatedStableKeys)) },
-      shadow: { generatorInvocations: 1, candidateCount: shadowDecision.generatedCandidates.length, evaluatorInvocations: shadowDecision.evaluatorCalls.length, stableKeyHash: sha256(canonicalJson(shadowDecision.generatedStableKeys)) },
+      disabled: { generatorInvocations: disabledDecision.generatorInvocationCount, candidateCount: disabledDecision.generatedCandidates.length, evaluatorInvocations: disabledDecision.evaluatorCalls.length, stableKeyHash: sha256(canonicalJson(disabledDecision.generatedStableKeys)) },
+      shadow: { generatorInvocations: shadowDecision.generatorInvocationCount, candidateCount: shadowDecision.generatedCandidates.length, evaluatorInvocations: shadowDecision.evaluatorCalls.length, stableKeyHash: sha256(canonicalJson(shadowDecision.generatedStableKeys)) },
     },
     room: {
-      disabled: { generatorInvocations: 1, candidateCount: disabledRun!.generatedCandidates.length, evaluatorInvocations: disabledRun!.evaluatorCalls.length, stableKeyHash: sha256(canonicalJson(disabledRun!.generatedStableKeys)) },
-      shadow: { generatorInvocations: 1, candidateCount: shadowRun!.generatedCandidates.length, evaluatorInvocations: shadowRun!.evaluatorCalls.length, stableKeyHash: sha256(canonicalJson(shadowRun!.generatedStableKeys)) },
+      disabled: { generatorInvocations: disabledRun!.generatorInvocationCount, candidateCount: disabledRun!.generatedCandidates.length, evaluatorInvocations: disabledRun!.evaluatorCalls.length, stableKeyHash: sha256(canonicalJson(disabledRun!.generatedStableKeys)) },
+      shadow: { generatorInvocations: shadowRun!.generatorInvocationCount, candidateCount: shadowRun!.generatedCandidates.length, evaluatorInvocations: shadowRun!.evaluatorCalls.length, stableKeyHash: sha256(canonicalJson(shadowRun!.generatedStableKeys)) },
     },
   }));
 });
