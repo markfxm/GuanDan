@@ -25,6 +25,7 @@ const decideWith = (mode: RepresentativeActionShadowMode) => {
   const diagnostics = createAiPlanningDiagnostics();
   const decision = decideAiAction(observation(), runtime(), {
     ...DEFAULT_AI_PERFORMANCE_CONFIG,
+    turn: 1,
     diagnostics,
     representativeActionShadow: { mode, hardCap: 256 },
   } satisfies AiDecisionConfig);
