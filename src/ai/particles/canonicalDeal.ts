@@ -9,6 +9,7 @@ import type {
 } from "./contracts";
 
 const SCENARIO_DOMAIN = "d2-particle-scenario-canonical-v1";
+const SNAPSHOT_SCENARIO_IDENTITY_DOMAIN = "d2-particle-snapshot-scenario-identity-v2";
 const LIKELIHOOD_DOMAIN = "d2-particle-likelihood-canonical-v1";
 const CONFIG_IDENTITY_SCHEMA = "d2-particle-bank-config-identity-v1";
 const MAX_UINT32 = 0xffffffff;
@@ -85,10 +86,11 @@ export function particleScenarioIdentity(snapshot: ParticleSnapshotIdentity, sce
   assertSnapshot(snapshot);
   const scenarioBytes = canonicalParticleScenarioBytes(scenario);
   const writer = new ByteWriter();
-  writer.writeLengthPrefixedUtf8(SCENARIO_DOMAIN);
+  writer.writeLengthPrefixedUtf8(SNAPSHOT_SCENARIO_IDENTITY_DOMAIN);
   writer.writeLengthPrefixedUtf8(snapshot.gameId);
   writer.writeLengthPrefixedUtf8(snapshot.roundIdentity);
   writer.writeLengthPrefixedUtf8(snapshot.handIdentity);
+  writer.writeLengthPrefixedUtf8(snapshot.initialLedgerHash);
   writer.writeFloat64(snapshot.lastAppliedEventIndex);
   writer.writeLengthPrefixedUtf8(snapshot.ledgerHash);
   writer.writeUint8(snapshot.perspectiveSeat);
@@ -150,7 +152,7 @@ function assertScenario(scenario: ParticleScenario): void {
 }
 
 function assertSnapshot(snapshot: ParticleSnapshotIdentity): void {
-  if (!snapshot || typeof snapshot.gameId !== "string" || typeof snapshot.roundIdentity !== "string" || typeof snapshot.handIdentity !== "string" || !Number.isFinite(snapshot.lastAppliedEventIndex) || !Number.isInteger(snapshot.lastAppliedEventIndex) || typeof snapshot.ledgerHash !== "string" || !isSeat(snapshot.perspectiveSeat) || typeof snapshot.gameRank !== "string") {
+  if (!snapshot || typeof snapshot.gameId !== "string" || typeof snapshot.roundIdentity !== "string" || typeof snapshot.handIdentity !== "string" || typeof snapshot.initialLedgerHash !== "string" || !/^[0-9a-f]{64}$/.test(snapshot.initialLedgerHash) || !Number.isFinite(snapshot.lastAppliedEventIndex) || !Number.isInteger(snapshot.lastAppliedEventIndex) || typeof snapshot.ledgerHash !== "string" || !isSeat(snapshot.perspectiveSeat) || typeof snapshot.gameRank !== "string") {
     throw new Error("SNAPSHOT_INVALID");
   }
 }

@@ -17,6 +17,7 @@ export type ParticleLikelihoodConfig = Readonly<{
 export type ParticleBankBuildInput = Readonly<{
   schemaVersion: "d2-particle-bank-build-input-v1";
   publicIdentity: PublicGameIdentity;
+  initialLedger: HardPublicLedger;
   baseLedger: HardPublicLedger;
   publicHistoryEvents: readonly PublicActionEvent[];
   pendingPublicEvents: readonly PublicActionEvent[];
@@ -78,6 +79,7 @@ export type ParticleSnapshotIdentity = Readonly<{
   gameId: string;
   roundIdentity: string;
   handIdentity: string;
+  initialLedgerHash: string;
   lastAppliedEventIndex: number;
   ledgerHash: string;
   perspectiveSeat: PublicSeat;

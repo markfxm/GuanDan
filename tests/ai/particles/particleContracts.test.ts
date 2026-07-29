@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
 import { createDeck, type Card } from "../../../src/engine/cards";
+import { buildPublicGameIdentity } from "../../../src/game/publicEvent";
+import { createInitialPublicLedger } from "../../../src/game/publicLedger";
+import { sha256Bytes } from "../../../src/game/publicEventHash";
 import type {
   CanonicalInitialDeal,
   HiddenTransferAssignment,
@@ -20,6 +23,17 @@ import {
 } from "../../../src/ai/particles/canonicalDeal";
 
 const deck = createDeck();
+const publicIdentity = buildPublicGameIdentity("particle-contract-fixture", 0, 0, "benchmark-scenario");
+const initialLedger = createInitialPublicLedger({
+  identity: publicIdentity,
+  initialHandCounts: { 0: 27, 1: 27, 2: 27, 3: 27 },
+  openingLeader: 0,
+  initialTrickIndex: 0,
+  openingTributePublicState: { phase: "initial" },
+});
+const validInitialLedgerHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const frozenTask1CanonicalScenarioHash =
+  "13c8e57bdbc4a9922dfea961b6dafec3c6d2e24600d8917dc0145b8349ba63ee";
 
 function makeDeal(cards: readonly Card[] = deck): CanonicalInitialDeal {
   return {
@@ -62,6 +76,7 @@ function makeSnapshot(): ParticleSnapshotIdentity {
     gameId: "particle-contract-fixture",
     roundIdentity: "particle-contract-fixture:round:0",
     handIdentity: "particle-contract-fixture:round:0:hand:0",
+    initialLedgerHash: validInitialLedgerHash,
     lastAppliedEventIndex: -1,
     ledgerHash: "ledger-hash-fixture",
     perspectiveSeat: 0,
@@ -99,6 +114,38 @@ function makeConfigIdentity(
     likelihoodConfig: makeLikelihoodConfig(),
     ...overrides,
   });
+}
+
+function encodeExpectedSnapshotScenarioIdentity(snapshot: ParticleSnapshotIdentity, scenario: ParticleScenario): string {
+  const bytes: number[] = [];
+  const writeUint32 = (value: number): void => {
+    bytes.push((value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff);
+  };
+  const writeString = (value: string): void => {
+    const encoded = new TextEncoder().encode(value);
+    writeUint32(encoded.length);
+    bytes.push(...encoded);
+  };
+  const writeFloat64 = (value: number): void => {
+    const buffer = new ArrayBuffer(8);
+    bytes.push(...new Uint8Array(buffer));
+    new DataView(buffer).setFloat64(0, value, false);
+    bytes.splice(bytes.length - 8, 8, ...new Uint8Array(buffer));
+  };
+  const scenarioBytes = canonicalParticleScenarioBytes(scenario);
+
+  writeString("d2-particle-snapshot-scenario-identity-v2");
+  writeString(snapshot.gameId);
+  writeString(snapshot.roundIdentity);
+  writeString(snapshot.handIdentity);
+  writeString(snapshot.initialLedgerHash);
+  writeFloat64(snapshot.lastAppliedEventIndex);
+  writeString(snapshot.ledgerHash);
+  bytes.push(snapshot.perspectiveSeat);
+  writeString(snapshot.gameRank);
+  writeUint32(scenarioBytes.length);
+  bytes.push(...scenarioBytes);
+  return sha256Bytes(Uint8Array.from(bytes));
 }
 
 describe("D2e-P ParticleBank Core contracts", () => {
@@ -319,11 +366,12 @@ describe("D2e-P ParticleBank Core contracts", () => {
     const likelihoodConfig = makeLikelihoodConfig();
     const expectedHash = likelihoodConfigHash(likelihoodConfig);
     const identity = makeConfigIdentity({ likelihoodConfig });
+    const mutableLikelihoodConfig = { ...likelihoodConfig };
 
-    likelihoodConfig.forcedPassLogFactor = -99;
+    mutableLikelihoodConfig.forcedPassLogFactor = -99;
 
     expect(identity.likelihoodConfigHash).toBe(expectedHash);
-    expect(identity.likelihoodConfigHash).not.toBe(likelihoodConfigHash(likelihoodConfig));
+    expect(identity.likelihoodConfigHash).not.toBe(likelihoodConfigHash(mutableLikelihoodConfig));
   });
 
   test("particle seed is absent from snapshot and config identity", () => {
@@ -335,7 +383,99 @@ describe("D2e-P ParticleBank Core contracts", () => {
     expect(Object.keys(snapshot)).not.toContain("seed");
     expect(Object.keys(configIdentity)).not.toContain("seed");
   });
+
+  test("changes particle scenario identity when only initial ledger hash changes", () => {
+    const scenario = makeScenario();
+    const first = makeSnapshot();
+    const second = { ...first, initialLedgerHash: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210" };
+
+    expect(particleScenarioIdentity(first, scenario)).not.toBe(particleScenarioIdentity(second, scenario));
+  });
+
+  test("rejects malformed initial ledger hash in snapshot identity", () => {
+    const scenario = makeScenario();
+    const malformedHashes = ["", "0".repeat(63), "0".repeat(65), "A".repeat(64), `${"0".repeat(63)}g`];
+
+    for (const initialLedgerHash of malformedHashes) {
+      expect(() => particleScenarioIdentity({ ...makeSnapshot(), initialLedgerHash }, scenario)).toThrow();
+    }
+  });
+
+  test("encodes initial ledger hash before final ledger fields", () => {
+    const snapshot = makeSnapshot();
+    const scenario = makeScenario();
+
+    expect(particleScenarioIdentity(snapshot, scenario)).toBe(encodeExpectedSnapshotScenarioIdentity(snapshot, scenario));
+  });
+
+  test("keeps canonical scenario bytes unchanged by replay context", () => {
+    const scenario = makeScenario();
+    const scenarioBytes = canonicalParticleScenarioBytes(scenario);
+    const decoded = new TextDecoder().decode(scenarioBytes);
+
+    expect(decoded).toContain("d2-particle-scenario-canonical-v1");
+    expect(sha256Bytes(scenarioBytes)).toBe(frozenTask1CanonicalScenarioHash);
+  });
+
+  test("keeps seed and likelihood config outside snapshot identity", () => {
+    const firstContext = {
+      snapshot: makeSnapshot(),
+      scenario: makeScenario(),
+      particleSeed: 11,
+      configIdentity: makeConfigIdentity(),
+    };
+
+    const secondContext = {
+      snapshot: makeSnapshot(),
+      scenario: makeScenario(),
+      particleSeed: 29,
+      configIdentity: makeConfigIdentity({
+        particleCount: 4,
+        maxSamplingAttempts: 16,
+        samplerConfigVersion: "d2-particle-sampler-v2",
+        likelihoodConfig: {
+          ...makeLikelihoodConfig(),
+          forcedPassLogFactor: -9,
+        },
+      }),
+    };
+
+    expect(firstContext.particleSeed).not.toBe(secondContext.particleSeed);
+    expect(firstContext.configIdentity).not.toEqual(secondContext.configIdentity);
+
+    expect(
+      particleScenarioIdentity(
+        firstContext.snapshot,
+        firstContext.scenario,
+      ),
+    ).toBe(
+      particleScenarioIdentity(
+        secondContext.snapshot,
+        secondContext.scenario,
+      ),
+    );
+  });
 });
+
+const buildInputWitness = {
+  schemaVersion: "d2-particle-bank-build-input-v1",
+  publicIdentity,
+  initialLedger,
+  baseLedger: initialLedger,
+  publicHistoryEvents: [],
+  pendingPublicEvents: [],
+  expectedFinalEventIndex: -1,
+  expectedFinalPublicLedgerHash: "ledger-hash-fixture",
+  gameRank: "2",
+  actingSeat: 0,
+  ownCurrentHand: deck.slice(0, 1),
+  particleSeed: 7,
+  particleCount: 1,
+  maxSamplingAttempts: 1,
+  maxIndexDraws: 1,
+  samplerConfigVersion: "d2-particle-sampler-v1",
+  likelihoodConfig: makeLikelihoodConfig(),
+} satisfies ParticleBankBuildInput;
 
 const typeContractWitness: Readonly<{
   likelihoodConfig: ParticleLikelihoodConfig | undefined;
@@ -358,3 +498,4 @@ const typeContractWitness: Readonly<{
 };
 
 void typeContractWitness;
+void buildInputWitness;
