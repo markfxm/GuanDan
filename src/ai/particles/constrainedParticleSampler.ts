@@ -1,6 +1,6 @@
 import { RANKS, createDeck, type Card, type GameRank } from "../../engine/cards";
 import { canonicalPublicLedgerHash, type HardPublicLedger } from "../../game/publicLedger";
-import type { PublicActionEvent, PublicGameIdentity, PublicSeat } from "../../game/publicEvent";
+import type { PublicActionEvent, PublicGameIdentity, PublicSeat, PublicTributeEvent } from "../../game/publicEvent";
 import type { CanonicalInitialDeal, HiddenTransferAssignment, ParticleScenario } from "./contracts";
 import { particleScenarioIdentity } from "./canonicalDeal";
 import { validateCanonicalInitialDeal } from "./particleConservation";
@@ -136,7 +136,11 @@ function buildCandidate(input: ConstrainedParticleSamplerInput, rng: Readonly<{ 
   for (const seat of SEATS) publicPlayedBySeat.set(seat, []);
   for (const event of input.publicHistoryEvents) if (event.kind === "play") publicPlayedBySeat.get(event.seat)!.push(...event.publicCardIds);
   const publicPlayed = new Set([...publicPlayedBySeat.values()].flat());
-  const hiddenEvents = input.publicHistoryEvents.filter((event) => (event.kind === "tribute" || event.kind === "return") && event.publicCardIds.length === 0);
+  const hiddenEvents = input.publicHistoryEvents.filter(
+    (event): event is PublicTributeEvent =>
+      (event.kind === "tribute" || event.kind === "return") &&
+      event.publicCardIds.length === 0,
+  );
   const ownTerminalIds = new Set(input.constraints.terminalOwnCurrentHand.map((card) => card.id));
   const ownInitialIds = new Set(ownTerminalIds);
   for (const id of input.constraints.knownRevealedIncomingTransferCardIds) ownInitialIds.delete(id);
