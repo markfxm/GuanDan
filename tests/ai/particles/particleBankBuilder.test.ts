@@ -54,6 +54,8 @@ import type {
 const builderModulePath = "../../../src/ai/particles/particleBankBuilder";
 const diagnosticsModulePath = "../../../src/ai/particles/particleDiagnostics";
 const internalsModulePath = "../../../src/ai/particles/particleBankInternals";
+const samplerModulePath = "../../../src/ai/particles/constrainedParticleSampler";
+const canonicalModulePath = "../../../src/ai/particles/canonicalDeal";
 
 type BuilderModule = Readonly<{
   buildParticleBank(input: ParticleBankBuildInput): ParticleBankBuildResult;
@@ -476,6 +478,23 @@ function makeBuildInput(fixture: Fixture, overrides: Partial<ParticleBankBuildIn
   };
 }
 
+function makeAllZeroBuildInput(fixture: Fixture): ParticleBankBuildInput {
+  const publicHistoryEvents: readonly PublicActionEvent[] = [
+    ...fixture.publicHistoryEvents.slice(0, 4),
+    makePlayEvent(fixture.identity, 4, 1, 0, fixture.laterPlayCard.id, 27),
+    makeFinishEvent(fixture.identity, 5, 0, 0, 26),
+  ];
+  const baseLedger = applyEvents(fixture.initialLedger, publicHistoryEvents.slice(0, 4));
+  const finalLedger = applyEvents(fixture.initialLedger, publicHistoryEvents);
+  return makeBuildInput(fixture, {
+    baseLedger,
+    publicHistoryEvents,
+    pendingPublicEvents: publicHistoryEvents.slice(4),
+    expectedFinalEventIndex: finalLedger.lastAppliedEventIndex,
+    expectedFinalPublicLedgerHash: canonicalPublicLedgerHash(finalLedger),
+  });
+}
+
 function cardIds(cards: readonly Card[]): string[] {
   return cards.map((card) => card.id).sort();
 }
@@ -698,6 +717,36 @@ async function importFreshBuilderWithFault(
   }
 }
 
+async function importFreshBuilderWithCanonicalIdentityFault(): Promise<FreshBuilder> {
+  vi.resetModules();
+  await import(/* @vite-ignore */ samplerModulePath);
+  vi.doMock(canonicalModulePath, async () => {
+    const actual = await vi.importActual<typeof import("../../../src/ai/particles/canonicalDeal")>(canonicalModulePath);
+    return {
+      ...actual,
+      particleScenarioIdentity: () => "forced-duplicate-identity",
+    };
+  });
+  try {
+    const loaded = await import(/* @vite-ignore */ builderModulePath);
+    const builder = assertBuilderModule(loaded);
+    let cleaned = false;
+    return {
+      builder,
+      cleanup: () => {
+        if (cleaned) return;
+        cleaned = true;
+        vi.doUnmock(canonicalModulePath);
+        vi.resetModules();
+      },
+    };
+  } catch (error) {
+    vi.doUnmock(canonicalModulePath);
+    vi.resetModules();
+    throw error;
+  }
+}
+
 function makeInvalidLedger(input: HardPublicLedger): HardPublicLedger {
   const clone = structuredClone(input) as unknown as { lastAppliedEventIndex: number };
   clone.lastAppliedEventIndex = 0;
@@ -849,6 +898,17 @@ describe("immutable particle bank builder core", () => {
     } finally {
       fresh.cleanup();
     }
+
+    const duplicate = await importFreshBuilderWithCanonicalIdentityFault();
+    try {
+      const result = expectFailure(
+        duplicate.builder.buildParticleBank(makeBuildInput(fixture)),
+        "builder-threw",
+      );
+      expectNoPrivateFailurePayload(result);
+    } finally {
+      duplicate.cleanup();
+    }
   });
 
   test("uses the v2 snapshot-scenario identity domain", () => {
@@ -971,10 +1031,13 @@ describe("immutable particle bank builder core", () => {
 
   test("returns all-zero failure without partial hidden data", () => {
     const fixture = makeFixture();
-    const result = expectFailure(invokeBuild(makeBuildInput(fixture, {
-      likelihoodConfig: { ...fixture.likelihoodConfig, observedLeadPlayLogFactor: Number.NEGATIVE_INFINITY },
-    })), "all-zero-weights");
+    const result = expectFailure(invokeBuild(makeAllZeroBuildInput(fixture)), "all-zero-weights");
     expectNoPrivateFailurePayload(result);
+
+    const invalidConfigResult = expectFailure(invokeBuild(makeBuildInput(fixture, {
+      likelihoodConfig: { ...fixture.likelihoodConfig, observedLeadPlayLogFactor: Number.NEGATIVE_INFINITY },
+    })), "invalid-input");
+    expectNoPrivateFailurePayload(invalidConfigResult);
   });
 
   test("deep-freezes every returned bank node and summary", () => {

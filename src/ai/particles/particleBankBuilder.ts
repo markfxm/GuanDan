@@ -70,12 +70,6 @@ function build(input: ParticleBankBuildInput): ParticleBankBuildResult {
   validateInput(input);
   validatePublicSnapshot(input);
 
-  if (input.likelihoodConfig.observedLeadPlayLogFactor === Number.NEGATIVE_INFINITY) {
-    const error = new Error("All particle log weights are negative infinity");
-    error.name = "AllZeroWeightsError";
-    throw error;
-  }
-
   const config = makeConfigIdentity(input);
 
   let catchUp;
@@ -333,7 +327,7 @@ function mapFailure(error: unknown): ParticleBankFailureReason {
       case "EVENT_CATCH_UP_FAILED": return "event-catch-up-failed";
       case "CONSTRAINTS_FAILED": return "initial-deal-constraints-failed";
       case "CONSERVATION_FAILED": return "conservation-failed";
-      case "DUPLICATE_CONTENT_COLLISION": return "duplicate-content-collision";
+      case "DUPLICATE_CONTENT_COLLISION": return "builder-threw";
     }
   }
   if (isNamed(error, "BoundedIndexDrawExhaustedError", "BOUNDED_INDEX_DRAW_EXHAUSTED")) return "bounded-index-exhausted";
