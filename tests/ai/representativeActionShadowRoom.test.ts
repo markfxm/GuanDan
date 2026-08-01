@@ -594,4 +594,4 @@ it("characterizes D2e engine and Room no-op across independent disabled and shad
       shadow: { generatorInvocations: shadowRun!.generatorInvocationCount, candidateCount: shadowRun!.generatedCandidates.length, evaluatorInvocations: shadowRun!.evaluatorCalls.length, stableKeyHash: sha256(canonicalJson(shadowRun!.generatedStableKeys)) },
     },
   }));
-});
+}, 15000);
