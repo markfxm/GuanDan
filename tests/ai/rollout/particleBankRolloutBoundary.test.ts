@@ -2,12 +2,15 @@ import path from "node:path";
 import { describe, expect, test } from "vitest";
 import * as ts from "typescript";
 import { createDeck } from "../../../src/engine/cards";
-import { buildPublicGameIdentity } from "../../../src/game/publicEvent";
-import { createInitialPublicLedger } from "../../../src/game/publicLedger";
+import { detectGroups } from "../../../src/engine/groups";
+import { buildPublicGameIdentity, type PublicSeat } from "../../../src/game/publicEvent";
+import { playPower } from "../../../src/game/playRules";
+import { canonicalPublicLedgerHash, createInitialPublicLedger } from "../../../src/game/publicLedger";
 import type {
   CanonicalInitialDeal,
   ParticleBank,
   ParticleScenario,
+  ParticleSnapshotIdentity,
   PrivateParticleSummary,
 } from "../../../src/ai/particles/contracts";
 import { readParticleBankRolloutAccess } from "../../../src/ai/particles/particleBankRolloutAccess";
@@ -35,7 +38,7 @@ import type {
   RolloutScenarioSourceInput,
 } from "../../../src/ai/rollout/contracts";
 
-function makeKnownBank(normalizedWeight = 1): ParticleBank {
+function makeKnownBank(normalizedWeight = 1, snapshotOverride?: ParticleSnapshotIdentity): ParticleBank {
   const deck = createDeck();
   const scenario: ParticleScenario = {
     schemaVersion: "d2-particle-scenario-v1",
@@ -59,19 +62,20 @@ function makeKnownBank(normalizedWeight = 1): ParticleBank {
     zeroWeightCount: 0,
     effectiveSampleSize: 1,
   };
+  const snapshot = snapshotOverride ?? {
+    gameId: "bridge-fixture",
+    roundIdentity: "bridge-fixture:round:0",
+    handIdentity: "bridge-fixture:round:0:hand:0",
+    initialLedgerHash: "0".repeat(64),
+    lastAppliedEventIndex: -1,
+    ledgerHash: "1".repeat(64),
+    perspectiveSeat: 0 as const,
+    gameRank: "2" as const,
+  };
   return createParticleBankHandle(
     {
       schemaVersion: "d2-particle-bank-v1",
-      snapshot: {
-        gameId: "bridge-fixture",
-        roundIdentity: "bridge-fixture:round:0",
-        handIdentity: "bridge-fixture:round:0:hand:0",
-        initialLedgerHash: "0".repeat(64),
-        lastAppliedEventIndex: -1,
-        ledgerHash: "1".repeat(64),
-        perspectiveSeat: 0,
-        gameRank: "2",
-      },
+      snapshot,
       config: {
         schemaVersion: "d2-particle-bank-config-identity-v1",
         particleCount: 1,
@@ -105,10 +109,10 @@ function makeAction(cardIndex = 0): Extract<RolloutAction, { type: "play" }> {
   };
 }
 
-function makePublicState(): RolloutPublicState {
+function makePublicState(actingSeat: PublicSeat = 0): RolloutPublicState {
   return {
     gameRank: "2",
-    actingSeat: 0,
+    actingSeat,
     perspectiveSeat: 0,
     partnerSeat: 2,
     handCounts: { 0: 27, 1: 27, 2: 27, 3: 27 },
@@ -119,24 +123,34 @@ function makePublicState(): RolloutPublicState {
   };
 }
 
-function makeSourceInput(bank = makeKnownBank()): RolloutScenarioSourceInput {
+function makeSourceInput(bank?: ParticleBank, openingLeader: PublicSeat = 0): RolloutScenarioSourceInput {
   const identity = buildPublicGameIdentity("contract-fixture", 0, 0, "benchmark-scenario");
   const ledger = createInitialPublicLedger({
     identity,
     initialHandCounts: { 0: 27, 1: 27, 2: 27, 3: 27 },
-    openingLeader: 0,
+    openingLeader,
     initialTrickIndex: 0,
     openingTributePublicState: { phase: "initial" },
   });
+  const sourceBank = bank ?? makeKnownBank(1, {
+    gameId: identity.gameId,
+    roundIdentity: identity.roundIdentity,
+    handIdentity: identity.handIdentity,
+    initialLedgerHash: canonicalPublicLedgerHash(ledger),
+    lastAppliedEventIndex: -1,
+    ledgerHash: canonicalPublicLedgerHash(ledger),
+    perspectiveSeat: 0,
+    gameRank: "2",
+  });
   return {
-    bank,
+    bank: sourceBank,
     publicHistoryEvents: [],
     initialLedger: ledger,
     finalLedger: ledger,
     gameRank: "2",
     perspectiveSeat: 0,
     ownCurrentHand: createDeck().slice(0, 27),
-    publicState: makePublicState(),
+    publicState: makePublicState(openingLeader),
   };
 }
 
@@ -151,6 +165,18 @@ function makePolicy(): RolloutPolicy {
 
 function makeRequestInput(): RolloutRequest {
   const action = makeAction();
+  const scenarioSourceInput = makeSourceInput();
+  const rootIdentity = canonicalReplayContextIdentity({
+    publicHistoryEvents: scenarioSourceInput.publicHistoryEvents,
+    initialLedger: scenarioSourceInput.initialLedger,
+    finalLedger: scenarioSourceInput.finalLedger,
+    gameRank: scenarioSourceInput.gameRank,
+    perspectiveSeat: scenarioSourceInput.perspectiveSeat,
+    ownCurrentHand: scenarioSourceInput.ownCurrentHand,
+    actingSeat: scenarioSourceInput.publicState.actingSeat,
+    publicState: scenarioSourceInput.publicState,
+    particleBankSnapshot: scenarioSourceInput.bank.snapshot,
+  });
   const candidate: RolloutCandidate = {
     candidateId: canonicalActionIdentity(action),
     action,
@@ -160,8 +186,8 @@ function makeRequestInput(): RolloutRequest {
     schemaVersion: "d2f-rollout-request-v2",
     mode: "detached",
     formalExecutionAllowed: false,
-    rootIdentity: "root-identity-fixture",
-    scenarioSourceInput: makeSourceInput(),
+    rootIdentity,
+    scenarioSourceInput,
     candidates: [candidate],
     budget: {
       replicateCountPerScenario: 2,
@@ -191,6 +217,20 @@ function makeRequestInput(): RolloutRequest {
   };
 }
 
+function replayRoot(sourceInput: RolloutScenarioSourceInput): string {
+  return canonicalReplayContextIdentity({
+    publicHistoryEvents: sourceInput.publicHistoryEvents,
+    initialLedger: sourceInput.initialLedger,
+    finalLedger: sourceInput.finalLedger,
+    gameRank: sourceInput.gameRank,
+    perspectiveSeat: sourceInput.perspectiveSeat,
+    ownCurrentHand: sourceInput.ownCurrentHand,
+    actingSeat: sourceInput.publicState.actingSeat,
+    publicState: sourceInput.publicState,
+    particleBankSnapshot: sourceInput.bank.snapshot,
+  });
+}
+
 function makeResultInput(): RolloutResult {
   const candidateId = canonicalActionIdentity(makeAction());
   return {
@@ -207,7 +247,7 @@ function makeResultInput(): RolloutResult {
       baselineEvaluatorScore: 1,
       acceptedScenarioCount: 1,
       replicateCountPerScenario: 1,
-      totalCompletedReplicates: 1,
+      expectedReplicateCount: 1,
       completedReplicateCount: 1,
       workUnitCount: 1,
     }],
@@ -216,7 +256,6 @@ function makeResultInput(): RolloutResult {
       effectiveSampleSize: 1,
       acceptedScenarioCount: 1,
       replicateCountPerScenario: 1,
-      totalCompletedReplicates: 1,
       completedReplicateCount: 1,
       expectedCompletedReplicateCount: 1,
       candidateCount: 1,
@@ -261,6 +300,10 @@ describe("D2F ParticleBank bridge", () => {
     expect(Object.isFrozen(first.access)).toBe(true);
     expect(Object.isFrozen(first.access.records)).toBe(true);
     expect(Object.isFrozen(first.access.records[0]?.scenario)).toBe(true);
+    expect(Object.isFrozen(first.access.records[0]?.scenario.initialDeal)).toBe(true);
+    expect(Object.isFrozen(first.access.records[0]?.scenario.initialDeal.hands)).toBe(true);
+    expect(Object.isFrozen(first.access.records[0]?.scenario.initialDeal.hands[0])).toBe(true);
+    expect(Object.isFrozen(first.access.records[0]?.scenario.initialDeal.hands[0]?.[0])).toBe(true);
 
     const secondBeforeMutation = JSON.stringify(second.access);
     const mutableProbe = first.access as any;
@@ -288,6 +331,73 @@ describe("D2F ParticleBank bridge", () => {
     if (inputAction.type !== "play" || resultAction.type !== "play") throw new Error("PLAY_ACTION_EXPECTED");
     inputAction.group.cards.pop();
     expect(resultAction.group.cards).toHaveLength(1);
+  });
+
+  test("rejects a noncanonical root identity even when it is non-empty", () => {
+    expect(createRolloutRequest({ ...makeRequestInput(), rootIdentity: "f".repeat(64) })).toEqual({
+      ok: false,
+      failure: { kind: "invalid-request", field: "rootIdentity" },
+    });
+  });
+
+  test("derives replay root identity from semantic ledger, seat, hand, rank and bank context", () => {
+    const base = makeSourceInput();
+    const baseRoot = replayRoot(base);
+    expect(replayRoot(makeSourceInput(undefined, 1))).not.toBe(baseRoot);
+    expect(replayRoot({
+      ...base,
+      gameRank: "A",
+      publicState: { ...base.publicState, gameRank: "A" },
+      bank: makeKnownBank(1, { ...base.bank.snapshot, gameRank: "A" }),
+    })).not.toBe(baseRoot);
+    expect(replayRoot({
+      ...base,
+      ownCurrentHand: [...base.ownCurrentHand.slice(0, -1), createDeck()[27]!],
+    })).not.toBe(baseRoot);
+    expect(replayRoot({
+      ...base,
+      perspectiveSeat: 1,
+      publicState: { ...base.publicState, perspectiveSeat: 1, partnerSeat: 3 },
+      bank: makeKnownBank(1, { ...base.bank.snapshot, perspectiveSeat: 1 }),
+    })).not.toBe(baseRoot);
+
+  });
+
+  test("rejects private fields in source input, public state, events and ledgers", () => {
+    const input = makeRequestInput();
+    const cases: readonly RolloutScenarioSourceInput[] = [
+      { ...input.scenarioSourceInput, room: {} } as RolloutScenarioSourceInput,
+      { ...input.scenarioSourceInput, rawScenario: {} } as RolloutScenarioSourceInput,
+      { ...input.scenarioSourceInput, publicState: { ...input.scenarioSourceInput.publicState, opponentHands: {} } } as unknown as RolloutScenarioSourceInput,
+      { ...input.scenarioSourceInput, publicState: { ...input.scenarioSourceInput.publicState, initialHands: {} } } as unknown as RolloutScenarioSourceInput,
+      { ...input.scenarioSourceInput, publicHistoryEvents: [{ privatePayload: {} }] as any },
+      { ...input.scenarioSourceInput, initialLedger: { ...input.scenarioSourceInput.initialLedger, rawHands: {} } as any },
+    ];
+
+    for (const scenarioSourceInput of cases) {
+      expect(createRolloutRequest({ ...input, scenarioSourceInput })).toEqual({
+        ok: false,
+        failure: { kind: "invalid-request", field: "scenarioSourceInput" },
+      });
+    }
+  });
+
+  test("rejects a public state with an invalid current last-play seat", () => {
+    const input = makeRequestInput();
+    const scenarioSourceInput = {
+      ...input.scenarioSourceInput,
+      publicState: {
+        ...input.scenarioSourceInput.publicState,
+        currentLastPlay: makeAction().group,
+        currentLastPlaySeat: 9,
+      },
+    } as unknown as RolloutScenarioSourceInput;
+    const result = createRolloutRequest({
+      ...input,
+      scenarioSourceInput,
+    } as unknown);
+
+    expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "scenarioSourceInput" } });
   });
 
   test("returns a typed failure when caller-owned source input cannot be cloned", () => {
@@ -362,6 +472,7 @@ describe("D2F ParticleBank bridge", () => {
     expect(result.ok).toBe(true);
   });
 
+
   test("canonicalizes action, decision, replicate and replay identities without CRN draws", () => {
     const action = makeAction();
     const reorderedAction: RolloutAction = {
@@ -417,6 +528,52 @@ describe("D2F ParticleBank bridge", () => {
     expect(JSON.stringify(keyedView)).not.toContain("seed");
   });
 
+  test("includes strength and wildcard realization in action identity while ignoring presentation fields", () => {
+    const base = makeAction();
+    const reordered: RolloutAction = {
+      ...base,
+      group: { ...base.group, cards: [...base.group.cards].reverse() },
+    };
+    const changedStrength: RolloutAction = {
+      ...base,
+      group: { ...base.group, strength: base.group.strength + 1 },
+    };
+    const changedWildcards: RolloutAction = {
+      ...base,
+      group: { ...base.group, wildcards: [base.group.cards[0]!] },
+    };
+    const presentationOnly: RolloutAction = {
+      ...base,
+      group: { ...base.group, id: "presentation-id", label: "display-only", purpose: "engine" },
+    };
+
+    expect(canonicalActionIdentity(reordered)).toBe(canonicalActionIdentity(base));
+    expect(canonicalActionIdentity(changedStrength)).not.toBe(canonicalActionIdentity(base));
+    expect(canonicalActionIdentity(changedWildcards)).not.toBe(canonicalActionIdentity(base));
+    expect(canonicalActionIdentity(presentationOnly)).toBe(canonicalActionIdentity(base));
+  });
+
+  test("rejects a card whose id disagrees with its rank, suit and copy", () => {
+    const action = makeAction();
+    expect(() => canonicalActionIdentity({
+      ...action,
+      group: {
+        ...action.group,
+        cards: [{ ...action.group.cards[0]!, id: "CA-1" }],
+      },
+    })).toThrow("ACTION_CARD_INVALID");
+  });
+
+  test("keeps actions with different engine play power identities distinct", () => {
+    const deck = createDeck();
+    const bomb = detectGroups([deck[0]!, deck[13]!, deck[26]!, deck[39]!], "2").find((group) => group.type === "bomb");
+    if (bomb === undefined) throw new Error("BOMB_FIXTURE_MISSING");
+    const single = detectGroups([deck[0]!], "2").find((group) => group.type === "single");
+    if (single === undefined) throw new Error("SINGLE_FIXTURE_MISSING");
+    expect(playPower(bomb, "2")).not.toBe(playPower(single, "2"));
+    expect(canonicalActionIdentity({ type: "play", group: bomb })).not.toBe(canonicalActionIdentity({ type: "play", group: single }));
+  });
+
   test("accepts a legal wildcard subset repeated in the CardGroup wildcard projection", () => {
     const input = makeRequestInput();
     const baseAction = input.candidates[0]!.action;
@@ -433,7 +590,7 @@ describe("D2F ParticleBank bridge", () => {
     expect(result.ok).toBe(true);
   });
 
-  test("validates completed replicate products across multiple candidates", () => {
+  test("rejects aggregate replicate counts that ignore candidate multiplicity", () => {
     const first = makeResultInput();
     const secondCandidateId = canonicalActionIdentity(makeAction(1));
     const summaries = [
@@ -456,7 +613,73 @@ describe("D2F ParticleBank bridge", () => {
       },
     });
 
+    expect(result.ok).toBe(false);
+  });
+
+  test("keeps candidate replicate counts local while aggregate counts sum candidates", () => {
+    const first = makeResultInput();
+    const secondCandidateId = canonicalActionIdentity(makeAction(1));
+    const summaries = [
+      { ...first.candidateSummaries[0]!, acceptedScenarioCount: 2, completedReplicateCount: 2, expectedReplicateCount: 2 },
+      { ...first.candidateSummaries[0]!, candidateId: secondCandidateId, acceptedScenarioCount: 2, completedReplicateCount: 2, expectedReplicateCount: 2 },
+    ].sort((left, right) => left.candidateId < right.candidateId ? -1 : left.candidateId > right.candidateId ? 1 : 0);
+    const result = createRolloutResult({
+      ...first,
+      candidateSummaries: summaries,
+      ranking: summaries.map((summary) => summary.candidateId),
+      aggregateDiagnostics: {
+        ...first.aggregateDiagnostics,
+        acceptedScenarioCount: 2,
+        completedReplicateCount: 4,
+        expectedCompletedReplicateCount: 4,
+        candidateCount: 2,
+        workUnitCount: 2,
+      },
+    });
+
     expect(result.ok).toBe(true);
+  });
+
+  test("rejects overflowing candidate coverage products", () => {
+    const input = makeResultInput();
+    const result = createRolloutResult({
+      ...input,
+      candidateSummaries: [{
+        ...input.candidateSummaries[0]!,
+        acceptedScenarioCount: Number.MAX_SAFE_INTEGER,
+        replicateCountPerScenario: 2,
+      }],
+    });
+
+    expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "candidateSummaries" } });
+  });
+
+  test("rejects zero evidence requirements", () => {
+    const input = makeRequestInput();
+    for (const field of ["minimumEffectiveSampleSize", "minimumAcceptedScenarioCount", "minimumCompletedReplicateCount"] as const) {
+      for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(validateRolloutEvidenceRequirements({
+          ...input.evidenceRequirements,
+          [field]: value,
+        })).toEqual({
+          ok: false,
+          failure: { kind: "invalid-evidence-requirements", field },
+        });
+      }
+    }
+  });
+
+  test("rejects evidence thresholds above the request budget upper bound", () => {
+    const input = makeRequestInput();
+    for (const field of ["minimumEffectiveSampleSize", "minimumAcceptedScenarioCount", "minimumCompletedReplicateCount"] as const) {
+      expect(createRolloutRequest({
+        ...input,
+        evidenceRequirements: { ...input.evidenceRequirements, [field]: input.budget.maxWorkUnits + 1 },
+      })).toEqual({
+        ok: false,
+        failure: { kind: "invalid-evidence-requirements", field },
+      });
+    }
   });
 
   test("rejects private or unknown fields in public result diagnostics", () => {
@@ -474,15 +697,17 @@ describe("D2F ParticleBank bridge", () => {
 
   test("rejects non-finite candidate score and action strength values", () => {
     const input = makeRequestInput();
-    const invalidAction = {
-      ...input.candidates[0]!.action,
-      group: { ...(input.candidates[0]!.action as Extract<RolloutAction, { type: "play" }>).group, strength: Number.NaN },
-    } as RolloutAction;
-    const invalidActionRequest = createRolloutRequest({
-      ...input,
-      candidates: [{ ...input.candidates[0]!, action: invalidAction }],
-    });
-    expect(invalidActionRequest).toEqual({ ok: false, failure: { kind: "invalid-request", field: "candidates" } });
+    for (const strength of [Number.NaN, Number.POSITIVE_INFINITY, 1.5]) {
+      const invalidAction = {
+        ...input.candidates[0]!.action,
+        group: { ...(input.candidates[0]!.action as Extract<RolloutAction, { type: "play" }>).group, strength },
+      } as RolloutAction;
+      const invalidActionRequest = createRolloutRequest({
+        ...input,
+        candidates: [{ ...input.candidates[0]!, action: invalidAction }],
+      });
+      expect(invalidActionRequest).toEqual({ ok: false, failure: { kind: "invalid-request", field: "candidates" } });
+    }
 
     const invalidScoreRequest = createRolloutRequest({
       ...input,
@@ -569,6 +794,7 @@ describe("D2F ParticleBank bridge", () => {
     const bridgeModule = checker.getSymbolAtLocation(bridgeFile);
     if (contractsFile === undefined || bridgeModule === undefined) throw new Error("CONTRACT_OR_BRIDGE_MODULE_SYMBOL_MISSING");
     const contractsModule = checker.getSymbolAtLocation(contractsFile);
+    const sourceFilePath = sourcePath(sourceFile);
     const resolveSymbol = (symbol: ts.Symbol): ts.Symbol => symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
     const privateSymbols = new Set(checker.getExportsOfModule(privateModule).map(resolveSymbol));
     const bridgeSymbols = new Set(checker.getExportsOfModule(bridgeModule).map(resolveSymbol));
@@ -577,10 +803,21 @@ describe("D2F ParticleBank bridge", () => {
     const rolloutInternalImporters: string[] = [];
     const bridgeImporters: string[] = [];
     const forbiddenPrivateConsumers: string[] = [];
+    const privateSourceConsumers: string[] = [];
     const bridgeCallers: string[] = [];
     let forbiddenReexport = false;
     let forbiddenBridgeReexport = false;
+    let forbiddenSourceReexport = false;
     let localeCompareUse = false;
+    const privateContractNames = new Set(["RolloutScenario", "RolloutScenarioSourceInput", "RolloutScenarioSourceResult", "RolloutReplicateInput", "RolloutPublicState"]);
+    const allowedPrivateConsumers = new Set([sourcePath(contractsFile), sourcePath(sourceFile)]);
+
+    const recordPrivateContractUse = (file: ts.SourceFile, symbol: ts.Symbol): void => {
+      const resolved = resolveSymbol(symbol);
+      const consumerPath = sourcePath(file);
+      if (contractSymbols.has(resolved) && privateContractNames.has(resolved.name) && !allowedPrivateConsumers.has(consumerPath)) forbiddenPrivateConsumers.push(consumerPath);
+      if (resolved.name === "privateState" && !allowedPrivateConsumers.has(consumerPath)) forbiddenPrivateConsumers.push(consumerPath);
+    };
 
     for (const file of files) {
       function visit(node: ts.Node): void {
@@ -592,14 +829,12 @@ describe("D2F ParticleBank bridge", () => {
             const resolved = resolveSymbol(localSymbol);
             if (resolved.name === "readParticleBankInternals" && privateSymbols.has(resolved)) directReadImporters.push(sourcePath(file));
             const target = declarationFile(resolved);
+            if (target !== undefined && normalize(target).endsWith("/src/ai/rollout/particleScenarioSource.ts") && sourcePath(file) !== sourceFilePath) privateSourceConsumers.push(sourcePath(file));
             if (bridgeSymbols.has(resolved)) {
               bridgeImporters.push(sourcePath(file));
               if (sourcePath(file).endsWith("/src/ai/rollout/particleScenarioSource.ts")) bridgeCallers.push(resolved.name);
             }
-            const consumerPath = sourcePath(file);
-            const isForbiddenConsumer = consumerPath.includes("/src/game/") || consumerPath.includes("/src/ai/planning/") || consumerPath.includes("/src/ai/policy") || consumerPath.includes("/src/ai/diagnostics") || consumerPath.includes("/src/ai/rollout/policy") || consumerPath.includes("/src/ai/rollout/diagnostics");
-            const privateContractSymbol = contractSymbols.has(resolved) && ["RolloutScenario", "RolloutScenarioSourceResult", "RolloutReplicateInput"].includes(resolved.name);
-            if (isForbiddenConsumer && (bridgeSymbols.has(resolved) || privateContractSymbol)) forbiddenPrivateConsumers.push(consumerPath);
+            recordPrivateContractUse(file, resolved);
           }
         }
         if (ts.isPropertyAccessExpression(node)) {
@@ -612,10 +847,12 @@ describe("D2F ParticleBank bridge", () => {
               bridgeImporters.push(consumerPath);
               if (consumerPath.endsWith("/src/ai/rollout/particleScenarioSource.ts")) bridgeCallers.push(resolved.name);
             }
-            const isForbiddenConsumer = consumerPath.includes("/src/game/") || consumerPath.includes("/src/ai/planning/") || consumerPath.includes("/src/ai/policy") || consumerPath.includes("/src/ai/diagnostics") || consumerPath.includes("/src/ai/rollout/policy") || consumerPath.includes("/src/ai/rollout/diagnostics");
-            const privateContractSymbol = contractSymbols.has(resolved) && ["RolloutScenario", "RolloutScenarioSourceResult", "RolloutReplicateInput"].includes(resolved.name);
-            if (isForbiddenConsumer && (bridgeSymbols.has(resolved) || privateContractSymbol)) forbiddenPrivateConsumers.push(consumerPath);
+            recordPrivateContractUse(file, resolved);
           }
+        }
+        if (ts.isIdentifier(node)) {
+          const identifierSymbol = checker.getSymbolAtLocation(node);
+          if (identifierSymbol !== undefined) recordPrivateContractUse(file, identifierSymbol);
         }
         if (ts.isExportDeclaration(node) && node.moduleSpecifier !== undefined) {
           const moduleSymbol = checker.getSymbolAtLocation(node.moduleSpecifier);
@@ -623,6 +860,7 @@ describe("D2F ParticleBank bridge", () => {
             const exports = checker.getExportsOfModule(moduleSymbol).map(resolveSymbol);
             if (exports.some((symbol) => privateSymbols.has(symbol))) forbiddenReexport = true;
             if (exports.some((symbol) => bridgeSymbols.has(symbol))) forbiddenBridgeReexport = true;
+            if (exports.some((symbol) => declarationFile(symbol) !== undefined && normalize(declarationFile(symbol)!).endsWith("/src/ai/rollout/particleScenarioSource.ts"))) forbiddenSourceReexport = true;
           }
         }
         const identityFile = sourcePath(file).endsWith("/src/ai/rollout/contracts.ts") || sourcePath(file).endsWith("/src/ai/particles/canonicalDeal.ts");
@@ -644,8 +882,10 @@ describe("D2F ParticleBank bridge", () => {
     expect([...new Set(rolloutInternalImporters)]).toEqual([]);
     expect([...new Set(bridgeImporters)]).toEqual([sourcePath(sourceFile)]);
     expect([...new Set(forbiddenPrivateConsumers)]).toEqual([]);
+    expect([...new Set(privateSourceConsumers)]).toEqual([]);
     expect(forbiddenReexport).toBe(false);
     expect(forbiddenBridgeReexport).toBe(false);
+    expect(forbiddenSourceReexport).toBe(false);
     expect(localeCompareUse).toBe(false);
     expect(bridgeCallers).toContain("readParticleBankRolloutAccess");
   });

@@ -83,6 +83,8 @@ type RolloutEvidenceRequirements = Readonly<{
   requireCompleteCoverage: true;
 }>;
 
+Task 1 校验要求三个 evidence threshold 都是正的 finite safe integer；validated request 中每个 threshold 还必须不超过 `ValidatedRolloutBudget.maximumWorkUnits`，否则返回对应的 typed invalid-evidence failure。
+
 type RolloutRiskPolicy = Readonly<{
   schemaVersion: "d2f-rollout-risk-policy-v1";
   variancePenalty: number;
@@ -182,7 +184,7 @@ type CandidateRolloutSummary = Readonly<{
   baselineEvaluatorScore: number;
   acceptedScenarioCount: number;
   replicateCountPerScenario: number;
-  totalCompletedReplicates: number;
+  expectedReplicateCount: number;
   completedReplicateCount: number;
   workUnitCount: number;
 }>;
@@ -191,13 +193,14 @@ type RolloutAggregateDiagnostics = Readonly<{
   effectiveSampleSize: number;
   acceptedScenarioCount: number;
   replicateCountPerScenario: number;
-  totalCompletedReplicates: number;
   completedReplicateCount: number;
   expectedCompletedReplicateCount: number;
   candidateCount: number;
   workUnitCount: number;
   coverage: "complete";
 }>;
+
+Task 1 的 candidate summary 使用 candidate-local coverage：`expectedReplicateCount = acceptedScenarioCount * replicateCountPerScenario`，`completedReplicateCount` 是该 candidate 实际完成数。aggregate diagnostics 只使用全候选范围的 `expectedCompletedReplicateCount` 和 `completedReplicateCount`，分别由 candidate-local expected coverage 的 candidateCount 倍和所有 summary 的安全求和得到；不保留语义重复的 `totalCompletedReplicates`；result factory 必须核对 summary、ranking 和 aggregate 的 candidate/scenario/replicate/work 集合与计数一致。
 
 type RolloutResult = Readonly<{
   schemaVersion: "d2f-rollout-result-v2";

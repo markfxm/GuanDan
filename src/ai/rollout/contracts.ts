@@ -1,9 +1,9 @@
 import type { Card, GameRank } from "../../engine/cards";
 import { RANKS, SUITS } from "../../engine/cards";
 import type { CardGroup, GroupPurpose, GroupType } from "../../engine/groups";
-import type { PublicActionEvent, PublicSeat } from "../../game/publicEvent";
+import { assertFinalizedPublicActionEvent, type PublicActionEvent, type PublicSeat } from "../../game/publicEvent";
 import { canonicalPublicLedgerHash, type HardPublicLedger } from "../../game/publicLedger";
-import { sha256Bytes } from "../../game/publicEventHash";
+import { sha256Bytes, verifyPublicActionEventHash } from "../../game/publicEventHash";
 import type {
   ParticleBank,
   ParticleScenario,
@@ -211,7 +211,7 @@ export type CandidateRolloutSummary = Readonly<{
   baselineEvaluatorScore: number;
   acceptedScenarioCount: number;
   replicateCountPerScenario: number;
-  totalCompletedReplicates: number;
+  expectedReplicateCount: number;
   completedReplicateCount: number;
   workUnitCount: number;
 }>;
@@ -220,7 +220,6 @@ export type RolloutAggregateDiagnostics = Readonly<{
   effectiveSampleSize: number;
   acceptedScenarioCount: number;
   replicateCountPerScenario: number;
-  totalCompletedReplicates: number;
   completedReplicateCount: number;
   expectedCompletedReplicateCount: number;
   candidateCount: number;
@@ -307,6 +306,26 @@ const GROUP_TYPES: readonly GroupType[] = [
 const GROUP_PURPOSES: readonly GroupPurpose[] = ["attack", "engine", "recovery", "tail-control", "risk", "filler"];
 const SEATS: readonly PublicSeat[] = [0, 1, 2, 3];
 const UINT32_MAX = 0xffffffff;
+const CARD_SUIT_CODES: Readonly<Record<string, string>> = {
+  spades: "S",
+  clubs: "C",
+  hearts: "H",
+  diamonds: "D",
+};
+const PUBLIC_STATE_KEYS = [
+  "gameRank", "actingSeat", "perspectiveSeat", "partnerSeat", "handCounts", "finishOrder",
+  "publicPlayedCardIds", "currentLastPlay", "currentLastPlaySeat",
+] as const;
+const SOURCE_INPUT_KEYS = [
+  "bank", "publicHistoryEvents", "initialLedger", "finalLedger", "gameRank", "perspectiveSeat", "ownCurrentHand", "publicState",
+] as const;
+const LEDGER_KEYS = [
+  "schemaVersion", "gameId", "roundIdentity", "handIdentity", "nextEventIndex", "lastAppliedEventIndex", "seenEventHashes",
+  "playedCardIds", "revealedTransferEvents", "handCounts", "currentTrick", "finishOrder", "publicTributeEvents", "recentActionSummaries",
+] as const;
+const SNAPSHOT_KEYS = [
+  "gameId", "roundIdentity", "handIdentity", "initialLedgerHash", "lastAppliedEventIndex", "ledgerHash", "perspectiveSeat", "gameRank",
+] as const;
 
 export function canonicalActionIdentity(action: RolloutAction): CanonicalCandidateIdentity {
   assertRolloutAction(action);
@@ -315,9 +334,9 @@ export function canonicalActionIdentity(action: RolloutAction): CanonicalCandida
   writer.writeString(action.type);
   if (action.type === "play") {
     writer.writeString(action.group.type);
-    const ids = action.group.cards.map((card) => card.id).sort(compareCodeUnits);
-    writer.writeUint32(ids.length);
-    for (const id of ids) writer.writeString(id);
+    writer.writeNumber(action.group.strength);
+    writeSemanticCardList(writer, action.group.cards);
+    writeSemanticCardList(writer, action.group.wildcards);
   }
   return sha256Bytes(writer.finish());
 }
@@ -432,9 +451,9 @@ export function validateRolloutBudget(input: Readonly<{
 
 export function validateRolloutEvidenceRequirements(input: unknown): RolloutContractResult<RolloutEvidenceRequirements> {
   if (!isRecord(input) || !hasExactKeys(input, ["schemaVersion", "minimumEffectiveSampleSize", "minimumAcceptedScenarioCount", "minimumCompletedReplicateCount", "requireCompleteCoverage"]) || input.schemaVersion !== "d2f-rollout-evidence-requirements-v1" || input.requireCompleteCoverage !== true) return invalidEvidence("minimumEffectiveSampleSize");
-  if (typeof input.minimumEffectiveSampleSize !== "number" || !Number.isFinite(input.minimumEffectiveSampleSize) || input.minimumEffectiveSampleSize < 0) return invalidEvidence("minimumEffectiveSampleSize");
-  if (!isNonNegativeSafeInteger(input.minimumAcceptedScenarioCount)) return invalidEvidence("minimumAcceptedScenarioCount");
-  if (!isNonNegativeSafeInteger(input.minimumCompletedReplicateCount)) return invalidEvidence("minimumCompletedReplicateCount");
+  if (!isPositiveSafeInteger(input.minimumEffectiveSampleSize)) return invalidEvidence("minimumEffectiveSampleSize");
+  if (!isPositiveSafeInteger(input.minimumAcceptedScenarioCount)) return invalidEvidence("minimumAcceptedScenarioCount");
+  if (!isPositiveSafeInteger(input.minimumCompletedReplicateCount)) return invalidEvidence("minimumCompletedReplicateCount");
   return { ok: true, value: deepFreeze({ ...input } as RolloutEvidenceRequirements) };
 }
 
@@ -449,12 +468,29 @@ export function createRolloutRequest(input: unknown): RolloutContractResult<Roll
   if (!isRecord(input) || input.schemaVersion !== "d2f-rollout-request-v2") return invalid("schemaVersion");
   if (!isRolloutMode(input.mode)) return invalid("mode");
   if (input.formalExecutionAllowed !== false) return invalid("formalExecutionAllowed");
-  if (!isNonEmptyString(input.rootIdentity)) return invalid("rootIdentity");
+  if (!isRootIdentity(input.rootIdentity)) return invalid("rootIdentity");
   if (!Array.isArray(input.candidates) || input.candidates.length === 0) return invalid("candidates");
   if (!isRolloutPolicy(input.policy)) return invalid("policy");
 
   const sourceInput = cloneScenarioSourceInput(input.scenarioSourceInput);
   if (sourceInput === undefined) return invalid("scenarioSourceInput");
+  let derivedRootIdentity: RootIdentity;
+  try {
+    derivedRootIdentity = canonicalReplayContextIdentity({
+      publicHistoryEvents: sourceInput.publicHistoryEvents,
+      initialLedger: sourceInput.initialLedger,
+      finalLedger: sourceInput.finalLedger,
+      gameRank: sourceInput.gameRank,
+      perspectiveSeat: sourceInput.perspectiveSeat,
+      ownCurrentHand: sourceInput.ownCurrentHand,
+      actingSeat: sourceInput.publicState.actingSeat,
+      publicState: sourceInput.publicState,
+      particleBankSnapshot: sourceInput.bank.snapshot,
+    });
+  } catch {
+    return invalid("scenarioSourceInput");
+  }
+  if (input.rootIdentity !== derivedRootIdentity) return invalid("rootIdentity");
 
   const candidates: RolloutCandidate[] = [];
   const candidateIds = new Set<string>();
@@ -476,6 +512,9 @@ export function createRolloutRequest(input: unknown): RolloutContractResult<Roll
   if (!budget.ok) return budget;
   const evidence = validateRolloutEvidenceRequirements(input.evidenceRequirements);
   if (!evidence.ok) return evidence;
+  if (evidence.value.minimumEffectiveSampleSize > budget.value.maximumWorkUnits) return invalidEvidence("minimumEffectiveSampleSize");
+  if (evidence.value.minimumAcceptedScenarioCount > budget.value.maximumWorkUnits) return invalidEvidence("minimumAcceptedScenarioCount");
+  if (evidence.value.minimumCompletedReplicateCount > budget.value.maximumWorkUnits) return invalidEvidence("minimumCompletedReplicateCount");
   const riskPolicy = validateRolloutRiskPolicy(input.riskPolicy);
   if (!riskPolicy.ok) return riskPolicy;
 
@@ -486,7 +525,7 @@ export function createRolloutRequest(input: unknown): RolloutContractResult<Roll
       schemaVersion: "d2f-rollout-request-v2",
       mode: input.mode,
       formalExecutionAllowed: false,
-      rootIdentity: input.rootIdentity,
+      rootIdentity: derivedRootIdentity,
       scenarioSourceInput: sourceInput,
       candidates,
       budget: budget.value.budget,
@@ -505,13 +544,20 @@ export function createRolloutResult(input: unknown): RolloutContractResult<Rollo
   const summaries: CandidateRolloutSummary[] = [];
   const ids = new Set<string>();
   for (const summary of input.candidateSummaries) {
-    if (!isCandidateSummary(summary, input.candidateSummaries.length) || ids.has(summary.candidateId)) return invalid("candidateSummaries");
+    if (!isCandidateSummary(summary) || ids.has(summary.candidateId)) return invalid("candidateSummaries");
     if (summaries.length > 0 && compareCodeUnits(summaries[summaries.length - 1]!.candidateId, summary.candidateId) > 0) return invalid("candidateSummaries");
     ids.add(summary.candidateId);
     summaries.push(deepFreeze(structuredClone(summary)));
   }
   if (input.ranking.length !== summaries.length || input.ranking.some((id) => typeof id !== "string" || !ids.has(id)) || new Set(input.ranking).size !== input.ranking.length) return invalid("ranking");
   if (!isAggregateDiagnostics(input.aggregateDiagnostics, summaries.length)) return invalid("aggregateDiagnostics");
+  const aggregate = input.aggregateDiagnostics as RolloutAggregateDiagnostics;
+  if (summaries.some((summary) => summary.acceptedScenarioCount !== aggregate.acceptedScenarioCount || summary.replicateCountPerScenario !== aggregate.replicateCountPerScenario)) return invalid("aggregateDiagnostics");
+  const summaryCompleted = safeSum(summaries.map((summary) => summary.completedReplicateCount));
+  const summaryExpected = safeSum(summaries.map((summary) => summary.expectedReplicateCount));
+  const summaryWork = safeSum(summaries.map((summary) => summary.workUnitCount));
+  if (summaryCompleted === undefined || summaryExpected === undefined || summaryWork === undefined) return invalid("candidateSummaries");
+  if (aggregate.completedReplicateCount !== summaryCompleted || aggregate.expectedCompletedReplicateCount !== summaryExpected || aggregate.workUnitCount !== summaryWork) return invalid("aggregateDiagnostics");
   return {
     ok: true,
     value: deepFreeze({
@@ -526,67 +572,335 @@ export function createRolloutResult(input: unknown): RolloutContractResult<Rollo
   };
 }
 
-function isCandidateSummary(value: unknown, candidateCount: number): value is CandidateRolloutSummary {
-  if (!isRecord(value) || !hasExactKeys(value, ["candidateId", "riskAdjustedUtility", "expectedUtility", "variance", "risk", "baselineEvaluatorScore", "acceptedScenarioCount", "replicateCountPerScenario", "totalCompletedReplicates", "completedReplicateCount", "workUnitCount"]) || !isNonEmptyString(value.candidateId)) return false;
+function isCandidateSummary(value: unknown): value is CandidateRolloutSummary {
+  if (!isRecord(value) || !hasExactKeys(value, ["candidateId", "riskAdjustedUtility", "expectedUtility", "variance", "risk", "baselineEvaluatorScore", "acceptedScenarioCount", "replicateCountPerScenario", "expectedReplicateCount", "completedReplicateCount", "workUnitCount"]) || !isNonEmptyString(value.candidateId)) return false;
   for (const field of ["riskAdjustedUtility", "expectedUtility", "baselineEvaluatorScore"] as const) if (typeof value[field] !== "number" || !Number.isFinite(value[field])) return false;
   for (const field of ["variance", "risk"] as const) if (typeof value[field] !== "number" || !Number.isFinite(value[field]) || value[field] < 0) return false;
-  for (const field of ["acceptedScenarioCount", "replicateCountPerScenario", "totalCompletedReplicates", "completedReplicateCount", "workUnitCount"] as const) {
+  for (const field of ["acceptedScenarioCount", "replicateCountPerScenario", "expectedReplicateCount", "completedReplicateCount", "workUnitCount"] as const) {
     if (!isNonNegativeSafeInteger(value[field])) return false;
   }
-  if (value.acceptedScenarioCount < 1 || value.replicateCountPerScenario < 1 || !isPositiveSafeInteger(candidateCount)) return false;
+  if (value.acceptedScenarioCount < 1 || value.replicateCountPerScenario < 1) return false;
   const total = safeProduct([value.acceptedScenarioCount, value.replicateCountPerScenario]);
-  const completed = total === undefined ? undefined : safeProduct([candidateCount, total]);
-  return total !== undefined && completed !== undefined && value.totalCompletedReplicates === total && value.completedReplicateCount === completed;
+  return total !== undefined && value.expectedReplicateCount === total && value.completedReplicateCount <= total;
 }
 
 function isAggregateDiagnostics(value: unknown, candidateCount: number): value is RolloutAggregateDiagnostics {
-  if (!isRecord(value) || !hasExactKeys(value, ["effectiveSampleSize", "acceptedScenarioCount", "replicateCountPerScenario", "totalCompletedReplicates", "completedReplicateCount", "expectedCompletedReplicateCount", "candidateCount", "workUnitCount", "coverage"]) || value.coverage !== "complete" || value.candidateCount !== candidateCount) return false;
+  if (!isRecord(value) || !hasExactKeys(value, ["effectiveSampleSize", "acceptedScenarioCount", "replicateCountPerScenario", "completedReplicateCount", "expectedCompletedReplicateCount", "candidateCount", "workUnitCount", "coverage"]) || value.coverage !== "complete" || value.candidateCount !== candidateCount) return false;
   if (typeof value.effectiveSampleSize !== "number" || !Number.isFinite(value.effectiveSampleSize) || value.effectiveSampleSize < 0) return false;
-  for (const field of ["acceptedScenarioCount", "replicateCountPerScenario", "totalCompletedReplicates", "completedReplicateCount", "expectedCompletedReplicateCount", "candidateCount", "workUnitCount"] as const) if (!isNonNegativeSafeInteger(value[field])) return false;
+  for (const field of ["acceptedScenarioCount", "replicateCountPerScenario", "completedReplicateCount", "expectedCompletedReplicateCount", "candidateCount", "workUnitCount"] as const) if (!isNonNegativeSafeInteger(value[field])) return false;
   if (value.acceptedScenarioCount < 1 || value.replicateCountPerScenario < 1 || !isPositiveSafeInteger(candidateCount)) return false;
   const total = safeProduct([value.acceptedScenarioCount, value.replicateCountPerScenario]);
   const expected = total === undefined ? undefined : safeProduct([candidateCount, total]);
   return total !== undefined
     && expected !== undefined
-    && value.totalCompletedReplicates === total
     && value.completedReplicateCount === expected
     && value.expectedCompletedReplicateCount === expected;
 }
 
 function cloneScenarioSourceInput(value: unknown): RolloutScenarioSourceInput | undefined {
-  if (!isRecord(value) || !isRecord(value.bank) || !isDeeplyFrozen(value.bank) || !Array.isArray(value.publicHistoryEvents) || !isRecord(value.initialLedger) || !isRecord(value.finalLedger) || !RANKS.includes(value.gameRank as GameRank) || !isSeat(value.perspectiveSeat) || !Array.isArray(value.ownCurrentHand) || !isRecord(value.publicState)) return undefined;
-  if (!isPublicState(value.publicState)) return undefined;
-  try {
-    return deepFreeze({
-      bank: value.bank as ParticleBank,
-      publicHistoryEvents: structuredClone(value.publicHistoryEvents),
-      initialLedger: structuredClone(value.initialLedger),
-      finalLedger: structuredClone(value.finalLedger),
-      gameRank: value.gameRank,
-      perspectiveSeat: value.perspectiveSeat,
-      ownCurrentHand: structuredClone(value.ownCurrentHand),
-      publicState: structuredClone(value.publicState),
-    }) as unknown as RolloutScenarioSourceInput;
-  } catch {
-    return undefined;
-  }
+  if (!isRecord(value) || !hasExactKeys(value, SOURCE_INPUT_KEYS) || !isRecord(value.bank) || !isDeeplyFrozen(value.bank) || !isParticleSnapshotIdentity(value.bank.snapshot)) return undefined;
+  if (!RANKS.includes(value.gameRank as GameRank) || !isSeat(value.perspectiveSeat)) return undefined;
+  const publicHistoryEvents = clonePublicHistoryEvents(value.publicHistoryEvents);
+  const initialLedger = cloneHardPublicLedger(value.initialLedger);
+  const finalLedger = cloneHardPublicLedger(value.finalLedger);
+  const ownCurrentHand = cloneCardArray(value.ownCurrentHand);
+  const publicState = clonePublicState(value.publicState);
+  if (publicHistoryEvents === undefined || initialLedger === undefined || finalLedger === undefined || ownCurrentHand === undefined || publicState === undefined) return undefined;
+  return deepFreeze({
+    bank: value.bank as ParticleBank,
+    publicHistoryEvents,
+    initialLedger,
+    finalLedger,
+    gameRank: value.gameRank,
+    perspectiveSeat: value.perspectiveSeat,
+    ownCurrentHand,
+    publicState,
+  }) as unknown as RolloutScenarioSourceInput;
 }
 
 function isPublicState(value: unknown): value is RolloutPublicState {
-  if (!isRecord(value) || !RANKS.includes(value.gameRank as GameRank) || !isSeat(value.actingSeat) || !isSeat(value.perspectiveSeat) || !isSeat(value.partnerSeat) || !isRecord(value.handCounts) || !Array.isArray(value.finishOrder) || !Array.isArray(value.publicPlayedCardIds)) return false;
+  if (!isRecord(value) || !hasExactKeys(value, PUBLIC_STATE_KEYS) || !RANKS.includes(value.gameRank as GameRank) || !isSeat(value.actingSeat) || !isSeat(value.perspectiveSeat) || !isSeat(value.partnerSeat) || value.partnerSeat !== partnerSeat(value.perspectiveSeat) || !isRecord(value.handCounts) || !hasExactKeys(value.handCounts, ["0", "1", "2", "3"]) || !Array.isArray(value.finishOrder) || !Array.isArray(value.publicPlayedCardIds)) return false;
   if (!SEATS.every((seat) => isNonNegativeSafeInteger(value.handCounts[seat]))) return false;
-  if (!value.finishOrder.every(isSeat) || !value.publicPlayedCardIds.every((id) => typeof id === "string")) return false;
-  return value.currentLastPlay === null || typeof value.currentLastPlay === "object";
+  if (!value.finishOrder.every(isSeat) || new Set(value.finishOrder).size !== value.finishOrder.length) return false;
+  if (!value.publicPlayedCardIds.every((id) => isCardIdentifier(id)) || new Set(value.publicPlayedCardIds).size !== value.publicPlayedCardIds.length) return false;
+  const hasLastPlay = value.currentLastPlay !== null;
+  if (hasLastPlay !== (value.currentLastPlaySeat !== null)) return false;
+  if (!hasLastPlay) return true;
+  if (!isSeat(value.currentLastPlaySeat)) return false;
+  try {
+    assertCardGroup(value.currentLastPlay);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isRolloutPolicy(value: unknown): value is RolloutPolicy {
   return isRecord(value) && typeof value.chooseAction === "function";
 }
 
+function clonePublicHistoryEvents(value: unknown): readonly PublicActionEvent[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const events: PublicActionEvent[] = [];
+  try {
+    for (const event of value) {
+      assertFinalizedPublicActionEvent(event);
+      verifyPublicActionEventHash(event);
+      if (!isPublicEventSemanticShape(event)) throw new TypeError("EVENT_SCHEMA_INVALID");
+      events.push(structuredClone(event) as PublicActionEvent);
+    }
+  } catch {
+    return undefined;
+  }
+  return deepFreeze(events);
+}
+
+function cloneCardArray(value: unknown): readonly Card[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const cards: Card[] = [];
+  const ids = new Set<string>();
+  try {
+    for (const card of value) {
+      assertRolloutCard(card);
+      if (ids.has(card.id)) return undefined;
+      ids.add(card.id);
+      cards.push(cloneCard(card));
+    }
+  } catch {
+    return undefined;
+  }
+  return deepFreeze(cards);
+}
+
+function cloneCard(card: Card): Card {
+  return card.kind === "suited"
+    ? { id: card.id, kind: card.kind, rank: card.rank, suit: card.suit, copy: card.copy }
+    : { id: card.id, kind: card.kind, rank: card.rank, copy: card.copy };
+}
+
+function cloneCardGroup(value: unknown): CardGroup | undefined {
+  try {
+    assertCardGroup(value);
+  } catch {
+    return undefined;
+  }
+  const group = value as CardGroup;
+  return {
+    id: group.id,
+    type: group.type,
+    label: group.label,
+    purpose: group.purpose,
+    cards: group.cards.map(cloneCard),
+    wildcards: group.wildcards.map(cloneCard),
+    strength: group.strength,
+  };
+}
+
+function clonePublicState(value: unknown): RolloutPublicState | undefined {
+  if (!isPublicState(value)) return undefined;
+  const clonedLastPlay = value.currentLastPlay === null ? null : cloneCardGroup(value.currentLastPlay);
+  if (value.currentLastPlay !== null && clonedLastPlay === undefined) return undefined;
+  const currentLastPlay: CardGroup | null = clonedLastPlay ?? null;
+  return deepFreeze({
+    gameRank: value.gameRank,
+    actingSeat: value.actingSeat,
+    perspectiveSeat: value.perspectiveSeat,
+    partnerSeat: value.partnerSeat,
+    handCounts: { 0: value.handCounts[0], 1: value.handCounts[1], 2: value.handCounts[2], 3: value.handCounts[3] },
+    finishOrder: [...value.finishOrder],
+    publicPlayedCardIds: [...value.publicPlayedCardIds],
+    currentLastPlay,
+    currentLastPlaySeat: value.currentLastPlaySeat,
+  });
+}
+
+function cloneHardPublicLedger(value: unknown): HardPublicLedger | undefined {
+  if (!isHardPublicLedger(value)) return undefined;
+  const ledger = value as HardPublicLedger;
+  const currentTrick: HardPublicLedger["currentTrick"] = {
+    trickIndex: ledger.currentTrick.trickIndex,
+    leadSeat: ledger.currentTrick.leadSeat,
+    passSeats: [...ledger.currentTrick.passSeats],
+    ...(ledger.currentTrick.lastPlaySeat === undefined ? {} : { lastPlaySeat: ledger.currentTrick.lastPlaySeat }),
+    ...(ledger.currentTrick.lastPlayStableKey === undefined ? {} : { lastPlayStableKey: ledger.currentTrick.lastPlayStableKey }),
+  };
+  return deepFreeze({
+    schemaVersion: ledger.schemaVersion,
+    gameId: ledger.gameId,
+    roundIdentity: ledger.roundIdentity,
+    handIdentity: ledger.handIdentity,
+    nextEventIndex: ledger.nextEventIndex,
+    lastAppliedEventIndex: ledger.lastAppliedEventIndex,
+    seenEventHashes: { ...ledger.seenEventHashes },
+    playedCardIds: [...ledger.playedCardIds],
+    revealedTransferEvents: ledger.revealedTransferEvents.map((event) => ({
+      eventIndex: event.eventIndex,
+      kind: event.kind,
+      ...(event.cardId === undefined ? {} : { cardId: event.cardId }),
+      fromSeat: event.fromSeat,
+      toSeat: event.toSeat,
+    })),
+    handCounts: { 0: ledger.handCounts[0], 1: ledger.handCounts[1], 2: ledger.handCounts[2], 3: ledger.handCounts[3] },
+    currentTrick,
+    finishOrder: [...ledger.finishOrder],
+    publicTributeEvents: [...ledger.publicTributeEvents],
+    recentActionSummaries: ledger.recentActionSummaries.map((summary) => ({ ...summary })),
+  });
+}
+
+function isParticleSnapshotIdentity(value: unknown): value is ParticleSnapshotIdentity {
+  return isRecord(value)
+    && hasExactKeys(value, SNAPSHOT_KEYS)
+    && isNonEmptyString(value.gameId)
+    && isNonEmptyString(value.roundIdentity)
+    && isNonEmptyString(value.handIdentity)
+    && isDigest(value.initialLedgerHash)
+    && isLedgerEventIndex(value.lastAppliedEventIndex)
+    && isDigest(value.ledgerHash)
+    && isSeat(value.perspectiveSeat)
+    && RANKS.includes(value.gameRank as GameRank);
+}
+
+function isHardPublicLedger(value: unknown): value is HardPublicLedger {
+  if (!isRecord(value) || !hasExactKeys(value, LEDGER_KEYS) || value.schemaVersion !== "d2-public-ledger-v1" || !isNonEmptyString(value.gameId) || !isNonEmptyString(value.roundIdentity) || !isNonEmptyString(value.handIdentity) || !isLedgerEventIndex(value.lastAppliedEventIndex) || !isNonNegativeSafeInteger(value.nextEventIndex) || value.nextEventIndex !== value.lastAppliedEventIndex + 1 || !isRecord(value.seenEventHashes) || !isRecord(value.handCounts) || !hasExactKeys(value.handCounts, ["0", "1", "2", "3"]) || !isRecord(value.currentTrick) || !Array.isArray(value.playedCardIds) || !Array.isArray(value.revealedTransferEvents) || !Array.isArray(value.finishOrder) || !Array.isArray(value.publicTributeEvents) || !Array.isArray(value.recentActionSummaries)) return false;
+  const seenKeys = Object.keys(value.seenEventHashes);
+  if (seenKeys.length !== value.lastAppliedEventIndex + 1 || seenKeys.some((key) => !/^\d+$/.test(key) || String(Number(key)) !== key || Number(key) > value.lastAppliedEventIndex || !isDigest(value.seenEventHashes[key]))) return false;
+  if (!SEATS.every((seat) => isNonNegativeSafeInteger(value.handCounts[seat]))) return false;
+  if (!value.playedCardIds.every(isCardIdentifier) || new Set(value.playedCardIds).size !== value.playedCardIds.length) return false;
+  if (!isLedgerTrick(value.currentTrick) || !value.finishOrder.every(isSeat) || new Set(value.finishOrder).size !== value.finishOrder.length || !value.publicTributeEvents.every((event) => typeof event === "string" && event.length > 0) || !value.recentActionSummaries.every(isPublicSummary)) return false;
+  return value.revealedTransferEvents.every(isRevealedTransfer);
+}
+
+function isLedgerTrick(value: unknown): value is HardPublicLedger["currentTrick"] {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["trickIndex", "leadSeat", "lastPlaySeat", "lastPlayStableKey", "passSeats"]) || !isNonNegativeSafeInteger(value.trickIndex) || !isSeat(value.leadSeat) || !Array.isArray(value.passSeats) || !value.passSeats.every(isSeat) || new Set(value.passSeats).size !== value.passSeats.length) return false;
+  const hasSeat = value.lastPlaySeat !== undefined;
+  const hasStableKey = value.lastPlayStableKey !== undefined;
+  return hasSeat === hasStableKey && (!hasSeat || (isSeat(value.lastPlaySeat) && typeof value.lastPlayStableKey === "string" && value.lastPlayStableKey.length > 0));
+}
+
+function isRevealedTransfer(value: unknown): value is HardPublicLedger["revealedTransferEvents"][number] {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["eventIndex", "kind", "cardId", "fromSeat", "toSeat"]) || !isNonNegativeSafeInteger(value.eventIndex) || (value.kind !== "tribute" && value.kind !== "return") || !isSeat(value.fromSeat) || !isSeat(value.toSeat)) return false;
+  return value.cardId === undefined || isCardIdentifier(value.cardId);
+}
+
+function isPublicSummary(value: unknown): value is Readonly<Record<string, string | number | boolean>> {
+  return isRecord(value)
+    && hasExactKeys(value, ["eventIndex", "kind", "seat", "trickIndex", "publicStableKey"])
+    && isNonNegativeSafeInteger(value.eventIndex)
+    && typeof value.kind === "string"
+    && isSeat(value.seat)
+    && isNonNegativeSafeInteger(value.trickIndex)
+    && typeof value.publicStableKey === "string";
+}
+
+function isPublicEventSemanticShape(value: PublicActionEvent): boolean {
+  const event = value as unknown as Record<string, unknown>;
+  if (!hasOnlyKeys(event, [
+    "schemaVersion", "gameId", "roundIdentity", "handIdentity", "eventIndex", "kind", "seat", "publicStableKey", "trickIndex",
+    "patternType", "groupType", "handCountBefore", "handCountAfter", "leadSeat", "lastPlaySeat", "usedWildcardCount", "usedBomb",
+    "publicPayloadHash", "publicCardIds", "finishPosition", "remainingHandCount", "finishReason", "fromSeat", "toSeat", "handCountChanges", "reasonCode",
+  ])) return false;
+  for (const key of ["eventIndex", "trickIndex", "handCountBefore", "handCountAfter", "usedWildcardCount", "finishPosition", "remainingHandCount"] as const) {
+    if (event[key] !== undefined && !isNonNegativeSafeInteger(event[key])) return false;
+  }
+  if (event.usedBomb !== undefined && typeof event.usedBomb !== "boolean") return false;
+  if (event.kind === "play" || event.kind === "tribute" || event.kind === "return") {
+    if (!Array.isArray(event.publicCardIds) || event.publicCardIds.some((id) => !isCardIdentifier(id)) || new Set(event.publicCardIds).size !== event.publicCardIds.length) return false;
+  }
+  if (event.kind === "tribute" || event.kind === "return") {
+    const changes = event.handCountChanges;
+    if (!isRecord(changes) || !hasExactKeys(changes, ["0", "1", "2", "3"]) || ![0, 1, 2, 3].every((seat) => Number.isSafeInteger(changes[seat]) && Number.isFinite(changes[seat]))) return false;
+  }
+  return true;
+}
+
+function isCardIdentifier(value: unknown): value is string {
+  return typeof value === "string" && /^(?:[SCHD](?:10|[AKQJ2-9])-[12]|Joker-(?:SJ|BJ)-[12])$/.test(value);
+}
+
+function isLedgerEventIndex(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= -1;
+}
+
+function isDigest(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+function assertCardGroup(value: unknown): asserts value is CardGroup {
+  assertRolloutAction({ type: "play", group: value as CardGroup });
+}
+
+function partnerSeat(seat: PublicSeat): PublicSeat {
+  return ((seat + 2) % 4) as PublicSeat;
+}
+
 function assertReplayContextInput(input: RolloutReplayContextInput): void {
-  if (!isRecord(input) || !Array.isArray(input.publicHistoryEvents) || !isRecord(input.initialLedger) || !isRecord(input.finalLedger) || !RANKS.includes(input.gameRank) || !isSeat(input.perspectiveSeat) || !isSeat(input.actingSeat) || !Array.isArray(input.ownCurrentHand) || !isPublicState(input.publicState) || !isRecord(input.particleBankSnapshot)) throw new TypeError("REPLAY_CONTEXT_INVALID");
-  if (!input.publicHistoryEvents.every((event) => isRecord(event) && isNonNegativeSafeInteger(event.eventIndex) && typeof event.publicPayloadHash === "string" && /^[a-f0-9]{64}$/.test(event.publicPayloadHash))) throw new TypeError("REPLAY_CONTEXT_INVALID");
-  for (const card of input.ownCurrentHand) if (!isRecord(card) || typeof card.id !== "string" || card.id.length === 0) throw new TypeError("REPLAY_HAND_INVALID");
+  if (!isRecord(input) || !Array.isArray(input.publicHistoryEvents) || !isHardPublicLedger(input.initialLedger) || !isHardPublicLedger(input.finalLedger) || !RANKS.includes(input.gameRank) || !isSeat(input.perspectiveSeat) || !isSeat(input.actingSeat) || !Array.isArray(input.ownCurrentHand) || !isPublicState(input.publicState) || !isParticleSnapshotIdentity(input.particleBankSnapshot)) throw new TypeError("REPLAY_CONTEXT_INVALID");
+  const events = clonePublicHistoryEvents(input.publicHistoryEvents);
+  const ownCurrentHand = cloneCardArray(input.ownCurrentHand);
+  if (events === undefined) throw new TypeError("REPLAY_CONTEXT_INVALID");
+  if (ownCurrentHand === undefined) throw new TypeError("REPLAY_HAND_INVALID");
+  if (input.publicState.gameRank !== input.gameRank || input.publicState.perspectiveSeat !== input.perspectiveSeat || input.publicState.actingSeat !== input.actingSeat || input.publicState.partnerSeat !== partnerSeat(input.perspectiveSeat)) throw new TypeError("REPLAY_CONTEXT_INVALID");
+  if (!SEATS.every((seat) => input.publicState.handCounts[seat] === input.finalLedger.handCounts[seat])
+    || input.publicState.publicPlayedCardIds.length !== input.finalLedger.playedCardIds.length
+    || !input.publicState.publicPlayedCardIds.every((id, index) => id === input.finalLedger.playedCardIds[index])
+    || input.publicState.finishOrder.length !== input.finalLedger.finishOrder.length
+    || !input.publicState.finishOrder.every((seat, index) => seat === input.finalLedger.finishOrder[index])) throw new TypeError("REPLAY_CONTEXT_INVALID");
+  if (!matchesLedgerIdentity(input.initialLedger, input.finalLedger, input.particleBankSnapshot, input.gameRank, input.perspectiveSeat) || !matchesHistoryShape(events, input.initialLedger, input.finalLedger) || deriveActingSeat(events, input.finalLedger) !== input.actingSeat) throw new TypeError("REPLAY_CONTEXT_INVALID");
+}
+
+function matchesLedgerIdentity(initialLedger: HardPublicLedger, finalLedger: HardPublicLedger, snapshot: ParticleSnapshotIdentity, gameRank: GameRank, perspectiveSeat: PublicSeat): boolean {
+  return initialLedger.gameId === finalLedger.gameId
+    && initialLedger.roundIdentity === finalLedger.roundIdentity
+    && initialLedger.handIdentity === finalLedger.handIdentity
+    && snapshot.gameId === initialLedger.gameId
+    && snapshot.roundIdentity === initialLedger.roundIdentity
+    && snapshot.handIdentity === initialLedger.handIdentity
+    && snapshot.initialLedgerHash === canonicalPublicLedgerHash(initialLedger)
+    && snapshot.ledgerHash === canonicalPublicLedgerHash(finalLedger)
+    && snapshot.lastAppliedEventIndex === finalLedger.lastAppliedEventIndex
+    && snapshot.gameRank === gameRank
+    && snapshot.perspectiveSeat === perspectiveSeat;
+}
+
+function matchesHistoryShape(events: readonly PublicActionEvent[], initialLedger: HardPublicLedger, finalLedger: HardPublicLedger): boolean {
+  if (!isInitialOpeningLedger(initialLedger)) return false;
+  if (events.length === 0) return finalLedger.lastAppliedEventIndex === -1 && finalLedger.nextEventIndex === 0 && canonicalPublicLedgerHash(initialLedger) === canonicalPublicLedgerHash(finalLedger);
+  if (events[0]?.eventIndex !== 0 || events[events.length - 1]?.eventIndex !== finalLedger.lastAppliedEventIndex || finalLedger.nextEventIndex !== finalLedger.lastAppliedEventIndex + 1) return false;
+  return events.every((event, index) => event.eventIndex === index
+    && event.gameId === finalLedger.gameId
+    && event.roundIdentity === finalLedger.roundIdentity
+    && event.handIdentity === finalLedger.handIdentity
+    && finalLedger.seenEventHashes[event.eventIndex] === event.publicPayloadHash);
+}
+
+function isInitialOpeningLedger(ledger: HardPublicLedger): boolean {
+  return ledger.lastAppliedEventIndex === -1
+    && ledger.nextEventIndex === 0
+    && Object.keys(ledger.seenEventHashes).length === 0
+    && ledger.playedCardIds.length === 0
+    && ledger.revealedTransferEvents.length === 0
+    && ledger.finishOrder.length === 0
+    && ledger.currentTrick.passSeats.length === 0
+    && ledger.currentTrick.lastPlaySeat === undefined
+    && ledger.currentTrick.lastPlayStableKey === undefined
+    && ledger.recentActionSummaries.length === 0;
+}
+
+function deriveActingSeat(events: readonly PublicActionEvent[], ledger: HardPublicLedger): PublicSeat | undefined {
+  if (events.length === 0) return ledger.currentTrick.leadSeat;
+  let actionIndex = events.length - 1;
+  while (actionIndex >= 0 && events[actionIndex]!.kind === "finish") actionIndex -= 1;
+  if (actionIndex < 0) return undefined;
+  const last = events[actionIndex]!;
+  if (last.kind === "trick-clear") return ledger.currentTrick.leadSeat;
+  if (last.kind !== "play" && last.kind !== "pass" && last.kind !== "finish") return undefined;
+  let next = ((last.seat + 3) % 4) as PublicSeat;
+  for (let count = 0; count < 4; count += 1) {
+    if (!ledger.finishOrder.includes(next)) return next;
+    next = ((next + 3) % 4) as PublicSeat;
+  }
+  return undefined;
 }
 
 function writeCardIds(writer: CanonicalWriter, cards: readonly Card[], sort: boolean): void {
@@ -597,6 +911,20 @@ function writeCardIds(writer: CanonicalWriter, cards: readonly Card[], sort: boo
   if (sort) ids.sort(compareCodeUnits);
   writer.writeUint32(ids.length);
   for (const id of ids) writer.writeString(id);
+}
+
+function writeSemanticCardList(writer: CanonicalWriter, cards: readonly Card[]): void {
+  const sorted = [...cards].sort((left, right) => compareCodeUnits(left.id, right.id));
+  writer.writeUint32(sorted.length);
+  for (const card of sorted) writeSemanticCard(writer, card);
+}
+
+function writeSemanticCard(writer: CanonicalWriter, card: Card): void {
+  writer.writeString(card.id);
+  writer.writeString(card.kind);
+  writer.writeString(card.rank);
+  if (card.kind === "suited") writer.writeString(card.suit);
+  writer.writeUint8(card.copy);
 }
 
 function writePublicState(writer: CanonicalWriter, state: RolloutPublicState): void {
@@ -610,7 +938,19 @@ function writePublicState(writer: CanonicalWriter, state: RolloutPublicState): v
   writer.writeUint32(state.publicPlayedCardIds.length);
   for (const id of state.publicPlayedCardIds) writer.writeString(id);
   writer.writeInteger(state.currentLastPlaySeat === null ? -1 : state.currentLastPlaySeat);
-  writeUnknown(writer, state.currentLastPlay);
+  if (state.currentLastPlay === null) {
+    writer.writeString("no-current-last-play");
+  } else {
+    writer.writeString("current-last-play");
+    writeSemanticCardGroup(writer, state.currentLastPlay as CardGroup);
+  }
+}
+
+function writeSemanticCardGroup(writer: CanonicalWriter, group: CardGroup): void {
+  writer.writeString(group.type);
+  writer.writeNumber(group.strength);
+  writeSemanticCardList(writer, group.cards);
+  writeSemanticCardList(writer, group.wildcards);
 }
 
 function writeParticleSnapshot(writer: CanonicalWriter, snapshot: ParticleSnapshotIdentity): void {
@@ -624,41 +964,6 @@ function writeParticleSnapshot(writer: CanonicalWriter, snapshot: ParticleSnapsh
   writer.writeString(snapshot.gameRank);
 }
 
-function writeUnknown(writer: CanonicalWriter, value: unknown): void {
-  if (value === null) {
-    writer.writeString("null");
-    return;
-  }
-  if (typeof value === "string" || typeof value === "boolean") {
-    writer.writeString(typeof value);
-    writer.writeString(String(value));
-    return;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new TypeError("NON_FINITE_PUBLIC_STATE");
-    writer.writeString("number");
-    writer.writeString(String(value));
-    return;
-  }
-  if (Array.isArray(value)) {
-    writer.writeString("array");
-    writer.writeUint32(value.length);
-    for (const child of value) writeUnknown(writer, child);
-    return;
-  }
-  if (typeof value === "object") {
-    writer.writeString("object");
-    const entries = Object.keys(value as Record<string, unknown>).sort(compareCodeUnits);
-    writer.writeUint32(entries.length);
-    for (const key of entries) {
-      writer.writeString(key);
-      writeUnknown(writer, (value as Record<string, unknown>)[key]);
-    }
-    return;
-  }
-  throw new TypeError("PUBLIC_STATE_VALUE_INVALID");
-}
-
 function assertRolloutAction(action: RolloutAction): void {
   if (!isRecord(action) || (action.type !== "pass" && action.type !== "play")) throw new TypeError("ACTION_INVALID");
   if (action.type === "pass") {
@@ -668,7 +973,7 @@ function assertRolloutAction(action: RolloutAction): void {
   if (!hasExactKeys(action, ["type", "group"])) throw new TypeError("ACTION_INVALID");
   {
     const group = action.group;
-    if (!isRecord(group) || !hasExactKeys(group, ["id", "type", "label", "purpose", "cards", "wildcards", "strength"]) || !isNonEmptyString(group.id) || typeof group.type !== "string" || !GROUP_TYPES.includes(group.type as GroupType) || !isNonEmptyString(group.label) || typeof group.purpose !== "string" || !GROUP_PURPOSES.includes(group.purpose as GroupPurpose) || typeof group.strength !== "number" || !Number.isFinite(group.strength) || !Array.isArray(group.cards) || group.cards.length === 0 || !Array.isArray(group.wildcards)) throw new TypeError("ACTION_GROUP_INVALID");
+    if (!isRecord(group) || !hasExactKeys(group, ["id", "type", "label", "purpose", "cards", "wildcards", "strength"]) || !isNonEmptyString(group.id) || typeof group.type !== "string" || !GROUP_TYPES.includes(group.type as GroupType) || !isNonEmptyString(group.label) || typeof group.purpose !== "string" || !GROUP_PURPOSES.includes(group.purpose as GroupPurpose) || !isNonNegativeSafeInteger(group.strength) || !Array.isArray(group.cards) || group.cards.length === 0 || !Array.isArray(group.wildcards)) throw new TypeError("ACTION_GROUP_INVALID");
     const cardIds = group.cards.map((card) => {
       assertRolloutCard(card);
       return card.id;
@@ -685,10 +990,12 @@ function assertRolloutCard(card: unknown): asserts card is Card {
   if (!isRecord(card) || !isNonEmptyString(card.id) || typeof card.kind !== "string") throw new TypeError("ACTION_CARD_INVALID");
   if (card.kind === "suited") {
     if (!hasExactKeys(card, ["id", "kind", "rank", "suit", "copy"]) || !RANKS.includes(card.rank as GameRank) || !SUITS.includes(card.suit as (typeof SUITS)[number]) || (card.copy !== 1 && card.copy !== 2)) throw new TypeError("ACTION_CARD_INVALID");
+    if (card.id !== `${CARD_SUIT_CODES[card.suit]}${card.rank}-${card.copy}`) throw new TypeError("ACTION_CARD_INVALID");
     return;
   }
   if (card.kind === "joker") {
     if (!hasExactKeys(card, ["id", "kind", "rank", "copy"]) || (card.rank !== "SJ" && card.rank !== "BJ") || (card.copy !== 1 && card.copy !== 2)) throw new TypeError("ACTION_CARD_INVALID");
+    if (card.id !== `Joker-${card.rank}-${card.copy}`) throw new TypeError("ACTION_CARD_INVALID");
     return;
   }
   throw new TypeError("ACTION_CARD_INVALID");
@@ -723,11 +1030,21 @@ function isRecord(value: unknown): value is Record<string, any> {
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  return Object.keys(value).length === keys.length && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+  const ownKeys = Reflect.ownKeys(value);
+  return ownKeys.length === keys.length && ownKeys.every((key) => typeof key === "string" && keys.includes(key)) && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const allowed = new Set(keys);
+  return Reflect.ownKeys(value).every((key) => typeof key === "string" && allowed.has(key));
 }
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function isRootIdentity(value: unknown): value is RootIdentity {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 
 function isPositiveSafeInteger(value: unknown): value is number {
@@ -748,6 +1065,15 @@ function safeProduct(values: readonly number[]): number | undefined {
   return Number.isSafeInteger(product) ? product : undefined;
 }
 
+function safeSum(values: readonly number[]): number | undefined {
+  let sum = 0;
+  for (const value of values) {
+    if (!isNonNegativeSafeInteger(value) || sum > Number.MAX_SAFE_INTEGER - value) return undefined;
+    sum += value;
+  }
+  return sum;
+}
+
 function compareCodeUnits(left: string, right: string): number {
   const length = Math.min(left.length, right.length);
   for (let index = 0; index < length; index += 1) {
@@ -758,10 +1084,12 @@ function compareCodeUnits(left: string, right: string): number {
   return left.length - right.length;
 }
 
-function deepFreeze<T>(value: T): T {
-  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
-  Object.freeze(value);
-  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+  if (value === null || typeof value !== "object") return value;
+  if (seen.has(value)) return value;
+  seen.add(value);
+  if (!Object.isFrozen(value)) Object.freeze(value);
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child, seen);
   return value;
 }
 
@@ -787,6 +1115,11 @@ class CanonicalWriter {
   writeInteger(value: number): void {
     if (!Number.isSafeInteger(value)) throw new RangeError("CANONICAL_INTEGER_INVALID");
     this.writeString(value.toString(10));
+  }
+
+  writeNumber(value: number): void {
+    if (!Number.isFinite(value)) throw new RangeError("CANONICAL_NUMBER_INVALID");
+    this.writeString(Object.is(value, -0) ? "-0" : value.toString(10));
   }
 
   writeUint8(value: number): void {

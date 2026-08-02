@@ -110,6 +110,8 @@ type RolloutEvidenceRequirements = Readonly<{
   requireCompleteCoverage: true;
 }>;
 
+Evidence Gate：`minimumEffectiveSampleSize`、`minimumAcceptedScenarioCount`、`minimumCompletedReplicateCount` 均必须为正的 finite safe integer；validated request 不得超过 `maximumWorkUnits` 上限。
+
 type RolloutRiskPolicy = Readonly<{
   schemaVersion: "d2f-rollout-risk-policy-v1";
   variancePenalty: number;
@@ -191,7 +193,7 @@ type CandidateRolloutSummary = Readonly<{
   baselineEvaluatorScore: number;
   acceptedScenarioCount: number;
   replicateCountPerScenario: number;
-  totalCompletedReplicates: number;
+  expectedReplicateCount: number;
   completedReplicateCount: number;
   workUnitCount: number;
 }>;
@@ -200,13 +202,14 @@ type RolloutAggregateDiagnostics = Readonly<{
   effectiveSampleSize: number;
   acceptedScenarioCount: number;
   replicateCountPerScenario: number;
-  totalCompletedReplicates: number;
   completedReplicateCount: number;
   expectedCompletedReplicateCount: number;
   candidateCount: number;
   workUnitCount: number;
   coverage: "complete";
 }>;
+
+Coverage Gate：candidate summary 的 `expectedReplicateCount` 是 candidate-local expected coverage，`completedReplicateCount` 是 candidate-local actual coverage；aggregate diagnostics 只保留全候选的 `expectedCompletedReplicateCount` 和 `completedReplicateCount`，必须由 candidateCount 和 summary 的安全求和派生，不得引入语义重复的 `totalCompletedReplicates`。
 
 type RolloutResult = Readonly<{
   schemaVersion: "d2f-rollout-result-v2";

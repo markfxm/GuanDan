@@ -8,6 +8,7 @@ import { createParticleBankHandle } from "../../../src/ai/particles/particleBank
 import { particleScenarioIdentity } from "../../../src/ai/particles/canonicalDeal";
 import type { CanonicalInitialDeal, ParticleBank, ParticleScenario } from "../../../src/ai/particles/contracts";
 import { createParticleScenarioSource } from "../../../src/ai/rollout/particleScenarioSource";
+import { canonicalReplayContextIdentity } from "../../../src/ai/rollout/contracts";
 import type { RolloutScenarioSourceInput } from "../../../src/ai/rollout/contracts";
 
 function makePlayEvent(identity: ReturnType<typeof buildPublicGameIdentity>, cardId: string): PublicActionEvent {
@@ -106,7 +107,7 @@ function makeFixture(): { input: RolloutScenarioSourceInput; bank: ParticleBank;
     ownCurrentHand: deck.slice(1, 27),
     publicState: {
       gameRank: "2",
-      actingSeat: 1,
+      actingSeat: 3,
       perspectiveSeat: 0,
       partnerSeat: 2,
       handCounts: { 0: 26, 1: 27, 2: 27, 3: 27 },
@@ -119,7 +120,131 @@ function makeFixture(): { input: RolloutScenarioSourceInput; bank: ParticleBank;
   return { input, bank, scenario, initialLedger, finalLedger };
 }
 
+function makeEmptyHistoryFixture(): ReturnType<typeof makeFixture> {
+  const fixture = makeFixture();
+  const snapshot = {
+    gameId: fixture.initialLedger.gameId,
+    roundIdentity: fixture.initialLedger.roundIdentity,
+    handIdentity: fixture.initialLedger.handIdentity,
+    initialLedgerHash: canonicalPublicLedgerHash(fixture.initialLedger),
+    lastAppliedEventIndex: -1,
+    ledgerHash: canonicalPublicLedgerHash(fixture.initialLedger),
+    perspectiveSeat: 0 as const,
+    gameRank: "2" as const,
+  };
+  const bank = createParticleBankHandle(
+    { ...fixture.bank, snapshot },
+    { records: [{ particleId: particleScenarioIdentity(snapshot, fixture.scenario), scenario: fixture.scenario, normalizedWeight: 1 }] },
+  );
+  return {
+    ...fixture,
+    bank,
+    input: {
+      ...fixture.input,
+      bank,
+      publicHistoryEvents: [],
+      finalLedger: fixture.initialLedger,
+      ownCurrentHand: createDeck().slice(0, 27),
+      publicState: {
+        ...fixture.input.publicState,
+        actingSeat: 0,
+        handCounts: { 0: 27, 1: 27, 2: 27, 3: 27 },
+        publicPlayedCardIds: [],
+        currentLastPlay: null,
+        currentLastPlaySeat: null,
+      },
+    },
+  };
+}
+
 describe("particleScenarioSource", () => {
+  test("changes replay identity when a finalized event hash changes", () => {
+    const fixture = makeFixture();
+    const identity = (input: RolloutScenarioSourceInput): string => canonicalReplayContextIdentity({
+      publicHistoryEvents: input.publicHistoryEvents,
+      initialLedger: input.initialLedger,
+      finalLedger: input.finalLedger,
+      gameRank: input.gameRank,
+      perspectiveSeat: input.perspectiveSeat,
+      ownCurrentHand: input.ownCurrentHand,
+      actingSeat: input.publicState.actingSeat,
+      publicState: input.publicState,
+      particleBankSnapshot: input.bank.snapshot,
+    });
+    const { publicPayloadHash: _ignoredHash, ...eventDraft } = fixture.input.publicHistoryEvents[0]!;
+    const alteredEvent = finalizePublicActionEvent({ ...eventDraft, usedBomb: false } as PublicActionEventDraft);
+    const applied = applyPublicEvent(fixture.initialLedger, alteredEvent);
+    if (!applied.ok) throw new Error("SOURCE_FIXTURE_ALTERED_EVENT_REJECTED");
+    const alteredSnapshot = { ...fixture.bank.snapshot, ledgerHash: canonicalPublicLedgerHash(applied.ledger) };
+    const alteredInput = {
+      ...fixture.input,
+      publicHistoryEvents: [alteredEvent],
+      finalLedger: applied.ledger,
+      bank: createParticleBankHandle(
+        { ...fixture.bank, snapshot: alteredSnapshot },
+        { records: [{ particleId: particleScenarioIdentity(alteredSnapshot, fixture.scenario), scenario: fixture.scenario, normalizedWeight: 1 }] },
+      ),
+    };
+    expect(identity(alteredInput)).not.toBe(identity(fixture.input));
+    const displayChanged = {
+      ...fixture.input,
+      publicState: {
+        ...fixture.input.publicState,
+        currentLastPlay: { ...fixture.input.publicState.currentLastPlay!, id: "presentation-id", label: "different display", purpose: "engine" },
+      },
+    };
+    expect(identity(displayChanged)).toBe(identity(fixture.input));
+  });
+
+  test("accepts a legal event-minus-one opening with empty public history", () => {
+    const fixture = makeEmptyHistoryFixture();
+    const result = createParticleScenarioSource(fixture.input);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.acceptedScenarioCount).toBe(1);
+  });
+
+  test("rejects non-empty history that starts at event one", () => {
+    const fixture = makeFixture();
+    const result = createParticleScenarioSource({
+      ...fixture.input,
+      publicHistoryEvents: [{ ...fixture.input.publicHistoryEvents[0]!, eventIndex: 1 }],
+    });
+
+    expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "replay-context-missing" } });
+  });
+
+  test("rejects a history with a missing middle event", () => {
+    const fixture = makeFixture();
+    const result = createParticleScenarioSource({
+      ...fixture.input,
+      publicHistoryEvents: [fixture.input.publicHistoryEvents[0]!, { ...fixture.input.publicHistoryEvents[0]!, eventIndex: 2 }],
+    });
+
+    expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "replay-context-missing" } });
+  });
+
+  test("rejects duplicate history event indexes", () => {
+    const fixture = makeFixture();
+    const result = createParticleScenarioSource({
+      ...fixture.input,
+      publicHistoryEvents: [fixture.input.publicHistoryEvents[0]!, { ...fixture.input.publicHistoryEvents[0]! }],
+    });
+
+    expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "replay-context-missing" } });
+  });
+
+  test("rejects an event hash or ledger mismatch", () => {
+    const fixture = makeFixture();
+    const result = createParticleScenarioSource({
+      ...fixture.input,
+      publicHistoryEvents: [{ ...fixture.input.publicHistoryEvents[0]!, publicPayloadHash: "f".repeat(64) }],
+    });
+
+    expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "replay-context-missing" } });
+  });
+
   test("builds replay-ready source from a bank and public replay context", () => {
     const fixture = makeFixture();
     const result = createParticleScenarioSource(fixture.input);
@@ -150,6 +275,52 @@ describe("particleScenarioSource", () => {
     const result = createParticleScenarioSource({ ...fixture.input, finalLedger: fixture.initialLedger });
 
     expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "ledger-mismatch" } });
+  });
+
+  test("rejects a partner seat that is not the perspective seat's partner", () => {
+    const fixture = makeFixture();
+    const result = createParticleScenarioSource({
+      ...fixture.input,
+      publicState: { ...fixture.input.publicState, partnerSeat: 1 },
+    });
+
+    expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "replay-context-missing" } });
+  });
+
+  test("rejects an acting seat that does not follow the replayed public turn", () => {
+    const fixture = makeFixture();
+    const result = createParticleScenarioSource({
+      ...fixture.input,
+      publicState: { ...fixture.input.publicState, actingSeat: 0 },
+    });
+
+    expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "replay-context-missing" } });
+  });
+
+  test("rejects a bank snapshot whose identity differs from both ledgers", () => {
+    const fixture = makeFixture();
+    const snapshot = { ...fixture.bank.snapshot, gameId: "different-game" };
+    const bank = createParticleBankHandle(
+      { ...fixture.bank, snapshot },
+      { records: [{ particleId: particleScenarioIdentity(snapshot, fixture.scenario), scenario: fixture.scenario, normalizedWeight: 1 }] },
+    );
+    const result = createParticleScenarioSource({ ...fixture.input, bank });
+
+    expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "ledger-mismatch" } });
+  });
+
+  test("rejects duplicate finish seats and unpaired last-play fields", () => {
+    const fixture = makeFixture();
+    const cases = [
+      { ...fixture.input.publicState, finishOrder: [0, 0] },
+      { ...fixture.input.publicState, currentLastPlay: null },
+      { ...fixture.input.publicState, currentLastPlaySeat: null },
+    ];
+
+    for (const publicState of cases) {
+      const result = createParticleScenarioSource({ ...fixture.input, publicState } as RolloutScenarioSourceInput);
+      expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "replay-context-missing" } });
+    }
   });
 
   test("rejects a public state context mismatch before returning private state", () => {
@@ -221,15 +392,25 @@ describe("particleScenarioSource", () => {
     expect(JSON.stringify(first)).not.toContain('"handCounts":{"0":1');
   });
 
-  test("does not put raw scenarios, hidden assignments, seed or diagnostics in the source envelope", () => {
+  test("keeps the raw source envelope private and requires an explicit diagnostic projection", () => {
     const fixture = makeFixture();
     const result = createParticleScenarioSource(fixture.input);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const serialized = JSON.stringify({
+    const rawSerialized = JSON.stringify(result);
+    expect(rawSerialized).toContain("hands");
+
+    const diagnosticSink = (value: unknown): string => {
+      if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).sort().join(",") !== "acceptedScenarioCount,effectiveSampleSize,scenarioIdentities,schemaVersion" ) throw new Error("PUBLIC_DIAGNOSTIC_INPUT_INVALID");
+      return JSON.stringify(value);
+    };
+    expect(() => diagnosticSink(result)).toThrow("PUBLIC_DIAGNOSTIC_INPUT_INVALID");
+
+    const serialized = diagnosticSink({
+      schemaVersion: "d2f-public-scenario-diagnostic-v1",
       acceptedScenarioCount: result.acceptedScenarioCount,
       effectiveSampleSize: result.effectiveSampleSize,
-      scenarios: result.scenarios.map(({ scenarioIdentity, normalizedWeight }) => ({ scenarioIdentity, normalizedWeight })),
+      scenarioIdentities: result.scenarios.map(({ scenarioIdentity }) => scenarioIdentity),
     });
     expect(serialized).not.toContain("hiddenTransferAssignments");
     expect(serialized).not.toContain("particleSeed");

@@ -142,14 +142,20 @@ type RolloutRiskPolicy = Readonly<{
 }>;
 ```
 
-`RolloutBudget`、`RolloutBudgetLimits`、`RolloutEvidenceRequirements` 和 `RolloutRiskPolicy` 均为调用者显式传入，Task 1–6 不设置 production/shadow 默认值。budget/limits 的字段必须是 finite safe integer；evidence 的 ESS 和阈值必须 finite、非负，计数阈值还必须是 safe integer；风险系数必须 finite 且 `>= 0`。工作量乘积必须在校验中逐步检查溢出和 limits。kernel 只消费 `ValidatedRolloutBudget`，不读取全局配置、wall clock、进程状态或 worker 调度。
+`RolloutBudget`、`RolloutBudgetLimits`、`RolloutEvidenceRequirements` 和 `RolloutRiskPolicy` 均为调用者显式传入，Task 1–6 不设置 production/shadow 默认值。budget/limits 的字段必须是 finite safe integer；evidence 的 ESS 和三个阈值必须是正的 finite safe integer，并且 validated request 不得要求超过 `maximumWorkUnits` 的证据上限；风险系数必须 finite 且 `>= 0`。工作量乘积必须在校验中逐步检查溢出和 limits。kernel 只消费 `ValidatedRolloutBudget`，不读取全局配置、wall clock、进程状态或 worker 调度。
 
-`replicateCountPerScenario` 是每个 scenario 的请求次数；`totalCompletedReplicates` 是不含 candidate 乘数的已完成 scenario/replicate coverage；`completedReplicateCount` 是实际 candidate × scenario × replicate kernel 执行数。成功时：
+`replicateCountPerScenario` 是每个 scenario 的请求次数。candidate summary 中的 `expectedReplicateCount` 是该 candidate 的 expected local coverage，`completedReplicateCount` 是该 candidate 实际完成数；aggregate diagnostics 只保留全候选范围的 `expectedCompletedReplicateCount` 和 `completedReplicateCount`，不重复保留含义不清的 `totalCompletedReplicates`。成功时：
 
 ```text
-totalCompletedReplicates = acceptedScenarioCount * replicateCountPerScenario
-completedReplicateCount = candidateCount * totalCompletedReplicates
-expectedCompletedReplicateCount = completedReplicateCount
+candidateSummary.expectedReplicateCount
+  = acceptedScenarioCount * replicateCountPerScenario
+candidateSummary.completedReplicateCount
+  = 该 candidate 实际完成数
+
+aggregate.completedReplicateCount
+  = 所有 candidate summary.completedReplicateCount 之和
+aggregate.expectedCompletedReplicateCount
+  = candidateCount * candidateSummary.expectedReplicateCount
 ```
 
 ### 3.2 Public state、candidate 和 scenario
@@ -378,7 +384,7 @@ type CandidateRolloutSummary = Readonly<{
   baselineEvaluatorScore: number;
   acceptedScenarioCount: number;
   replicateCountPerScenario: number;
-  totalCompletedReplicates: number;
+  expectedReplicateCount: number;
   completedReplicateCount: number;
   workUnitCount: number;
 }>;
@@ -389,7 +395,6 @@ type RolloutAggregateDiagnostics = Readonly<{
   effectiveSampleSize: number;
   acceptedScenarioCount: number;
   replicateCountPerScenario: number;
-  totalCompletedReplicates: number;
   completedReplicateCount: number;
   expectedCompletedReplicateCount: number;
   candidateCount: number;
@@ -432,7 +437,7 @@ root/scenario/candidate/replicate/random-domain identity 使用 canonical encodi
 
 入口在校验后冻结或深度只读投影 `RolloutRequest`、候选数组、ParticleBank public handle、Room public input 和 diagnostics sink；不能修改 Room、ParticleBank、candidates、public ledger 或调用者拥有的输入对象。成功只允许完整 coverage；低 ESS、场景不足、replicate 不足、coverage mismatch、budget failure、policy failure、telemetry failure 都丢弃整个 D2F result，原子回退原 evaluator。
 
-成功 diagnostics 只记录脱敏的 `effectiveSampleSize`、`acceptedScenarioCount`、`replicateCountPerScenario`、`totalCompletedReplicates`、`completedReplicateCount`、`workUnitCount` 和 `coverage`。禁止 raw scenario、assignments、对手完整手牌、particle 私有 weight 明细和可还原 random seed。
+成功 diagnostics 只记录脱敏的 `effectiveSampleSize`、`acceptedScenarioCount`、`replicateCountPerScenario`、`expectedCompletedReplicateCount`、`completedReplicateCount`、`workUnitCount` 和 `coverage`。禁止 raw scenario、assignments、对手完整手牌、particle 私有 weight 明细和可还原 random seed。
 
 ## 5. Shadow 旁路契约
 
