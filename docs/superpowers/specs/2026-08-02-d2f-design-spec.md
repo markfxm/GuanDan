@@ -37,7 +37,7 @@ src/ai/particles/particleBankRolloutAccess.ts
 src/ai/rollout/particleScenarioSource.ts
 ```
 
-`particleBankRolloutAccess.ts` 是唯一允许读取 `readParticleBankInternals`/WeakMap internals 的 particles 侧桥接；rollout 其他模块不得导入 `particleBankInternals.ts`。`particleScenarioSource.ts` 是唯一调用该桥接的 scenario source；两者都不加入 public barrel。桥接只能返回只读、深拷贝或不可变投影，不能返回可修改 `ParticleBank` internals 的引用。fake/unknown handle 必须安全失败。
+`particleBankRolloutAccess.ts` 是唯一允许读取 `readParticleBankInternals`/WeakMap internals 的 particles 侧桥接；rollout 其他 production 模块不得导入、re-export 或通过 barrel 暴露 `particleBankInternals.ts` 的任何 symbol。`particleScenarioSource.ts` 是唯一调用该桥接的 scenario source；两者都不加入 public barrel。AST/symbol gate 同时检查 import 和 export，测试只通过行为入口验证 fake/unknown handle，不直接绕过 bridge 读取 internals。桥接只能返回只读、深拷贝或不可变投影，不能返回可修改 `ParticleBank` internals 的引用；raw scenario、四座位完整手牌、particle weight 和 seed 只可在 bridge/source 到 kernel 的隔离链中存在，不能进入 policy、public diagnostics 或 shadow sink。fake/unknown handle 必须安全失败并返回 `fake-or-unknown-particle-bank` typed failure。
 
 仓库实际 replay API 需要以下完整输入，不能伪造为 `createParticleScenarioSource(bank)`：
 
@@ -68,6 +68,24 @@ source 必须校验 `initialLedger`、`finalLedger` 的 canonical hash、最后 
 ## 3. 统一契约
 
 以下 TypeScript 契约是 Design Spec、Implementation Plan、Test Gate Matrix 的唯一公共名称和字段定义。
+
+契约的数值域也冻结在三份文档中：所有表示分数、权重、ESS、方差、风险、差值或耗时的
+`number` 必须先通过 `Number.isFinite`；所有 count、index、ordinal、ply、seat 和 work-unit
+字段必须是 `Number.isSafeInteger` 且满足各自的非负或座位域约束；权重必须 finite、非负，
+scenario 权重归一化和所有工作量乘积必须在固定容差与逐步溢出检查下完成。`TeamUtility` 是
+唯一允许为负的离散 utility 字段，且不允许 zero。任何 NaN、Infinity、负计数、小数计数、
+溢出、重复 identity 或缺失 identity 都在进入 policy/kernel 前转换为本契约已有的 typed
+failure；不得把非法数值放入 success result、aggregateDiagnostics 或 public evidence。
+
+identity 基础契约如下：`candidateId` 必须等于 `canonicalActionIdentity(action)` 并在请求内唯一；
+`scenarioIdentity` 使用已有 `particleScenarioIdentity` 的 canonical bytes；
+`replicateIdentity` 使用 `replicateOrdinal` 的 length-prefixed canonical encoding；
+`rootIdentity` 是同一个 pre-action replay root 的 canonical identity，`rootDigest` 是该
+canonical root identity 的 digest。replay context identity 必须覆盖 public history、initial/final
+ledger 的 canonical hash 与 event index、game rank、perspective seat、己方当前手牌、acting
+seat、current trick/public state 和同一 ParticleBank snapshot identity。所有 identity 编码使用
+显式 domain、长度前缀和固定 UTF-8/code-unit 规则；不得依赖对象地址、Map 插入顺序、localeCompare
+或绝对数组位置。
 
 ### 3.1 请求、场景和预算
 
@@ -172,7 +190,7 @@ type RolloutReplicateInput = Readonly<{
 }>;
 ```
 
-`candidateId` 是 action 的 canonical identity，用于候选关联、identity validation 和最终排序；`baselineEvaluatorScore` 是有限 number，只用于第三层稳定排序和 shadow 对照。它不进入 candidate identity、CRN、policy context 或 random key。
+`candidateId` 是 action 的 canonical identity，用于候选关联、identity validation 和最终排序；它必须等于 `canonicalActionIdentity(action)` 且在 request 内唯一。`baselineEvaluatorScore` 是有限 number，只用于第三层稳定排序和 shadow 对照。它不进入 candidate identity、CRN、policy context 或 random key。`scenarioIdentity` 必须非空、canonical、唯一且与 source 使用的 ParticleBank snapshot 相符；`normalizedWeight` 必须 finite、非负，所有 accepted scenario 的权重和必须通过固定归一化容差验证为 1。`RolloutScenario` 和 `RolloutReplicateInput` 是 source/kernel 内部共享契约，不得经 public barrel 导出；`privateState` 只能在 kernel 内部消费，不能进入 policy、diagnostics 或 shadow sink。
 
 ### 3.3 CRN identity 与 policy
 
@@ -223,6 +241,21 @@ type RolloutPolicy = Readonly<{
 ```
 
 `CrnView` 没有共享 `next()` cursor；每次查询使用 semantic key。相同 scenario/replicate/ply/seat/domain/semantic key 在所有 candidate 中返回相同值。policy v1 枚举当前 seat-local legal actions，以 `policy-action:${canonicalActionIdentity(action)}` 查询 keyed value，按 value 降序、canonical action identity 升序选取；共同合法动作因此保留同一优先级。`replicateIdentity` 由 `replicateOrdinal` 的 canonical encoding 产生，改变 replicate 的独立 keyed stream，因此 replicateCount 有实际证据意义。candidate 数组位置和 candidateId 均不进入坐标。
+
+CRN 的 deterministic value 只由下列完整链产生：
+
+```text
+root identity
++ canonical scenario identity
++ replicate identity
++ ply/decision ordinal
++ acting seat
++ random domain
++ semantic key
+-> deterministic keyed value
+```
+
+`randomDomain` 和 `semanticKey` 都必须使用 canonical encoding；它们不得包含 candidateId、candidate 数组位置、worker id、对象地址、Map 插入顺序、localeCompare 结果或绝对 seat number。相同坐标重复查询同一 semantic key 明确复用同一个值；需要独立随机事件必须使用不同的 canonical semantic key，碰撞测试必须区分“有意复用”与“意外碰撞”。有对应候选事件的随机事件使用相同 domain/key；candidate 特有且没有可比较对应物的事件不允许偷偷取得独有 random draw：若它能被描述为公共语义事件，使用固定的 `unpaired:<event-kind>` domain 和不含 candidate identity 的状态/ply semantic key；否则返回 typed kernel failure。`CrnView.value` 只返回有限的 normalized value（例如 `[0,1)`），没有 raw seed、seed getter、tape 或 draw cursor；keyed-value 测试必须证明无法反向暴露 raw seed。
 
 policy 只接收当前 acting seat 的 `SeatLocalObservation`：自己的 hand、公开 history、public hand counts、公开 last play、公开 finish order 和 game rank。不得读取 Room、原始对手手牌、其他座位的完整 privateState 或 ParticleScenario。
 
@@ -375,6 +408,13 @@ type RolloutResult = Readonly<{
 }>;
 ```
 
+`rootDigest` 必须由同一个 pre-action replay root 的 canonical identity 派生；它不能从已提交
+或已改变的 Room、candidate 完成顺序、worker 顺序、对象地址或 raw seed 派生。success 时
+`candidateSummaries` 按 canonical candidate identity 稳定排列，`ranking` 只包含同一组唯一
+candidateId；所有 diagnostics 数值先通过上述 numeric domain 校验。`RolloutResult`、
+`RolloutScenarioSourceResult` 和所有 kernel records 都是 detached/internal contracts，不进入
+正式 evaluator、candidate filter、plan selector 或 Room transition。
+
 候选排序严格为：
 
 ```text
@@ -398,9 +438,35 @@ root/scenario/candidate/replicate/random-domain identity 使用 canonical encodi
 
 当前 `src/ai/tactics/representativeActionShadowObserver.ts` 是已有 D2e representative-action observer，不能被称为 D2F shadow，也不能被复用来证明 D2F 已接入。Task 8 先只读审计该文件、`src/ai/aiDecisionEngine.ts` 和正式动作最终选定点。当前 `aiDecisionEngine.ts` 的该 observer 调用发生在 evaluator/最终 action 之前，因此不满足 D2F 的“正式动作先冻结”要求。
 
-D2F 的真实最小旁路冻结为：Task 8 修改 `src/game/room.ts` 的 `runAiStep` 一个调用点，在原逻辑完成 `passTurn`/`playCards`、runtime 和 plan 更新、正式 action 已冻结之后、函数返回之前，调用 `void observeD2FShadow(projectD2FShadowInput(...))`。该 adapter 只传 public ledger/history、game rank、己方手牌、public hand counts、baseline action identity/score、候选 projection 和显式预算；不把完整 Room 或其他座位 private hands 传入 rollout。`src/ai/aiDecisionEngine.ts` 和已有 representative observer 不修改。
+D2F 的真实最小旁路冻结为：Task 8 只修改 `src/game/room.ts` 的 `runAiStep` 一个调用点，并严格执行以下数据流：
 
-`observeD2FShadow` 返回 `void`，内部捕获 rollout、低 ESS、超预算和 telemetry sink 的所有 failure；observer 失败不得改变 action、evaluator、candidate filter、plan selector、Room transition 或 transaction result。最小新增文件为 `src/ai/rollout/d2fShadowObserver.ts`，sink 只接收脱敏 evidence。
+```text
+原决策链生成并冻结 formal action、baseline score、candidate projection
+  -> 从 playCards/passTurn 执行前的同一 Room root 捕获 immutable、脱敏 shadow request/snapshot
+  -> snapshot 构造放在独立 try/catch；失败只形成 unavailable/fallback，不能阻止、替换或延迟 formal action
+  -> playCards/passTurn 提交 formal action
+  -> runtime/plan 更新完成
+  -> 只把已捕获的 pre-action snapshot 传给 observeD2FShadow
+  -> 不再读取提交后的 Room 构造原 rollout root
+  -> D2F 结果只进入 diagnostics sink
+```
+
+snapshot 必须同时携带来自同一个 pre-action root 的 `rootIdentity/rootDigest`、ParticleBank
+handle、public ledger/history、current trick/last play、game rank、己方手牌、public hand
+counts、baseline action identity/score、canonical candidate set 和显式 budget；所有调用者引用
+都要 clone/freeze 或转成不可变 projection。ParticleBank bridge/source/kernel 使用该 snapshot
+的同一 identity，不能在正式提交后重新读取 Room、重建 candidate、重建 ParticleBank 或改用
+另一个 ledger。`formalExecutionAllowed` 永远是 literal `false`，不能由 feature flag、active
+branch、配置或“以后设为 true”的 production 路径改变；D2F 不能修改已选 action、evaluator、
+candidate filter、plan selector、Room transition 或 transaction result。`src/ai/aiDecisionEngine.ts`
+和已有 representative observer 不修改。
+
+`observeD2FShadow` 返回 `void`，内部捕获 throw、success、failure、低 ESS、超预算、坏 utility
+和 telemetry sink failure；任何一种都只产生脱敏 evidence/fallback，不能改变 formal action。
+最小新增文件为 `src/ai/rollout/d2fShadowObserver.ts`，sink 只接收脱敏 evidence。必须有
+negative-control characterization：强制 D2F 推荐与原 evaluator action 相反时，formal action、
+public ledger、current trick、runtime、plan 和 replay bytes 仍保持不变，只有 diagnostics
+evidence 可记录 disagreement。
 
 ```ts
 type D2FShadowEvidence = Readonly<{
@@ -427,7 +493,10 @@ type D2FShadowEvidence = Readonly<{
 }>;
 ```
 
-`elapsedWallClockMs` 仅 telemetry，不能进入 identity、policy、stop condition、ranking 或 byte-lock comparison。shadow evidence 不向任何正式决策模块返回数据。
+Evidence 中所有非 null numeric field 必须 finite；count/budget/ESS 字段必须是合法 safe integer
+或按契约允许的 finite measure，delta 可以为负但不能为 NaN/Infinity。`elapsedWallClockMs` 仅
+telemetry，必须非负且不能进入 identity、policy、stop condition、ranking 或 byte-lock comparison。
+shadow evidence 不向任何正式决策模块返回数据。
 
 ## 6. Budget calibration 与正式验证边界
 
@@ -436,3 +505,11 @@ Task 1–6 只使用测试显式小预算，不设置 production/shadow 默认 p
 正常停止由安全整数计数决定，wall clock 只作为最后安全保护和 non-semantic telemetry。benchmark correctness tests 与 benchmark timing 分离；benchmark fixture 从公开、已跟踪输入在进程内创建 ParticleBank，JSON 不承载 WeakMap handle、raw hidden scenario、weight 或 seed。
 
 正式 Node 基线为 `Node 22.22.2`，来源为 `.github/workflows/d2a1-verification.yml`；本机 `Node 24.15.0` 只能作为 supplemental evidence，不能宣称项目正式支持 Node 24。当前没有授权的 Node 22 CI 执行证据时，最终 Gate 状态必须为 `AWAITING_NODE22_CI`。
+
+benchmark runner 的恢复只属于 source worktree 准备或 Task 7 preflight，不是 Task 1 blocker：在
+允许的 Node 22.22.2 环境执行 `npm ci`，随后确认 `git diff --exit-code -- package.json package-lock.json`、
+确认本地 `node_modules/.bin/tsx.cmd`（Windows）或等价本地 binary 存在，并用该 fixed local
+binary 执行 `tsx --version` 和 benchmark。不得用 `npx tsx`、临时网络解析或全局安装；runner
+不存在时状态固定为 `AWAITING_FIXED_BENCHMARK_RUNNER`，不得跳过 benchmark RED 或把 benchmark
+纳入普通 correctness 回归。Node 22 证据同样是最终 release Gate 的前置条件而非 Task 1 blocker；
+未取得 Node 22 证据前不得称为 D2F SHADOW RELEASE READY。
