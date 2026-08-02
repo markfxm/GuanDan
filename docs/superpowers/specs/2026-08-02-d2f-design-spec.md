@@ -1,244 +1,253 @@
 # D2F CRN Rollout / Team Utility Design Specification
 
-> Status: design freeze for D2F Prompt 1. This document authorizes no Task 1 implementation.
+状态：文档纠偏冻结；仅定义后续实现边界，不开始 Task 1。
 
-**Goal:** 在不进入正式出牌路径的前提下，使用同一 immutable ParticleBank 对同一组候选动作执行 Common Random Numbers（CRN）有限深度模拟，计算 Team Utility，按粒子权重聚合期望、方差和风险，并形成稳定、可重复、可审计的候选排序。
+## 1. 阶段定位与不可突破约束
 
-**Architecture:** D2F 是 detached/offline/shadow 计算层。一个窄的 particles-side bridge 读取 ParticleBank 的 WeakMap 私有记录，唯一的 rollout scenario-source 将记录转换为 rollout 内部场景；rollout kernel 只把 seat-local observation 交给轻量固定预算 policy。结果经过原子聚合后只生成脱敏 summary，永远不回流正式 `decideAiAction`、`runAiStep` 或 room transition。
-
-**Tech Stack:** TypeScript 5.7、Vitest 2.1.9、现有 `ParticleBank` contracts/replay/sampler、现有 SHA-256 canonical identity 约定、Node 22.22.2 正式 CI 基线。Node 24.15.0 仅作为本机补充环境证据。
-
-## Global constraints
-
-- `D2F = CRN Rollout / Team Utility`；D2F 只允许 `detached`、`offline`、`shadow`，没有 active mode。
-- `formalExecutionAllowed` 的唯一合法类型和值是 `false`；任何不能证明该约束的调用都失败关闭。
-- D2F 不修改正式动作、原 evaluator、正式决策引擎、candidate 数量/顺序、Room、public ledger、replay 或调用者输入。
-- D2F 不调用 `HandPlanner`、`generateHandPlans`、`generateFastHandPlans`、`generateRapidHandPlan`、`ensurePlans`、`decideAiAction` 或 `runAiStep`。
-- D2F 不读取原 Room 的真实对手手牌；policy 只接收当前模拟座位的 seat-local observation。
-- 所有候选复用同一个 immutable ParticleBank、相同场景、相同 replicate、相同预算和相同 CRN tape；候选数组位置不参与身份或随机流。
-- 正常停止条件只使用显式安全整数预算；wall clock 只能作为外部安全保护，不能参与语义结果、排序或正常停止。
-- 任一关键失败丢弃整个 partial result，返回单一 typed failure，不返回部分 candidate summary 或部分排序。
-- public diagnostics 只包含聚合数量、状态、失败类别和脱敏身份摘要；不包含 raw scenario、hidden assignments、完整四座位手牌、raw weight、seed 或可还原随机流的字段。
-- 本规格不确定 production/shadow budget 数值。Task 1～6 必须注入显式 `RolloutBudget` 和 `RolloutBudgetLimits`；Task 7 通过独立 microbenchmark 与人工批准建立 profile。
-
-## 1. Repository facts and phase boundary
-
-当前 plan worktree 的基准是 `codex/d2f-crn-rollout-plan`，HEAD `d0c3f54db797ccc708d83ab2ae885094460e330d`。当前仓库已经有：
-
-- `src/ai/particles/contracts.ts`：`ParticleScenario`、`ParticleBank`、`ParticleBankBuildResult` 等类型。
-- `src/ai/particles/particleBankInternals.ts`：以 `WeakMap<object, ParticleBankInternals>` 保存私有 `ParticleRecord[]`，并对 handle 与 internals deep-freeze。
-- `src/ai/particles/particleBankBuilder.ts`：唯一的现有 bank producer；它创建 handle，但不是 rollout consumer。
-- `src/ai/particles/publicEventDealReplay.ts`：将场景重放为含 `stateBeforeEvent` 的私有模拟状态。
-- `src/game/room.ts:runAiStep` → `src/ai/aiDecisionEngine.ts:decideAiAction`：当前正式动作路径。D2F 不得连接此路径。
-- `PublicSeat = 0 | 1 | 2 | 3`，partner 为 `(seat + 2) % 4`。现有 `nextPlayableSeat` 使用 `(fromSeat + 3) % 4` 并跳过已完成座位；D2F 的相对顺时针距离必须遵守这一仓库既有轮转方向，而不能使用绝对 seat number 作为平局规则。
-
-粒子 focused baseline 已由人工接受：
+D2F 只建设以下 detached/offline/shadow 证据链：
 
 ```text
-10 files
-136 tests
-136 passed
-0 failed
-Vitest 2.1.9
-Node 24.15.0 local supplemental run
+ParticleBank
+  -> 同一组候选动作的 Common Random Numbers 有限深度模拟
+  -> Team Utility terminal/leaf evaluation
+  -> 按粒子权重聚合期望、方差和 downside risk
+  -> 稳定、可重复的候选排序
+  -> 脱敏 evidence
 ```
 
-标准命令冻结在：
+D2F 不替换原 evaluator，不让 rollout 排序改变正式出牌，不确定 active-mode 权重，不执行 D2G benchmark/treatment/active-mode 决策，也不治理无关依赖或模块。
+
+所有 D2F 请求必须携带字面量 `formalExecutionAllowed: false`。实现还必须在类型、入口和调用点保持结构性旁路：`RolloutResult` 不得作为正式动作、evaluator、candidate filter、plan selector 或 Room transition 的输入。`mode` 只允许 `detached`、`offline`、`shadow`，D2F 没有 active mode。
+
+候选 A/B/C 必须共享同一个不可变 ParticleBank、同一组 `RolloutScenario`、同一 replicate coverage、同一预算和同一 rollout 深度。任何关键失败都丢弃整个 partial result，返回 typed failure，由调用方保持原 evaluator 结果。
+
+## 2. 模块边界与 ParticleBank 私有桥接
+
+实现目录冻结为：
 
 ```text
-npx vitest run tests/ai/particles --exclude "**/.worktrees/**" --reporter=dot
+src/ai/rollout/**
+tests/ai/rollout/**
 ```
 
-正常全套回归使用 Vitest 默认并行度。`--maxWorkers 1 --minWorkers 1` 仅用于逐文件诊断；`--testTimeout=120000` 不是整套进程时限方案。Node 22.22.2 是正式 CI/可重复验证基线，Node 24.15.0 只有 supplemental environment evidence 级别。
+Task 1 允许对 `src/ai/particles/**` 的唯一 production 修改是下列窄桥接及其必要测试：
 
-## 2. Module and ownership map
+```text
+src/ai/particles/particleBankRolloutAccess.ts
+src/ai/rollout/particleScenarioSource.ts
+```
 
-### 2.1 Planned production modules
+`particleBankRolloutAccess.ts` 是唯一允许读取 `readParticleBankInternals`/WeakMap internals 的 particles 侧桥接；rollout 其他模块不得导入 `particleBankInternals.ts`。`particleScenarioSource.ts` 是唯一调用该桥接的 scenario source；两者都不加入 public barrel。桥接只能返回只读、深拷贝或不可变投影，不能返回可修改 `ParticleBank` internals 的引用。fake/unknown handle 必须安全失败。
 
-| Path | Responsibility | Private/public status |
-|---|---|---|
-| `src/ai/particles/particleBankRolloutAccess.ts` | 唯一读取 `readParticleBankInternals` 的窄 bridge；复制并冻结记录 | particles-private，不能进入 public barrel |
-| `src/ai/rollout/contracts.ts` | D2F 请求、场景、预算、结果、summary、failure 和 identity 类型 | rollout-internal contract；不从 public barrel 导出 |
-| `src/ai/rollout/particleScenarioSource.ts` | 唯一调用 bridge，将 bank records 转成 kernel 可消费的私有 `RolloutScenario[]` | rollout-private；唯一 bridge consumer |
-| `src/ai/rollout/rolloutIdentity.ts` | canonical root/scenario/candidate/replicate/domain identity | rollout-private，不能包含 seed 原值 |
-| `src/ai/rollout/crnStream.ts` | 无共享可变 cursor 的确定性随机值派生 | rollout-private |
-| `src/ai/rollout/teamUtility.ts` | terminal truth table 与团队对称性 | pure function |
-| `src/ai/rollout/leafEvaluation.ts` | 已完成名次与剩余手牌数的非 terminal 预测 | pure function |
-| `src/ai/rollout/rolloutPolicy.ts` | 轻量、固定预算、确定性 seat-local policy | pure function；不能导入 planning |
-| `src/ai/rollout/rolloutKernel.ts` | 对一个 scenario/replicate/candidate 执行有限深度模拟 | pure function；不读 Room |
-| `src/ai/rollout/rolloutAggregation.ts` | 粒子权重的 expectation/variance/risk 聚合与稳定排序 | pure function |
-| `src/ai/rollout/runRollout.ts` | detached/offline/shadow 的原子编排入口 | 不连接正式决策路径 |
-
-不创建 `src/ai/rollout/index.ts` 或其他 public barrel。`src/ai/rollout/**` 不得普遍直接导入 `particleBankInternals.ts`；只有 `particleBankRolloutAccess.ts` 可以读取其 `readParticleBankInternals` 符号，只有 `particleScenarioSource.ts` 可以调用 bridge。
-
-### 2.2 Planned test and benchmark modules
-
-所有 correctness tests 位于 `tests/ai/rollout/**`。独立性能校准脚本位于 `scripts/benchmarks/d2f-rollout-budget-calibration.ts`，不作为 Vitest correctness file，不改变生产默认值。
-
-## 3. D2F contract surfaces
-
-以下名称在设计、计划和测试 Gate 中保持一致。它们是 implementation contract，不代表本轮已经创建这些源文件。
-
-### 3.1 Request, candidate and observation
+仓库实际 replay API 需要以下完整输入，不能伪造为 `createParticleScenarioSource(bank)`：
 
 ```ts
-export type RolloutMode = "detached" | "offline" | "shadow";
-
-export type RolloutRootIdentity = Readonly<{
-  schemaVersion: "d2f-rollout-root-v1";
-  gameId: string;
-  roundIdentity: string;
-  handIdentity: string;
-  snapshotIdentity: string;
-  perspectiveSeat: PublicSeat;
-  rootDigest: string;
-}>;
-
-export type RolloutAction = Readonly<
-  | { type: "pass" }
-  | { type: "play"; group: Readonly<CardGroup> }
->;
-
-export type RolloutCandidate = Readonly<{
-  candidateId: string;
-  action: RolloutAction;
-}>;
-
-export type RolloutPublicState = Readonly<{
-  gameRank: GameRank;
-  turnSeat: PublicSeat;
-  perspectiveSeat: PublicSeat;
-  handCounts: Readonly<Record<PublicSeat, number>>;
-  finishOrder: readonly PublicSeat[];
-  lastPlay?: Readonly<CardGroup>;
-  lastPlaySeat?: PublicSeat;
-  publicPlayedCardIds: readonly string[];
-}>;
-
-export type RolloutRequest = Readonly<{
-  schemaVersion: "d2f-rollout-request-v1";
-  mode: RolloutMode;
-  formalExecutionAllowed: false;
-  rootIdentity: RolloutRootIdentity;
-  publicState: RolloutPublicState;
+type RolloutScenarioSourceInput = Readonly<{
   bank: ParticleBank;
-  candidates: readonly RolloutCandidate[];
-  budget: RolloutBudget;
-  limits: RolloutBudgetLimits;
-}>;
-```
-
-`RolloutPublicState` 只描述当前公共状态和当前 perspective 的必要边界，不含 `RoomState`、`hands`、`initialHands`、`partnerHand` 或 `opponentsHands`。`RolloutCandidate.action` 只代表待评估的 own-side candidate；它不携带 runtime、plan、evaluator score 或 action-control callback。
-
-每个 `candidateId` 必须等于由 canonical action bytes 派生的 `candidateIdentity`，且候选 identity 唯一。输入数组位置既不进入 candidate identity，也不进入 root/random identity。重复 identity、action 不一致或非法 action 都是 request failure。
-
-### 3.2 Budget and limits
-
-```ts
-export type RolloutBudget = Readonly<{
-  schemaVersion: "d2f-rollout-budget-v1";
-  replicateCount: number;
-  maxPliesPerReplicate: number;
-  maxPolicyActionsPerPly: number;
-  maxTotalWorkUnits: number;
-}>;
-
-export type RolloutBudgetLimits = Readonly<{
-  schemaVersion: "d2f-rollout-budget-limits-v1";
-  maxReplicateCount: number;
-  maxPliesPerReplicate: number;
-  maxPolicyActionsPerPly: number;
-  maxTotalWorkUnits: number;
-}>;
-```
-
-所有字段必须是有限的 `Number.isSafeInteger`，并满足正值、上限和 schema 校验。kernel 不读取默认配置；它只消费调用者传入的 validated budget。开始循环前检查：
-
-```text
-candidateCount
-× acceptedParticleCount
-× replicateCount
-× maxPliesPerReplicate
-× maxPolicyActionsPerPly
-≤ maxTotalWorkUnits
-```
-
-每次乘法都先检查 safe-integer 溢出和 limits 上限。任一检查失败立即返回 `budget-invalid` 或 `work-limit-exceeded`，不进入部分模拟。
-
-### 3.3 Private scenario and seat-local policy boundary
-
-`RolloutScenario` 只存在于 `particleScenarioSource.ts`、`rolloutKernel.ts` 和需要它们的 rollout-private helpers。它包含 canonical `scenarioIdentity`、粒子 normalized weight 和由 `ParticleScenario` replay 得到的私有模拟状态。该类型不可由 diagnostics、public result 或 policy 接收。
-
-```ts
-type RolloutScenario = Readonly<{
-  schemaVersion: "d2f-rollout-scenario-v1";
-  scenarioIdentity: string;
-  normalizedWeight: number;
-  privateState: Readonly<RolloutPrivateState>;
-}>;
-
-type RolloutPrivateState = Readonly<{
-  hands: Readonly<Record<PublicSeat, readonly Card[]>>;
-  publicPlayedCardIds: readonly string[];
-  handCounts: Readonly<Record<PublicSeat, number>>;
-  finishOrder: readonly PublicSeat[];
-  turnSeat: PublicSeat;
-  lastPlay?: Readonly<CardGroup>;
-  lastPlaySeat?: PublicSeat;
+  publicHistoryEvents: readonly PublicActionEvent[];
+  initialLedger: HardPublicLedger;
+  finalLedger: HardPublicLedger;
+  gameRank: GameRank;
+  perspectiveSeat: PublicSeat;
+  ownCurrentHand: readonly Card[];
+  publicState: RolloutPublicState;
 }>;
 
 type RolloutScenarioSourceResult =
-  | Readonly<{ ok: true; scenarios: readonly RolloutScenario[] }>
-  | Readonly<{ ok: false; failure: RolloutFailure }>;
+  | {
+      ok: true;
+      scenarios: readonly RolloutScenario[];
+      effectiveSampleSize: number;
+      acceptedScenarioCount: number;
+    }
+  | { ok: false; failure: RolloutFailure };
+```
 
-export type SeatLocalObservation = Readonly<{
-  seat: PublicSeat;
-  gameRank: GameRank;
-  ownHand: readonly Card[];
-  handCountBySeat: Readonly<Record<PublicSeat, number>>;
-  lastPlay?: Readonly<CardGroup>;
-  lastPlaySeat?: PublicSeat;
-  finishOrder: readonly PublicSeat[];
-  publicPlayedCardIds: readonly string[];
+source 必须校验 `initialLedger`、`finalLedger` 的 canonical hash、最后 event index、`gameRank`、`perspectiveSeat` 和己方手牌一致性，然后按仓库真实签名调用 `replayParticleScenario({ scenario, publicHistoryEvents, initialLedger, finalLedger, gameRank, perspectiveSeat, ownCurrentHand })`，构造当前 rollout state。raw scenario、四座位完整手牌、raw weight、particle seed 只能留在内部，不进入 policy、public diagnostics 或 shadow sink。
+
+## 3. 统一契约
+
+以下 TypeScript 契约是 Design Spec、Implementation Plan、Test Gate Matrix 的唯一公共名称和字段定义。
+
+### 3.1 请求、场景和预算
+
+```ts
+type RolloutMode = "detached" | "offline" | "shadow";
+
+type RolloutRequest = Readonly<{
+  schemaVersion: "d2f-rollout-request-v2";
+  mode: RolloutMode;
+  formalExecutionAllowed: false;
+  rootIdentity: string;
+  scenarioSourceInput: RolloutScenarioSourceInput;
+  candidates: readonly RolloutCandidate[];
+  budget: RolloutBudget;
+  limits: RolloutBudgetLimits;
+  evidenceRequirements: RolloutEvidenceRequirements;
+  riskPolicy: RolloutRiskPolicy;
+  policy: RolloutPolicy;
 }>;
 
-export type RolloutPolicy = Readonly<{
-  chooseAction(observation: SeatLocalObservation): RolloutAction;
+type RolloutBudget = Readonly<{
+  replicateCountPerScenario: number;
+  maxPliesPerReplicate: number;
+  maxPolicyActionEvaluationsPerPly: number;
+  maxWorkUnits: number;
+}>;
+
+type RolloutBudgetLimits = Readonly<{
+  maxReplicateCountPerScenario: number;
+  maxPliesPerReplicate: number;
+  maxPolicyActionEvaluationsPerPly: number;
+  maxWorkUnits: number;
+}>;
+
+type ValidatedRolloutBudget = Readonly<{
+  budget: RolloutBudget;
+  limits: RolloutBudgetLimits;
+  maximumWorkUnits: number;
+  validated: true;
+}>;
+
+type RolloutEvidenceRequirements = Readonly<{
+  schemaVersion: "d2f-rollout-evidence-requirements-v1";
+  minimumEffectiveSampleSize: number;
+  minimumAcceptedScenarioCount: number;
+  minimumCompletedReplicateCount: number;
+  requireCompleteCoverage: true;
+}>;
+
+type RolloutRiskPolicy = Readonly<{
+  schemaVersion: "d2f-rollout-risk-policy-v1";
+  variancePenalty: number;
+  downsideRiskPenalty: number;
 }>;
 ```
 
-kernel 根据私有 state 为当前 acting seat 构造 `SeatLocalObservation`，policy 不能得到其他座位的 card arrays、ParticleScenario、hidden assignment、粒子权重或 root/seed。policy 的合法动作选择采用轻量固定规则和 canonical action key tie-break；它不得调用完整 `HandPlanner`，不得使用 wall clock、`Math.random`、`Date.now`、`performance.now`、`process.env` 或 worker completion order。
+`RolloutBudget`、`RolloutBudgetLimits`、`RolloutEvidenceRequirements` 和 `RolloutRiskPolicy` 均为调用者显式传入，Task 1–6 不设置 production/shadow 默认值。budget/limits 的字段必须是 finite safe integer；evidence 的 ESS 和阈值必须 finite、非负，计数阈值还必须是 safe integer；风险系数必须 finite 且 `>= 0`。工作量乘积必须在校验中逐步检查溢出和 limits。kernel 只消费 `ValidatedRolloutBudget`，不读取全局配置、wall clock、进程状态或 worker 调度。
 
-### 3.4 Identity and CRN stream
-
-身份链固定为：
+`replicateCountPerScenario` 是每个 scenario 的请求次数；`totalCompletedReplicates` 是不含 candidate 乘数的已完成 scenario/replicate coverage；`completedReplicateCount` 是实际 candidate × scenario × replicate kernel 执行数。成功时：
 
 ```text
-rootIdentity
-  + canonical scenario identity
-  + candidate identity
-  + replicate identity
-  + random domain/key
-  + draw ordinal
-→ deterministic independent stream/value
+totalCompletedReplicates = acceptedScenarioCount * replicateCountPerScenario
+completedReplicateCount = candidateCount * totalCompletedReplicates
+expectedCompletedReplicateCount = completedReplicateCount
 ```
 
-具体约束：
+### 3.2 Public state、candidate 和 scenario
 
-1. `rootIdentity` 由公开 game/round/hand/snapshot/perspective facts 生成，不含 raw seed。
-2. `scenarioIdentity` 复用既有 canonical ParticleScenario identity domain。
-3. `candidateIdentity` 由 canonical action bytes 生成，不使用输入数组 index。
-4. `replicateIdentity` 是显式 ordinal 的 canonical identity；相同预算与相同输入时重复运行相同。
-5. `randomDomain` 是固定 UTF-8 domain label 加上上述 identities；draw ordinal 是显式 safe integer。
-6. `createCrnTape` 在 candidate loop 之前由 root/scenario/replicate 创建 immutable tape；每个 candidate 得到同一 tape 的独立只读视图。
-7. 不允许共享 mutable RNG cursor。candidate 顺序和 worker/scenario completion order 不能改变任何 candidate 的 stream 或结果。
+```ts
+type RolloutPublicState = Readonly<{
+  gameRank: GameRank;
+  actingSeat: PublicSeat;
+  perspectiveSeat: PublicSeat;
+  partnerSeat: PublicSeat;
+  handCounts: Readonly<Record<PublicSeat, number>>;
+  finishOrder: readonly PublicSeat[];
+  publicPlayedCardIds: readonly string[];
+  currentLastPlay: Readonly<unknown> | null;
+  currentLastPlaySeat: PublicSeat | null;
+}>;
 
-### 3.5 Terminal Team Utility
+type RolloutCandidate = Readonly<{
+  candidateId: string;
+  action: RolloutAction;
+  baselineEvaluatorScore: number;
+}>;
 
-`teamUtilityForFinishOrder(finishOrder, perspectiveSeat)` 只接受 4 个不同且完整的 seat 名次。perspective team 的两个名次映射到以下唯一 truth table：
+type RolloutScenario = Readonly<{
+  scenarioIdentity: string;
+  normalizedWeight: number;
+  privateState: Readonly<unknown>;
+}>;
 
-| 本方名次 | utility |
-|---|---:|
+type RolloutReplicateInput = Readonly<{
+  candidate: RolloutCandidate;
+  scenario: RolloutScenario;
+  publicState: RolloutPublicState;
+  replicateIdentity: string;
+  random: CrnView;
+  validatedBudget: ValidatedRolloutBudget;
+  policy: RolloutPolicy;
+}>;
+```
+
+`candidateId` 是 action 的 canonical identity，用于候选关联、identity validation 和最终排序；`baselineEvaluatorScore` 是有限 number，只用于第三层稳定排序和 shadow 对照。它不进入 candidate identity、CRN、policy context 或 random key。
+
+### 3.3 CRN identity 与 policy
+
+随机坐标唯一为：
+
+```text
+root identity
++ canonical scenario identity
++ replicate identity
++ ply/decision ordinal
++ acting seat
++ random domain
++ semantic key
+-> deterministic independent stream/value
+```
+
+因此接口只能是候选无关的：
+
+```ts
+type CrnCoordinate = Readonly<{
+  rootIdentity: string;
+  scenarioIdentity: string;
+  replicateIdentity: string;
+  ply: number;
+  actingSeat: PublicSeat;
+  randomDomain: string;
+}>;
+
+declare function deriveRandomDomain(coordinate: CrnCoordinate): string;
+
+type CrnView = Readonly<{
+  value(semanticKey: string): number;
+}>;
+
+type RolloutPolicyDecisionContext = Readonly<{
+  replicateIdentity: string;
+  ply: number;
+  actingSeat: PublicSeat;
+  random: CrnView;
+}>;
+
+type RolloutPolicy = Readonly<{
+  chooseAction(
+    observation: SeatLocalObservation,
+    context: RolloutPolicyDecisionContext,
+  ): RolloutPolicyResult;
+}>;
+```
+
+`CrnView` 没有共享 `next()` cursor；每次查询使用 semantic key。相同 scenario/replicate/ply/seat/domain/semantic key 在所有 candidate 中返回相同值。policy v1 枚举当前 seat-local legal actions，以 `policy-action:${canonicalActionIdentity(action)}` 查询 keyed value，按 value 降序、canonical action identity 升序选取；共同合法动作因此保留同一优先级。`replicateIdentity` 由 `replicateOrdinal` 的 canonical encoding 产生，改变 replicate 的独立 keyed stream，因此 replicateCount 有实际证据意义。candidate 数组位置和 candidateId 均不进入坐标。
+
+policy 只接收当前 acting seat 的 `SeatLocalObservation`：自己的 hand、公开 history、public hand counts、公开 last play、公开 finish order 和 game rank。不得读取 Room、原始对手手牌、其他座位的完整 privateState 或 ParticleScenario。
+
+### 3.4 Team Utility 与 leaf evaluation
+
+```ts
+type TeamUtility = -3 | -2 | -1 | 1 | 2 | 3;
+
+type TeamUtilityResult =
+  | { ok: true; utility: TeamUtility }
+  | { ok: false; failure: TeamUtilityFailure };
+
+type LeafEvaluationResult =
+  | {
+      ok: true;
+      predictedFinishOrder: readonly PublicSeat[];
+      utility: TeamUtility;
+    }
+  | { ok: false; failure: LeafEvaluationFailure };
+```
+
+terminal truth table：
+
+| 本方名次 | Utility |
+| --- | ---: |
 | `{1,2}` | `+3` |
 | `{1,3}` | `+2` |
 | `{1,4}` | `+1` |
@@ -246,165 +255,184 @@ rootIdentity
 | `{2,4}` | `-2` |
 | `{3,4}` | `-3` |
 
-```ts
-export type TeamUtility = -3 | -2 | -1 | 0 | 1 | 2 | 3;
-```
+utility 严格属于 `[-3,+3]` 且不包含 zero。非法、重复或缺失名次失败。双方交换使 utility 变号；整体旋转保持团队语义；搭档座位互换不改变团队语义，不额外叠加搭档奖励。
 
-`TeamUtility` 的合法值域是 `[-3, +3]`；完整 terminal order 不产生额外 bonus 或 zero utility。非法、重复、缺失、越界名次必须 typed failure。
+非 terminal leaf 先保留已完成玩家真实 finish order，再对未完成玩家按剩余手牌数升序排列；相同手牌数按相对当前 acting/turn seat 的顺时针距离升序。不得用绝对 seat number。若仓库实际轮转规则证明该 tie-break 不能旋转等变，Task 2 必须以证据停止冻结该细节，提出保持旋转等变性的最小替代，而不是退化为绝对 seat number。
 
-必须证明：
+### 3.5 Typed success/failure unions
 
-- 交换 perspective team 与 opposing team 后 utility 变号；
-- 将所有 seat 按同一个 delta 旋转后 utility 不变；
-- partner seat 互换后 utility 不变；
-- 不叠加未经验证的搭档奖励、风险权重或经验系数。
-
-### 3.6 Non-terminal leaf evaluation
+以下 union 名称和 discriminator 固定：
 
 ```ts
-export type RolloutLeafInput = Readonly<{
-  finishOrder: readonly PublicSeat[];
-  handCounts: Readonly<Record<PublicSeat, number>>;
-  turnSeat: PublicSeat;
-}>;
+type TeamUtilityFailure =
+  | { kind: "invalid-finish-order"; reason: "duplicate-seat" | "missing-seat" | "unknown-seat" }
+  | { kind: "unsupported-team-pair"; teamSeats: readonly PublicSeat[] };
+
+type LeafEvaluationFailure =
+  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" }
+  | { kind: "rotation-tie-break-unproven"; evidence: string };
+
+type RolloutPolicyFailure =
+  | { kind: "no-legal-action"; actingSeat: PublicSeat }
+  | { kind: "invalid-policy-context"; field: "ply" | "actingSeat" | "random" };
+
+type RolloutPolicyResult =
+  | { ok: true; action: RolloutAction }
+  | { ok: false; failure: RolloutPolicyFailure };
+
+type RolloutKernelFailure =
+  | { kind: "simulation-failed"; stage: "state-conservation" | "leaf-evaluation" | "replay" }
+  | { kind: "policy-failed"; failure: RolloutPolicyFailure }
+  | { kind: "budget-exhausted"; workUnits: number; maximumWorkUnits: number };
+
+type RolloutAggregationFailure =
+  | { kind: "non-finite-aggregate"; field: "expectedUtility" | "variance" | "risk" }
+  | { kind: "coverage-mismatch"; expected: number; actual: number }
+  | { kind: "empty-replicate-set"; candidateId: string };
+
+type RolloutFailure =
+  | { kind: "invalid-request"; field: string }
+  | { kind: "invalid-budget"; field: "replicateCountPerScenario" | "maxPliesPerReplicate" | "maxPolicyActionEvaluationsPerPly" | "maxWorkUnits" }
+  | { kind: "invalid-risk-policy"; field: "variancePenalty" | "downsideRiskPenalty" }
+  | { kind: "invalid-evidence-requirements"; field: "minimumEffectiveSampleSize" | "minimumAcceptedScenarioCount" | "minimumCompletedReplicateCount" }
+  | { kind: "fake-or-unknown-particle-bank" }
+  | { kind: "scenario-source-failed"; reason: "ledger-mismatch" | "replay-context-missing" | "private-state-invalid" }
+  | { kind: "effective-sample-size-too-low"; effectiveSampleSize: number; minimumEffectiveSampleSize: number }
+  | { kind: "insufficient-scenarios"; acceptedScenarioCount: number; minimumAcceptedScenarioCount: number }
+  | { kind: "insufficient-replicates"; completedReplicateCount: number; minimumCompletedReplicateCount: number }
+  | { kind: "coverage-mismatch"; expectedCoverage: number; actualCoverage: number }
+  | { kind: "kernel-failed"; failure: RolloutKernelFailure }
+  | { kind: "aggregation-failed"; failure: RolloutAggregationFailure };
+
+type RolloutReplicateResult =
+  | { ok: true; candidateId: string; scenarioIdentity: string; replicateIdentity: string; utility: TeamUtility; workUnits: number }
+  | { ok: false; failure: RolloutKernelFailure };
+
+type RolloutAggregationResult =
+  | { ok: true; summary: CandidateRolloutSummary }
+  | { ok: false; failure: RolloutAggregationFailure };
 ```
 
-`projectFinishOrder` 的输入包含真实 `finishOrder`、每个未完成座位的剩余手牌数和当前 `turnSeat`。算法严格为：
+所有失败均为真正的 discriminated union，不使用所有 `kind` 共享的模糊 `count?: number`。utility、leaf、policy、kernel、aggregation 在进入下一个阶段前必须检查 `ok`；任何失败都不返回部分排序。
 
-1. 保留已完成玩家的真实 finish order，禁止重排。
-2. 找出未完成玩家。
-3. 按剩余手牌数从少到多排序。
-4. 手牌数相同时，按相对当前 acting/turn seat 的仓库既有轮转方向排序。现有 `nextPlayableSeat` 为 `(seat + 3) % 4`，因此 tie-break 使用该相对距离，不使用绝对 seat number。
-5. 将完整预测名次代入同一 Team Utility truth table。
+### 3.6 Aggregation、risk 和排序
 
-如果实现测试证明当前轮转规则下此 tie-break 不能保持整体旋转等变性，Task 2 必须停止并提交证据；允许的最小替代方案只能是“基于同一轮转关系的相对距离 + canonical stable action/state key”，不得退化为绝对 seat number。
-
-### 3.7 Simulation and aggregation
-
-对每个 immutable bank record、每个 replicate、每个 candidate 执行同一预算的有限深度 kernel。candidate 执行前从相同 scenario snapshot 开始，首步执行待评估 action，随后由轻量 policy 逐 ply 选择合法动作。terminal 时使用真实 finish order；达到 `maxPliesPerReplicate` 时使用上述 leaf evaluation。不能因为 candidate 不同而重建 ParticleBank 或重采样不同场景。
-
-```ts
-export type RolloutReplicateResult = Readonly<{
-  candidateId: string;
-  scenarioIdentity: string;
-  replicateIdentity: string;
-  utility: TeamUtility;
-  terminal: boolean;
-  plies: number;
-}>;
-
-type RolloutReplicateInput = Readonly<{
-  candidate: RolloutCandidate;
-  scenario: RolloutScenario;
-  replicateIdentity: string;
-  crnTape: Readonly<{ valueAt(drawOrdinal: number): number }>;
-  budget: RolloutBudget;
-  policy: RolloutPolicy;
-}>;
-```
-
-权重聚合只使用 bank 内已有 normalized weight，并对所有 candidate 使用相同 record 集合和 replicate 集合：
+设 accepted scenario 权重为 `w_s`，每个 candidate 的 replicate 数为 `R`，且 `sum(w_s)=1`。candidate j 的分母固定为：
 
 ```text
-expectedUtility = Σ(weight × utility) / Σ(weight)
-variance         = max(0, Σ(weight × utility²) / Σ(weight) − expectedUtility²)
-risk             = Σ(weight × 1[utility < 0]) / Σ(weight)
+D = sum_s(w_s * R)
+expectedUtility_j = sum_(s,r)(w_s * utility_(j,s,r)) / D
+variance_j = sum_(s,r)(w_s * (utility_(j,s,r) - expectedUtility_j)^2) / D
+risk_j = sum_(s,r)(w_s * max(0, expectedUtility_j - utility_(j,s,r))) / D
 ```
 
-每个 replicate 以相同粒子权重计入；不添加未经验证的 utility coefficient。`variance` 只允许对 tolerance 内的负零做归零，超出容差是 aggregation failure。所有公开浮点 summary 使用固定六位 canonical rounding；原始 per-particle utility、weight、scenario 和 tape 永不进入 public result。
+不按 candidate 数量改变分母；所有 candidate 必须使用相同 scenario/replicate coverage。固定风险公式：
+
+```text
+riskAdjustedUtility
+  = expectedUtility
+  - variancePenalty * sqrt(variance)
+  - downsideRiskPenalty * risk
+```
 
 ```ts
-export type CandidateRolloutSummary = Readonly<{
+type CandidateRolloutSummary = Readonly<{
   candidateId: string;
-  scenarioCount: number;
-  replicateCount: number;
+  riskAdjustedUtility: number;
   expectedUtility: number;
   variance: number;
   risk: number;
-  terminalCount: number;
-  leafCount: number;
+  baselineEvaluatorScore: number;
+  acceptedScenarioCount: number;
+  replicateCountPerScenario: number;
+  totalCompletedReplicates: number;
+  completedReplicateCount: number;
+  workUnitCount: number;
 }>;
 
-export type RolloutResult = Readonly<{
-  schemaVersion: "d2f-rollout-result-v1";
+type RolloutCoverage = "complete";
+
+type RolloutAggregateDiagnostics = Readonly<{
+  effectiveSampleSize: number;
+  acceptedScenarioCount: number;
+  replicateCountPerScenario: number;
+  totalCompletedReplicates: number;
+  completedReplicateCount: number;
+  expectedCompletedReplicateCount: number;
+  candidateCount: number;
+  workUnitCount: number;
+  coverage: RolloutCoverage;
+}>;
+
+type RolloutResult = Readonly<{
+  schemaVersion: "d2f-rollout-result-v2";
   mode: RolloutMode;
   formalExecutionAllowed: false;
-  rootIdentity: Readonly<{ digest: string }>;
+  rootDigest: string;
   candidateSummaries: readonly CandidateRolloutSummary[];
   ranking: readonly string[];
-  aggregateDiagnostics: Readonly<{
-    candidateCount: number;
-    scenarioCount: number;
-    replicateCount: number;
-    completedReplicates: number;
-    terminalCount: number;
-    leafCount: number;
-  }>;
+  aggregateDiagnostics: RolloutAggregateDiagnostics;
 }>;
-
-export type RolloutFailure = Readonly<{
-  kind: "invalid-request"
-    | "formal-execution-forbidden"
-    | "unknown-bank-handle"
-    | "invalid-budget"
-    | "work-limit-exceeded"
-    | "candidate-identity-collision"
-    | "scenario-source-failed"
-    | "policy-failed"
-    | "simulation-failed"
-    | "aggregation-failed"
-    | "non-finite-result"
-    | "internal-error";
-  count?: number;
-}>;
-
-export type RolloutRunResult =
-  | Readonly<{ ok: true; result: RolloutResult }>
-  | Readonly<{ ok: false; failure: RolloutFailure }>;
 ```
 
-candidate ranking tuple固定为：
+候选排序严格为：
 
 ```text
+riskAdjustedUtility descending
 expectedUtility descending
-variance ascending
-risk ascending
+baselineEvaluatorScore descending
 candidateId ascending by UTF-16 code units
 ```
 
-候选 summary 按 canonical candidate identity 输出。任一 candidate 缺失、任一 scenario/replicate 失败、非有限 arithmetic、utility 越界或排序 postcondition 失败，都丢弃整个 `RolloutResult`。
+内部使用未舍入 finite 值排序；public summary 可在排序完成后按六位 canonical 格式化。不得用 rounded value 重新排序，public rounding 不得改变 `ranking`。
 
-## 4. Mode and formal decision boundary
+## 4. Determinism、immutability 与失败原子性
 
-### Detached
+root/scenario/candidate/replicate/random-domain identity 使用 canonical encoding；scenario source 只从一次 immutable ParticleBank snapshot 读取。候选顺序变化、scenario completion 顺序变化、worker completion 顺序变化、同 seed replay 都必须得到相同的未舍入 summary 和 ranking。不能使用 `Math.random`、wall clock、对象枚举偶然顺序、共享 mutable RNG cursor 或 worker 调度产生语义结果。
 
-测试或离线调用者直接传入完整 `RolloutRequest`，只保留脱敏 `RolloutResult`。调用者不得把 ranking 转换成 `AiAction`，不得写 `RoomState` 或 `AiRuntimeState`。
+入口在校验后冻结或深度只读投影 `RolloutRequest`、候选数组、ParticleBank public handle、Room public input 和 diagnostics sink；不能修改 Room、ParticleBank、candidates、public ledger 或调用者拥有的输入对象。成功只允许完整 coverage；低 ESS、场景不足、replicate 不足、coverage mismatch、budget failure、policy failure、telemetry failure 都丢弃整个 D2F result，原子回退原 evaluator。
 
-### Offline
+成功 diagnostics 只记录脱敏的 `effectiveSampleSize`、`acceptedScenarioCount`、`replicateCountPerScenario`、`totalCompletedReplicates`、`completedReplicateCount`、`workUnitCount` 和 `coverage`。禁止 raw scenario、assignments、对手完整手牌、particle 私有 weight 明细和可还原 random seed。
 
-独立 fixture/replay/benchmark 使用相同 contracts 和 kernel，输出只写离线 artifact 的 aggregate fields。离线入口不读取 production Room，也不注册 treatment。
+## 5. Shadow 旁路契约
 
-### Shadow
+当前 `src/ai/tactics/representativeActionShadowObserver.ts` 是已有 D2e representative-action observer，不能被称为 D2F shadow，也不能被复用来证明 D2F 已接入。Task 8 先只读审计该文件、`src/ai/aiDecisionEngine.ts` 和正式动作最终选定点。当前 `aiDecisionEngine.ts` 的该 observer 调用发生在 evaluator/最终 action 之前，因此不满足 D2F 的“正式动作先冻结”要求。
 
-允许经单独授权的 observer 在正式动作已经产生后计算或记录 D2F summary；observer 必须证明 action、runtime、candidate order、public event、ledger、replay 和正式 diagnostics 与未执行 D2F 的 baseline 字节相同。D2F summary 不得成为 evaluator input、candidate filter、selected action、plan switch 或 room transition 的输入。
+D2F 的真实最小旁路冻结为：Task 8 修改 `src/game/room.ts` 的 `runAiStep` 一个调用点，在原逻辑完成 `passTurn`/`playCards`、runtime 和 plan 更新、正式 action 已冻结之后、函数返回之前，调用 `void observeD2FShadow(projectD2FShadowInput(...))`。该 adapter 只传 public ledger/history、game rank、己方手牌、public hand counts、baseline action identity/score、候选 projection 和显式预算；不把完整 Room 或其他座位 private hands 传入 rollout。`src/ai/aiDecisionEngine.ts` 和已有 representative observer 不修改。
 
-任何 request 的 `formalExecutionAllowed` 只能是字面量 `false`；返回结果也只能是 `false`。AST/symbol tests 必须证明 `src/game/room.ts`、`src/game/ai.ts`、`src/ai/aiDecisionEngine.ts`、`src/ai/planning/**` 没有 D2F import/call path。
+`observeD2FShadow` 返回 `void`，内部捕获 rollout、低 ESS、超预算和 telemetry sink 的所有 failure；observer 失败不得改变 action、evaluator、candidate filter、plan selector、Room transition 或 transaction result。最小新增文件为 `src/ai/rollout/d2fShadowObserver.ts`，sink 只接收脱敏 evidence。
 
-## 5. Failure, privacy and immutability model
+```ts
+type D2FShadowEvidence = Readonly<{
+  schemaVersion: "d2f-shadow-v2";
+  baselineActionIdentity: string;
+  d2fRecommendedActionIdentity: string | null;
+  agreement: "agree" | "disagree" | "unavailable";
+  riskAdjustedUtilityDelta: number | null;
+  expectedUtilityDelta: number | null;
+  baselineEvaluatorScore: number;
+  effectiveSampleSize: number | null;
+  acceptedScenarioCount: number | null;
+  replicateCountPerScenario: number | null;
+  completedReplicateCount: number | null;
+  workUnitCount: number | null;
+  fallbackReason: "none" | "rollout-failure" | "low-evidence" | "budget-exhausted" | "telemetry-failure";
+  semanticBudgetUsage: Readonly<{
+    replicateCountPerScenario: number;
+    maxPliesPerReplicate: number;
+    maxPolicyActionEvaluationsPerPly: number;
+    workUnitCount: number;
+  }> | null;
+  elapsedWallClockMs: number | null;
+}>;
+```
 
-- 输入 `Room`、`ParticleBank`、candidates、public ledger 和 `RolloutRequest` 都按 read-only contract 消费，任何内部 clone/freeze 不回写调用者。
-- bridge 对 registry records 做 detached clone/deep-freeze；unknown/fake handle 返回 `unknown-bank-handle`，不暴露 scenario。
-- scenario-source 是唯一 bridge consumer；policy、diagnostics、aggregation 和 result 不可直接 import bridge 或 `particleBankInternals.ts`。
-- public result 不包含 `privateState`、`ParticleScenario`、`hiddenTransferAssignments`、complete hands、raw weight、seed、tape、worker id、process state 或 timing value。
-- failure result 不含 partial candidate summaries、partial ranking 或未脱敏 exception message；内部异常映射到固定 failure kind。
-- 每次运行先验证 envelope、budget、candidate set、bank snapshot、scenario source，再开始任何 candidate loop；任何中途失败都返回全局 failure。
+`elapsedWallClockMs` 仅 telemetry，不能进入 identity、policy、stop condition、ranking 或 byte-lock comparison。shadow evidence 不向任何正式决策模块返回数据。
 
-## 6. Verification and release gates
+## 6. Budget calibration 与正式验证边界
 
-Task 1～6 使用显式小预算 fixture，不能写 production/shadow 默认 profile。Task 7 前必须有 `D2F_BUDGET_CALIBRATION_GATE`：独立 microbenchmark、固定 manifest、自然完成、可重复结果和人工批准。Task 8 必须在 Node 22.22.2 正式 CI/可重复环境完成；Node 24.15.0 结果另列 supplemental evidence。
+Task 1–6 只使用测试显式小预算，不设置 production/shadow 默认 profile。Task 7 先通过独立 microbenchmark 形成 measured calibration evidence；人工批准后才能形成 shadow budget profile。Task 8 使用批准后的显式 profile 接入旁路；Task 9 在 Node 22.22.2 正式环境完成最终验证。D2G 才能决定 active 参数，D2F 不做 active-mode 工作。
 
-正确性 tests 与 benchmark 分开。所有从可能含 linked worktree 的仓库环境执行的 Vitest 命令显式使用 `--exclude "**/.worktrees/**"`。若单次长回归超过 Codex 单命令上限，按固定 manifest 进行互不重叠分片；每个 shard 记录 files/tests/pass/fail/skip/exit code，汇总证明每个 tracked file 恰好一次、无重复、无遗漏、总测试数一致。不得提高全局 timeout、减少 fixture、删除断言或跳过测试。
+正常停止由安全整数计数决定，wall clock 只作为最后安全保护和 non-semantic telemetry。benchmark correctness tests 与 benchmark timing 分离；benchmark fixture 从公开、已跟踪输入在进程内创建 ParticleBank，JSON 不承载 WeakMap handle、raw hidden scenario、weight 或 seed。
 
-## 7. Explicit non-goals
-
-D2F 不做 D2G benchmark/treatment/ablation，不决定 active-mode 权重，不把 rollout ranking 接到正式出牌，不替换原 evaluator，不治理依赖告警，不修改 package/lockfile/tsconfig/Vite 配置，不重构相邻模块，也不创建未授权的 production adapter。
+正式 Node 基线为 `Node 22.22.2`，来源为 `.github/workflows/d2a1-verification.yml`；本机 `Node 24.15.0` 只能作为 supplemental evidence，不能宣称项目正式支持 Node 24。当前没有授权的 Node 22 CI 执行证据时，最终 Gate 状态必须为 `AWAITING_NODE22_CI`。

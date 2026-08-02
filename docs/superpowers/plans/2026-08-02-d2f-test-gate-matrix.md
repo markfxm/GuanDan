@@ -1,97 +1,308 @@
-# D2F_TEST_GATE_MATRIX
+# D2F Test Gate Matrix
 
-> Frozen with the D2F Prompt 1 design and implementation plan. This document defines verification; it does not authorize implementation or active integration.
+状态：文档纠偏冻结；本轮只修改文档，不创建测试、benchmark 或 production 文件。
 
-**Goal:** 用固定 manifest、默认 Vitest 并行度、Node 22.22.2 正式环境和独立 benchmark 证明 D2F 的 contracts、CRN、Team Utility、aggregation、privacy、detached boundary、失败原子性和性能 Gate。
+## 1. Gate policy
 
-**Architecture:** correctness tests 位于 `tests/ai/rollout/**`，ParticleBank focused regression 使用已接受的 10-file manifest。所有可能包含 linked worktree 的命令显式排除 `**/.worktrees/**`。benchmark 单独运行，不共享 correctness test 的通过结论，也不把 wall-clock 作为 rollout 语义。
+D2F 只允许 detached/offline/shadow，所有实现入口固定 formalExecutionAllowed: false。测试必须证明 D2F 不改变正式动作，不把 RolloutResult 回流到 evaluator、candidate filter、plan selector 或 Room transition。
 
-**Tech Stack:** TypeScript 5.7、Vitest 2.1.9、Node 22.22.2 formal CI baseline、Node 24.15.0 local supplemental evidence。
+所有命令在可能包含嵌套 worktree 的环境中显式排除：
 
-## 1. Accepted D2E-P Particle focused baseline
+~~~text
+--exclude "**/.worktrees/**"
+~~~
 
-人工已接受的 baseline：
+正常粒子 focused regression 的唯一冻结命令：
 
-```text
-10 files
-136 tests
-136 passed
-0 failed
-0 skipped
-Vitest 2.1.9
-Node 24.15.0 local supplemental run
-Vitest duration 41.99s
-wall-clock 52.642s
-exit code 0
-```
-
-固定 Particle manifest 及测试数：
-
-| Path | Tests |
-|---|---:|
-| `tests/ai/particles/actionSupportLikelihood.test.ts` | 16 |
-| `tests/ai/particles/constrainedParticleSampler.test.ts` | 16 |
-| `tests/ai/particles/effectiveSampleSize.test.ts` | 4 |
-| `tests/ai/particles/logWeightNormalization.test.ts` | 10 |
-| `tests/ai/particles/particleBankBuilder.test.ts` | 33 |
-| `tests/ai/particles/particleConservation.test.ts` | 3 |
-| `tests/ai/particles/particleContracts.test.ts` | 25 |
-| `tests/ai/particles/particleDetachedCharacterization.test.ts` | 1 |
-| `tests/ai/particles/particlePrivacyAst.test.ts` | 8 |
-| `tests/ai/particles/publicEventDealReplay.test.ts` | 20 |
-| **Total** | **136** |
-
-Manifest 必须由 `git ls-files 'tests/ai/particles/*.test.ts'` 得到并按路径固定；不得递归扫描 `.worktrees/**` 得到额外副本。
-
-## 2. Frozen commands and timeout semantics
-
-### 2.1 Standard Particle focused regression
-
-唯一标准命令：
-
-```text
+~~~text
 npx vitest run tests/ai/particles --exclude "**/.worktrees/**" --reporter=dot
-```
+~~~
 
-规则：
+已接受 fresh baseline：
 
-- 使用 Vitest 默认并行度，不添加 `--maxWorkers` 或 `--minWorkers`。
-- `--maxWorkers 1 --minWorkers 1` 仅用于逐文件 runtime diagnosis。
-- 不使用 `--testTimeout=120000` 作为整套进程时限方案。
-- 任何报告必须记录 files、tests、passed、failed、skipped、duration、exit code、worker crash 和 unhandled rejection。
+| scope | files | tests | result | evidence |
+| --- | ---: | ---: | --- | --- |
+| Particle focused | 10 | 136 | 136 passed, 0 failed, 0 skipped, exit 0 | Vitest 2.1.9, Node 24.15.0 supplemental local run |
+| D2e/D2d/D2c/D2a/D2b handoff | 23 | 222 | accepted historical baseline | exact 23-path manifest not present in current repository/report evidence |
+| Full permitted historical regression | 87 | 898 | accepted historical baseline | exact 87-path manifest not present in current repository/report evidence |
 
-### 2.2 D2F correctness focused regression
+--maxWorkers 1 --minWorkers 1 只用于逐文件 runtime diagnosis；不能作为正常全套回归命令。Vitest 单测 timeout 与外层命令总时限分开记录；不能通过提高全局 timeout、减少 fixture、删除 assertion 或跳过测试解决时限问题。长回归必须使用固定、互不重叠的 manifest shards。
 
-```text
-npx vitest run tests/ai/rollout --exclude "**/.worktrees/**" --reporter=dot
-```
+D2F 新测试加入后，最终报告必须记录新的 tracked manifest、每个新增文件的测试数和新的累计数；历史 898 不能继续作为实现后的固定总数。
 
-该命令只运行 D2F correctness tests，不包含 benchmark、simulation 或 performance suite。
+## 1.1 Cross-document canonical interface lock
 
-### 2.3 Test timeout 与外层进程时限
+The following fields are repeated verbatim in Design Spec, Implementation Plan and this matrix. Any implementation or test using another name fails the documentation gate.
 
-- Vitest test timeout 只控制单个 `test`/`it`，不能代表整套命令时限。
-- Codex/外层命令执行器的总时限是独立边界；`exit code 124` 且没有 Vitest 汇总时，必须记录为外层强制终止证据，不直接分类为测试 hang。
-- 正常语义停止只能由显式 `RolloutBudget` 计数控制；wall clock 不能参与 kernel result、排序或正常停止。
-- 长回归若超过外层命令上限，使用本文件的固定 manifest shards；不得提高全局 timeout、删测试、删断言、降低 fixture 或跳过 suite。
+~~~ts
+type RolloutScenarioSourceInput = Readonly<{
+  bank: ParticleBank;
+  publicHistoryEvents: readonly PublicActionEvent[];
+  initialLedger: HardPublicLedger;
+  finalLedger: HardPublicLedger;
+  gameRank: GameRank;
+  perspectiveSeat: PublicSeat;
+  ownCurrentHand: readonly Card[];
+  publicState: RolloutPublicState;
+}>;
 
-### 2.4 Fixed shard command
+type RolloutScenarioSourceResult =
+  | {
+      ok: true;
+      scenarios: readonly RolloutScenario[];
+      effectiveSampleSize: number;
+      acceptedScenarioCount: number;
+    }
+  | { ok: false; failure: RolloutFailure };
 
-Shard 必须显式列出 tracked test paths，使用默认并行度和相同 worktree exclusion：
+type RolloutMode = "detached" | "offline" | "shadow";
 
-```text
-npx vitest run <fixed-shard-file-1> <fixed-shard-file-2> --exclude "**/.worktrees/**" --reporter=dot
-```
+type RolloutPublicState = Readonly<{
+  gameRank: GameRank;
+  actingSeat: PublicSeat;
+  perspectiveSeat: PublicSeat;
+  partnerSeat: PublicSeat;
+  handCounts: Readonly<Record<PublicSeat, number>>;
+  finishOrder: readonly PublicSeat[];
+  publicPlayedCardIds: readonly string[];
+  currentLastPlay: Readonly<unknown> | null;
+  currentLastPlaySeat: PublicSeat | null;
+}>;
 
-每个 shard 独立命令、自然结束、exit code 0，并记录完整 Vitest summary。Shard 不能按单个 `test` 拆分、不能重复文件、不能排除断言。若发生 shard，报告必须给出 manifest、shard membership、每个文件恰好一个 owner、每 shard 测试数和全局累计数。
+type RolloutBudget = Readonly<{
+  replicateCountPerScenario: number;
+  maxPliesPerReplicate: number;
+  maxPolicyActionEvaluationsPerPly: number;
+  maxWorkUnits: number;
+}>;
 
-## 3. Fixed regression manifests
+type RolloutBudgetLimits = Readonly<{
+  maxReplicateCountPerScenario: number;
+  maxPliesPerReplicate: number;
+  maxPolicyActionEvaluationsPerPly: number;
+  maxWorkUnits: number;
+}>;
 
-### 3.1 D2a/D2b public regression manifest
+type ValidatedRolloutBudget = Readonly<{
+  budget: RolloutBudget;
+  limits: RolloutBudgetLimits;
+  maximumWorkUnits: number;
+  validated: true;
+}>;
 
-以下 12 个文件是既有 D2a/D2b public ledger/evidence regression：
+type RolloutEvidenceRequirements = Readonly<{
+  schemaVersion: "d2f-rollout-evidence-requirements-v1";
+  minimumEffectiveSampleSize: number;
+  minimumAcceptedScenarioCount: number;
+  minimumCompletedReplicateCount: number;
+  requireCompleteCoverage: true;
+}>;
 
-```text
+type RolloutRiskPolicy = Readonly<{
+  schemaVersion: "d2f-rollout-risk-policy-v1";
+  variancePenalty: number;
+  downsideRiskPenalty: number;
+}>;
+
+type RolloutCandidate = Readonly<{
+  candidateId: string;
+  action: RolloutAction;
+  baselineEvaluatorScore: number;
+}>;
+
+type RolloutScenario = Readonly<{
+  scenarioIdentity: string;
+  normalizedWeight: number;
+  privateState: Readonly<unknown>;
+}>;
+
+type RolloutReplicateInput = Readonly<{
+  candidate: RolloutCandidate;
+  scenario: RolloutScenario;
+  publicState: RolloutPublicState;
+  replicateIdentity: string;
+  random: CrnView;
+  validatedBudget: ValidatedRolloutBudget;
+  policy: RolloutPolicy;
+}>;
+
+type CrnView = Readonly<{ value(semanticKey: string): number }>;
+
+type RolloutPolicyDecisionContext = Readonly<{
+  replicateIdentity: string;
+  ply: number;
+  actingSeat: PublicSeat;
+  random: CrnView;
+}>;
+
+type RolloutPolicy = Readonly<{
+  chooseAction(observation: SeatLocalObservation, context: RolloutPolicyDecisionContext): RolloutPolicyResult;
+}>;
+
+type RolloutRequest = Readonly<{
+  schemaVersion: "d2f-rollout-request-v2";
+  mode: RolloutMode;
+  formalExecutionAllowed: false;
+  rootIdentity: string;
+  scenarioSourceInput: RolloutScenarioSourceInput;
+  candidates: readonly RolloutCandidate[];
+  budget: RolloutBudget;
+  limits: RolloutBudgetLimits;
+  evidenceRequirements: RolloutEvidenceRequirements;
+  riskPolicy: RolloutRiskPolicy;
+  policy: RolloutPolicy;
+}>;
+
+type RolloutPolicyResult =
+  | { ok: true; action: RolloutAction }
+  | { ok: false; failure: RolloutPolicyFailure };
+
+type TeamUtility = -3 | -2 | -1 | 1 | 2 | 3;
+
+type CandidateRolloutSummary = Readonly<{
+  candidateId: string;
+  riskAdjustedUtility: number;
+  expectedUtility: number;
+  variance: number;
+  risk: number;
+  baselineEvaluatorScore: number;
+  acceptedScenarioCount: number;
+  replicateCountPerScenario: number;
+  totalCompletedReplicates: number;
+  completedReplicateCount: number;
+  workUnitCount: number;
+}>;
+
+type RolloutAggregateDiagnostics = Readonly<{
+  effectiveSampleSize: number;
+  acceptedScenarioCount: number;
+  replicateCountPerScenario: number;
+  totalCompletedReplicates: number;
+  completedReplicateCount: number;
+  expectedCompletedReplicateCount: number;
+  candidateCount: number;
+  workUnitCount: number;
+  coverage: "complete";
+}>;
+
+type RolloutResult = Readonly<{
+  schemaVersion: "d2f-rollout-result-v2";
+  mode: RolloutMode;
+  formalExecutionAllowed: false;
+  rootDigest: string;
+  candidateSummaries: readonly CandidateRolloutSummary[];
+  ranking: readonly string[];
+  aggregateDiagnostics: RolloutAggregateDiagnostics;
+}>;
+
+type D2FShadowEvidence = Readonly<{
+  schemaVersion: "d2f-shadow-v2";
+  baselineActionIdentity: string;
+  d2fRecommendedActionIdentity: string | null;
+  agreement: "agree" | "disagree" | "unavailable";
+  riskAdjustedUtilityDelta: number | null;
+  expectedUtilityDelta: number | null;
+  baselineEvaluatorScore: number;
+  effectiveSampleSize: number | null;
+  acceptedScenarioCount: number | null;
+  replicateCountPerScenario: number | null;
+  completedReplicateCount: number | null;
+  workUnitCount: number | null;
+  fallbackReason: "none" | "rollout-failure" | "low-evidence" | "budget-exhausted" | "telemetry-failure";
+  semanticBudgetUsage: Readonly<{
+    replicateCountPerScenario: number;
+    maxPliesPerReplicate: number;
+    maxPolicyActionEvaluationsPerPly: number;
+    workUnitCount: number;
+  }> | null;
+  elapsedWallClockMs: number | null;
+}>;
+
+type TeamUtilityResult =
+  | { ok: true; utility: TeamUtility }
+  | { ok: false; failure: TeamUtilityFailure };
+
+type LeafEvaluationResult =
+  | { ok: true; predictedFinishOrder: readonly PublicSeat[]; utility: TeamUtility }
+  | { ok: false; failure: LeafEvaluationFailure };
+
+type RolloutReplicateResult =
+  | { ok: true; candidateId: string; scenarioIdentity: string; replicateIdentity: string; utility: TeamUtility; workUnits: number }
+  | { ok: false; failure: RolloutKernelFailure };
+
+type RolloutAggregationResult =
+  | { ok: true; summary: CandidateRolloutSummary }
+  | { ok: false; failure: RolloutAggregationFailure };
+
+type TeamUtilityFailure =
+  | { kind: "invalid-finish-order"; reason: "duplicate-seat" | "missing-seat" | "unknown-seat" }
+  | { kind: "unsupported-team-pair"; teamSeats: readonly PublicSeat[] };
+
+type LeafEvaluationFailure =
+  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" }
+  | { kind: "rotation-tie-break-unproven"; evidence: string };
+
+type RolloutPolicyFailure =
+  | { kind: "no-legal-action"; actingSeat: PublicSeat }
+  | { kind: "invalid-policy-context"; field: "ply" | "actingSeat" | "random" };
+
+type RolloutKernelFailure =
+  | { kind: "simulation-failed"; stage: "state-conservation" | "leaf-evaluation" | "replay" }
+  | { kind: "policy-failed"; failure: RolloutPolicyFailure }
+  | { kind: "budget-exhausted"; workUnits: number; maximumWorkUnits: number };
+
+type RolloutAggregationFailure =
+  | { kind: "non-finite-aggregate"; field: "expectedUtility" | "variance" | "risk" }
+  | { kind: "coverage-mismatch"; expected: number; actual: number }
+  | { kind: "empty-replicate-set"; candidateId: string };
+
+type RolloutFailure =
+  | { kind: "invalid-request"; field: string }
+  | { kind: "invalid-budget"; field: "replicateCountPerScenario" | "maxPliesPerReplicate" | "maxPolicyActionEvaluationsPerPly" | "maxWorkUnits" }
+  | { kind: "invalid-risk-policy"; field: "variancePenalty" | "downsideRiskPenalty" }
+  | { kind: "invalid-evidence-requirements"; field: "minimumEffectiveSampleSize" | "minimumAcceptedScenarioCount" | "minimumCompletedReplicateCount" }
+  | { kind: "fake-or-unknown-particle-bank" }
+  | { kind: "scenario-source-failed"; reason: "ledger-mismatch" | "replay-context-missing" | "private-state-invalid" }
+  | { kind: "effective-sample-size-too-low"; effectiveSampleSize: number; minimumEffectiveSampleSize: number }
+  | { kind: "insufficient-scenarios"; acceptedScenarioCount: number; minimumAcceptedScenarioCount: number }
+  | { kind: "insufficient-replicates"; completedReplicateCount: number; minimumCompletedReplicateCount: number }
+  | { kind: "coverage-mismatch"; expectedCoverage: number; actualCoverage: number }
+  | { kind: "kernel-failed"; failure: RolloutKernelFailure }
+  | { kind: "aggregation-failed"; failure: RolloutAggregationFailure };
+~~~
+
+## 2. Exact accepted Particle focused manifest
+
+manifest 只能由 git ls-files 'tests/ai/particles/*.test.ts' 生成；下列 10 个路径各一次，全部位于当前 worktree 的 tests/ai/particles/，不包含 .worktrees/**：
+
+~~~text
+tests/ai/particles/actionSupportLikelihood.test.ts
+tests/ai/particles/constrainedParticleSampler.test.ts
+tests/ai/particles/effectiveSampleSize.test.ts
+tests/ai/particles/logWeightNormalization.test.ts
+tests/ai/particles/particleBankBuilder.test.ts
+tests/ai/particles/particleConservation.test.ts
+tests/ai/particles/particleContracts.test.ts
+tests/ai/particles/particleDetachedCharacterization.test.ts
+tests/ai/particles/particlePrivacyAst.test.ts
+tests/ai/particles/publicEventDealReplay.test.ts
+~~~
+
+验证命令：
+
+~~~text
+$files = @(git ls-files 'tests/ai/particles/*.test.ts')
+$files.Count
+npx vitest run tests/ai/particles --exclude "**/.worktrees/**" --reporter=dot
+~~~
+
+验收为 10 files / 136 tests / 136 passed / 0 failed / 0 skipped / exit 0，并在报告中保留 Vitest duration、wall-clock、Node 版本和是否有 worker/unhandled 异常。
+
+## 3. D2 regression handoff manifest status
+
+人工已接受 D2e/D2d/D2c/D2a/D2b 的 23 files / 222 tests 基线，但当前 HEAD 和可读取的既有报告只保留了一个 19-file candidate list，不能推断缺失的四个路径。当前 list 如下，明确不是 23/222 的替代物：
+
+~~~text
 tests/ai/lightweightPublicEvidence.test.ts
 tests/ai/publicEvent.test.ts
 tests/ai/publicEventHash.test.ts
@@ -104,17 +315,6 @@ tests/ai/publicLedgerTrickFinish.test.ts
 tests/game/publicEventIdentity.test.ts
 tests/game/publicEventReplayIdentity.test.ts
 tests/game/publicEventRoomAdapter.test.ts
-```
-
-命令模板：
-
-```text
-npx vitest run tests/ai/lightweightPublicEvidence.test.ts tests/ai/publicEvent.test.ts tests/ai/publicEventHash.test.ts tests/ai/publicLedger.test.ts tests/ai/publicLedgerDependency.test.ts tests/ai/publicLedgerPrivacy.test.ts tests/ai/publicLedgerReplay.test.ts tests/ai/publicLedgerTributeReset.test.ts tests/ai/publicLedgerTrickFinish.test.ts tests/game/publicEventIdentity.test.ts tests/game/publicEventReplayIdentity.test.ts tests/game/publicEventRoomAdapter.test.ts --exclude "**/.worktrees/**" --reporter=dot
-```
-
-### 3.2 D2c/D2d boundary regression manifest
-
-```text
 tests/ai/beliefGuidedPlanPolicy.test.ts
 tests/ai/representativeActionReducer.test.ts
 tests/ai/representativeActionReducerDetached.test.ts
@@ -122,138 +322,228 @@ tests/ai/representativeActionShadowAst.test.ts
 tests/ai/representativeActionShadowByteLock.test.ts
 tests/ai/representativeActionShadowIntegration.test.ts
 tests/ai/representativeActionShadowRoom.test.ts
-```
+~~~
 
-命令模板：
+状态：AWAITING_D2_REGRESSION_MANIFEST。在人工提供 exact 23-path manifest 或 Node 22 CI 输出完整 collection manifest 前，不得宣称 23/222 已在当前 checkout 重跑，不得将 19-file list 写成 accepted handoff。
 
-```text
-npx vitest run tests/ai/beliefGuidedPlanPolicy.test.ts tests/ai/representativeActionReducer.test.ts tests/ai/representativeActionReducerDetached.test.ts tests/ai/representativeActionShadowAst.test.ts tests/ai/representativeActionShadowByteLock.test.ts tests/ai/representativeActionShadowIntegration.test.ts tests/ai/representativeActionShadowRoom.test.ts --exclude "**/.worktrees/**" --reporter=dot
-```
+## 4. D2F test manifest and focused commands
 
-如果执行前仓库事实显示该 manifest 发生路径变化，停止并先形成 manifest 差异报告；不得静默改成递归扫描或猜测替代文件。
+D2F implementation tests must be tracked under tests/ai/rollout/**。Planned exact test names and paths are defined by the implementation plan：
 
-### 3.3 Full permitted regression
+| concern | planned test paths | required assertions |
+| --- | --- | --- |
+| contracts/private bridge | particleBankRolloutBoundary.test.ts, particleScenarioSource.test.ts | fake handle rejection, one bridge, replay context, no private diagnostics |
+| utility/leaf | teamUtility.test.ts, leafEvaluation.test.ts | six values, invalid ranks, team swap, rotation, partner swap, relative tie-break |
+| identity/CRN | crnIdentity.test.ts, crnInvariance.test.ts | candidate-free coordinate, keyed view, replicate variation, candidate/completion order invariance |
+| policy/kernel | policy.test.ts, kernel.test.ts, rolloutPrivacyAst.test.ts | seat-local context, no HandPlanner, explicit budget, conservation |
+| evidence/aggregation/ranking | evidenceGate.test.ts, aggregation.test.ts, ranking.test.ts | ESS/scenario/replicate gates, weight denominator, risk formula, unrounded sort |
+| orchestration | rolloutOrchestrator.test.ts, failureAtomicity.test.ts | one immutable source, no partial result, input immutability, formal false |
+| benchmark contract | d2fBenchmarkContract.test.ts | public fixture builds handle in process, no hidden payload |
+| Shadow | d2fShadowObserver.test.ts, d2fShadowObserverIntegration.test.ts, d2fShadowByteLock.test.ts | post-commit void observer, swallowed failure, evidence privacy, public byte lock |
 
-```text
-npx vitest run --exclude "**/.worktrees/**" --exclude "tests/benchmark/**" --exclude "tests/simulation/**" --exclude "tests/performance/**" --reporter=dot
-```
+Before the implementation creates the manifest, no count is assigned to these planned files. After each Task, run its exact focused command：
 
-该命令使用 Vitest 默认并行度。`npm test` 当前脚本包含 `--maxWorkers 1 --minWorkers 1`，因此不是 D2F focused 或 full permitted regression 的标准命令；不得通过修改 package script 解决时限问题。
+~~~text
+npx vitest run <exact tracked test paths> --exclude "**/.worktrees/**" --reporter=verbose
+~~~
 
-## 4. Correctness gate matrix
+After Task 8, the complete D2F correctness command is：
 
-| Gate | Planned test path | Required evidence |
-|---|---|---|
-| Contract envelope | `tests/ai/rollout/rolloutContractValidation.test.ts` | schema、literal false、required fields、finite/safe integer validation |
-| Identity canonicalization | `tests/ai/rollout/rolloutIdentity.test.ts` | root/scenario/candidate/replicate/domain identity stable and seed-free |
-| CRN invariance | `tests/ai/rollout/crnStream.test.ts`, `rolloutKernel.test.ts` | same scenario/replicate tape reused by every candidate |
-| Candidate order invariance | `tests/ai/rollout/rolloutIdentity.test.ts`, `rolloutOrdering.test.ts` | candidate permutation yields identical per-candidate bytes and canonical ranking |
-| Same-seed replay | `rolloutIdentity.test.ts`, `rolloutKernel.test.ts` | same snapshot/seed-derived particle source and budget replay identically |
-| Worker/scenario completion order | `crnStream.test.ts`, `rolloutKernel.test.ts` | completion order permutation does not alter any summary |
-| State conservation | `rolloutKernel.test.ts` | card conservation, legal state transition, no duplicated/missing card |
-| Seat-local privacy | `rolloutPolicyPrivacy.test.ts` | policy receives own hand and public counts only; no complete hidden scenario |
-| Private bridge import boundary | `particleBankRolloutBoundary.test.ts` | exactly one `readParticleBankInternals` reader and one bridge consumer |
-| Public API non-leak | `particleBankRolloutBoundary.test.ts`, `rolloutContractValidation.test.ts` | no public barrel, raw scenario, assignments, full hands, raw weights or seed |
-| No complete HandPlanner | `rolloutPolicyPrivacy.test.ts`, `rolloutKernel.test.ts` | AST/symbol graph rejects planning imports and forbidden call names |
-| Team Utility truth table | `teamUtility.test.ts` | six rank pairs, strict `[-3,+3]`, invalid orders fail |
-| Team symmetry | `teamUtility.test.ts`, `leafEvaluation.test.ts` | team swap negates, seat rotation and partner swap preserve semantic result |
-| Non-terminal leaf evaluation | `leafEvaluation.test.ts` | real finish order preserved, hand counts then relative turn distance |
-| Weighted aggregation | `rolloutAggregation.test.ts` | expectation, variance, downside probability, finite range |
-| Stable total ordering | `rolloutOrdering.test.ts` | expected utility, variance, risk, UTF-16 candidate identity tie-break |
-| Failure atomicity | `rolloutFailureAtomicity.test.ts` | any key failure returns no summaries, ranking or partial hidden data |
-| Input immutability | `rolloutInputImmutability.test.ts` | request, bank, candidates, public state and caller-owned records unchanged |
-| Shadow non-interference | `rolloutDetachedShadow.test.ts` | action/runtime/candidates/score/room/public event/ledger/replay bytes unchanged |
-| No formal path import | `rolloutDetachedShadow.test.ts` | room/game AI/decision engine have no D2F import or call edge |
-| Diagnostics redaction | `rolloutFailureAtomicity.test.ts`, `rolloutDetachedShadow.test.ts` | no seed, raw tape, scenario, assignments or weight detail |
-| Budget overflow and limits | `rolloutKernel.test.ts` | explicit safe integer validation and pre-loop work bound |
-| No wall-clock semantics | `crnStream.test.ts`, `rolloutKernel.test.ts` | no Date/performance/time-based result or stop condition |
-| Formal flag | `rolloutContractValidation.test.ts`, `rolloutDetachedShadow.test.ts` | request/result `formalExecutionAllowed` always false |
+~~~text
+npx vitest run tests/ai/rollout --exclude "**/.worktrees/**" --reporter=dot
+~~~
 
-Every row must have a named test and a natural Vitest result. A skipped test, intentionally unexecuted test, widened tolerance, reduced fixture or omitted assertion is a Gate failure.
+The final report must replace the planned list with the actual git ls-files 'tests/ai/rollout/*.test.ts' manifest and total test count.
 
-## 5. D2F Task focused matrix
+## 5. Contract and identity gates
 
-| Task | Focused command | Required pass condition |
-|---|---|---|
-| 1 | `npx vitest run tests/ai/rollout/particleBankRolloutBoundary.test.ts tests/ai/rollout/rolloutContractValidation.test.ts --exclude "**/.worktrees/**" --reporter=verbose` | bridge/source graph and contract envelope pass |
-| 2 | `npx vitest run tests/ai/rollout/teamUtility.test.ts tests/ai/rollout/leafEvaluation.test.ts --exclude "**/.worktrees/**" --reporter=verbose` | table, invalid inputs and rotational leaf semantics pass |
-| 3 | `npx vitest run tests/ai/rollout/rolloutIdentity.test.ts tests/ai/rollout/crnStream.test.ts --exclude "**/.worktrees/**" --reporter=verbose` | identity and CRN order invariance pass |
-| 4 | `npx vitest run tests/ai/rollout/rolloutPolicyPrivacy.test.ts tests/ai/rollout/rolloutKernel.test.ts --exclude "**/.worktrees/**" --reporter=verbose` | seat-local policy, bounded kernel and conservation pass |
-| 5 | `npx vitest run tests/ai/rollout/rolloutAggregation.test.ts tests/ai/rollout/rolloutOrdering.test.ts --exclude "**/.worktrees/**" --reporter=verbose` | weighted summaries and total ordering pass |
-| 6 | `npx vitest run tests/ai/rollout/rolloutFailureAtomicity.test.ts tests/ai/rollout/rolloutDetachedShadow.test.ts tests/ai/rollout/rolloutInputImmutability.test.ts --exclude "**/.worktrees/**" --reporter=verbose` | failure atomicity, no-interference and immutability pass |
-| 7 | `npx tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts --input scripts/benchmarks/fixtures/d2f-rollout-budget-calibration-input.json` | only after approved calibration Gate; output repeatable and separate from correctness |
-| 8 | `npx vitest run tests/ai/rollout --exclude "**/.worktrees/**" --reporter=dot` | complete D2F correctness manifest passes under formal environment |
+| gate | test evidence | failure condition |
+| --- | --- | --- |
+| Contract envelope | particleBankRolloutBoundary.test.ts | missing required field, non-literal formal flag, non-finite input, mutable public result |
+| Unified result | particleScenarioSource.test.ts, aggregation.test.ts | any document/code uses an obsolete digest field instead of rootDigest, or fields differ |
+| Rollout budget | kernel.test.ts | kernel reads global/default budget, unsafe integer, overflow or wall-clock stop |
+| Evidence requirements | evidenceGate.test.ts | no explicit minimum ESS/scenarios/replicates, or candidate loop starts before validation |
+| Typed failures | evidenceGate.test.ts, failureAtomicity.test.ts | failure union relies on generic optional count or returns partial result |
+| Identity | crnIdentity.test.ts | candidateId or baseline score enters identity |
+| CRN | crnInvariance.test.ts | same coordinate differs, candidate order changes result, shared cursor is used |
+| Replay | crnInvariance.test.ts, kernel.test.ts | same seed/identity does not replay, replicate ordinal has no effect |
+| Scenario coverage | evidenceGate.test.ts, aggregation.test.ts | candidates use different scenario set or replicate coverage |
+| Worker/completion order | crnInvariance.test.ts, rolloutOrchestrator.test.ts | scenario or worker completion order changes bytes/ranking |
 
-Task 7 is not a Vitest correctness test. Its wall-clock measurements are performance evidence only and cannot change simulation results, stop conditions or ranking.
+The frozen random chain is：
 
-## 6. Node, TypeScript and build gates
+~~~text
+root identity
++ canonical scenario identity
++ replicate identity
++ ply/decision ordinal
++ acting seat
++ random domain
++ semantic key
+-> deterministic value
+~~~
 
-### 6.1 Formal Node gate
+CrnView only offers value(semanticKey), never next(). Common legal actions use canonical action identity as semantic key. candidateId is restricted to result association, identity validation and final sorting.
 
-Required formal environment:
+## 6. Privacy, conservation, immutability and atomicity gates
 
-```text
+| gate | required evidence | required result |
+| --- | --- | --- |
+| seat-local policy | policy.test.ts | policy receives only current seat observation and RolloutPolicyDecisionContext |
+| no full HandPlanner | rolloutPrivacyAst.test.ts | no import or call to complete HandPlanner under src/ai/rollout/** |
+| ParticleBank bridge | particleBankRolloutBoundary.test.ts | exactly one bridge resolves WeakMap internals; fake handle fails safely |
+| replay context | particleScenarioSource.test.ts | source receives bank plus public history/initial/final ledger/game rank/perspective/own hand/public state |
+| state conservation | kernel.test.ts | card multiset, hand counts, public played cards and finish state remain conserved |
+| input immutability | failureAtomicity.test.ts, rolloutOrchestrator.test.ts | Room, ParticleBank, candidates, ledger and request snapshots unchanged |
+| failure atomicity | failureAtomicity.test.ts | any kernel/evidence/aggregation failure yields no partial RolloutResult |
+| diagnostics privacy | particleScenarioSource.test.ts, d2fShadowObserver.test.ts | no raw scenario, assignment, opponent hand, weight detail or seed |
+| formal non-interference | d2fShadowByteLock.test.ts | formal action/public state/replay bytes identical with Shadow on/off |
+
+## 7. Team Utility, leaf, aggregation and ranking gates
+
+### Team Utility
+
+The only terminal table is：
+
+| own team places | utility |
+| --- | ---: |
+| {1,2} | +3 |
+| {1,3} | +2 |
+| {1,4} | +1 |
+| {2,3} | -1 |
+| {2,4} | -2 |
+| {3,4} | -3 |
+
+TeamUtility is exactly -3 | -2 | -1 | 1 | 2 | 3; zero is invalid. Tests must cover malformed, duplicate and missing ranks, team swap sign, seat rotation, partner interchange and no extra reward.
+
+### Leaf
+
+The leaf test must preserve completed finish order, sort unfinished seats by remaining hand count, and tie by clockwise distance from current acting/turn seat. Same-state replay, team swap and seat rotation are required. Absolute seat number is prohibited.
+
+### Aggregation
+
+For normalized scenario weights w_s and R = replicateCountPerScenario, every candidate uses：
+
+~~~text
+D = sum_s(w_s * R)
+expectedUtility_j = sum_(s,r)(w_s * utility_(j,s,r)) / D
+variance_j = sum_(s,r)(w_s * (utility_(j,s,r) - expectedUtility_j)^2) / D
+risk_j = sum_(s,r)(w_s * max(0, expectedUtility_j - utility_(j,s,r))) / D
+~~~
+
+The result uses：
+
+~~~text
+riskAdjustedUtility
+  = expectedUtility
+  - variancePenalty * sqrt(variance)
+  - downsideRiskPenalty * risk
+~~~
+
+RolloutRiskPolicy contains explicit finite non-negative variancePenalty and downsideRiskPenalty; Task 1–6 do not provide defaults. Ranking uses unrounded internal values：
+
+~~~text
+riskAdjustedUtility descending
+expectedUtility descending
+baselineEvaluatorScore descending
+candidateId ascending by UTF-16 code units
+~~~
+
+Public six-decimal rounding occurs after ranking and cannot rerank candidates. baselineEvaluatorScore only participates in the third sort key and Shadow evidence.
+
+## 8. Shadow integration and non-interference gates
+
+Task 6 is detached orchestration only. Task 8 is the first actual D2F Shadow integration.
+
+Before Task 8 implementation, read only：
+
+~~~text
+src/ai/tactics/representativeActionShadowObserver.ts
+src/ai/aiDecisionEngine.ts
+src/game/room.ts:runAiStep
+~~~
+
+The existing representative observer is D2e and currently runs before final formal action selection. The D2F call site is frozen to one call in src/game/room.ts:runAiStep after the original passTurn/playCards and runtime/plan update, before return. src/ai/aiDecisionEngine.ts and representativeActionShadowObserver.ts remain unchanged.
+
+Required Shadow evidence fields：
+
+~~~text
+baselineActionIdentity
+d2fRecommendedActionIdentity
+agreement
+riskAdjustedUtilityDelta
+expectedUtilityDelta
+baselineEvaluatorScore
+effectiveSampleSize
+acceptedScenarioCount
+replicateCountPerScenario
+completedReplicateCount
+workUnitCount
+fallbackReason
+semanticBudgetUsage
+elapsedWallClockMs
+~~~
+
+elapsedWallClockMs is telemetry only and is excluded from identity, stop condition, ranking and byte-lock comparison. Observer returns void/best effort; rollout, low ESS, budget, and sink errors cannot change formal action or public transition.
+
+## 9. Benchmark gate
+
+Correctness and benchmark are separate：
+
+~~~text
+npx vitest run tests/ai/rollout --exclude "**/.worktrees/**" --reporter=dot
+npm exec --no -- tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json
+~~~
+
+The second command is permitted only after a fixed Node 22.22.2 environment has run npm ci and read-only verification proves the locked tsx executable is available. Current local evidence is package/lock declaration tsx ^4.19.2 plus absent node_modules/tsx; no temporary npx download is allowed. Current status: AWAITING_FIXED_BENCHMARK_RUNNER.
+
+Benchmark fixture must be public, tracked and reproducible. It may contain public ledger/history, game rank, seats, own hand and public configuration. It must not contain a WeakMap handle, raw hidden scenarios, weights or seed. The script constructs ParticleBank in process using the existing public builder and prints only redacted aggregate/work-unit/telemetry data. Correctness tests must not be marked failed merely because the benchmark entry is absent; the benchmark first RED is the command-level missing entry or an independent benchmark contract test.
+
+## 10. Node and permitted regression gates
+
+Formal verification baseline：
+
+~~~text
 Node 22.22.2
-CI workflow: .github/workflows/d2a1-verification.yml
-Supplemental CI family: .github/workflows/ci.yml Node 22
-```
+~~~
 
-Task 8 must report the actual Node version, npm version, Vitest version, OS/architecture, command exit codes and natural completion. Node 24.15.0 local results are reported separately as supplemental; they do not establish project-level Node 24 support.
+Evidence source: .github/workflows/d2a1-verification.yml. .github/workflows/ci.yml provides Node 22. Node 24.15.0 local particle evidence is supplemental only and cannot establish official Node 24 support. If no Node 22.22.2 environment exists and no authorized CI workflow is run, final status is AWAITING_NODE22_CI, not pass.
 
-### 6.2 TypeScript/build
+Full historical command is not frozen until Vitest 2.1.9 multiple --exclude behavior is verified by observed collection output and the exact 87-file manifest is available. Do not freeze the former recursive command solely because it worked historically. When evidence is available, use the fixed 87-path manifest, explicit --exclude "**/.worktrees/**", and independent shards under the external command limit. Each file must occur once, every shard must exit 0, and the aggregate must be 87 files / 898 tests / 898 passed for the historical baseline.
 
-```text
+## 11. TypeScript, build, and static scans
+
+Every Task GREEN and final handoff must run：
+
+~~~text
 npx tsc --noEmit
-npm run build
-```
+<repository-existing-build-command>
+git diff --check
+~~~
 
-Both commands must complete naturally with exit code 0 in Task 8. No `tsconfig.json`, Vite config, package script, dependency or timeout change is allowed.
+Required read-only/static scans：
 
-### 6.3 Existing D2 regression
+~~~text
+rg -n "candidateId.*(random|CRN|tape|draw)|deriveRandomDomain.*candidateId|(random|CRN|tape|draw).*candidateId" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
+rg -n "effectiveSampleSize|minimumAcceptedScenarioCount|minimumCompletedReplicateCount|effective-sample-size-too-low|insufficient-scenarios|insufficient-replicates|coverage-mismatch" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
+rg -n "riskAdjustedUtility|variancePenalty|downsideRiskPenalty|baselineEvaluatorScore|UTF-16" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
+rg -n "representativeActionShadowObserver|aiDecisionEngine|src/game/room.ts|observeD2FShadow|elapsedWallClockMs" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
+rg -n "23 files|222 tests|AWAITING_D2_REGRESSION_MANIFEST|87 files|898 tests|AWAITING_NODE22_CI" docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
+~~~
 
-Task 8 must run both fixed D2a/D2b and D2c/D2d manifests from Section 3, with the explicit worktree exclusion. Any path drift, duplicate, omission or changed test count is a blocked Gate until manually reviewed.
+CandidateId scan is expected to find only prohibition/validation language, never a random function signature or random derivation expression. The full regression command remains unfrozen until its multi-exclude evidence is recorded.
 
-## 7. Shard audit protocol
+## 12. Final status vocabulary
 
-Shards are allowed only when a complete command would exceed the outer command limit while independent files and default parallel mode remain healthy. The protocol is:
+Only these outcomes are valid：
 
-1. Generate a fixed sorted manifest from `git ls-files` and record it before execution.
-2. Assign each file to exactly one shard based on observed file-level runtime; keep shard estimates below the safe command budget.
-3. Run each shard once with `--exclude "**/.worktrees/**"` and default Vitest parallelism.
-4. Record every shard’s exact path list, files, tests, passed/failed/skipped, duration, exit code, worker status and unhandled rejection status.
-5. Prove `union(shards) = manifest`, `intersection(shards) = empty`, and each manifest path count is one.
-6. Prove the sum of shard test counts equals the accepted manifest count; do not infer counts from filenames.
-7. If any shard fails, repeats, omits, crashes or is externally terminated, the Gate is blocked; do not weaken tests or increase global timeout.
+~~~text
+TEST GATE PASS — SINGLE RUN
+TEST GATE PASS — AUDITED SHARDS
+TEST GATE BLOCKED — ISOLATED TEST FAILURE
+AWAITING_D2_REGRESSION_MANIFEST
+AWAITING_FIXED_BENCHMARK_RUNNER
+AWAITING_NODE22_CI
+~~~
 
-For the accepted baseline, no shard is required because the single default-parallel Particle command completed in 52.642 seconds with 10/136 passed.
-
-## 8. Release conclusion rules
-
-### TEST GATE PASS
-
-Use only when the relevant manifest has complete natural Vitest summaries, exit code 0, all tests passed, no worker crash/unhandled rejection, and no duplicate/omitted files.
-
-### TEST GATE PASS WITH WARNINGS
-
-Use only for non-blocking supplemental environment or performance observations that do not affect the formal Node 22.22.2 Gate, correctness count, privacy, determinism, immutability or failure atomicity.
-
-### TEST GATE BLOCKED
-
-Use for any failed/timeout test, missing/duplicate file, wrong count, worker crash, unhandled rejection, unresolved import/privacy boundary, failed formal Node gate, unapproved calibration, or any production/formal decision path modification.
-
-No D2F Gate may be described as “基本完成”.
-
-## 9. Final report fields
-
-Every Task report and the final D2F report must include:
-
-- worktree, branch, starting/ending HEAD and clean state;
-- exact manifest and shard coverage if used;
-- command, start/end/wall-clock, Vitest duration, files/tests/pass/fail/skip and exit code;
-- worker crash, unhandled rejection and external termination state;
-- Node 22.22.2 formal evidence and Node 24.15.0 supplemental evidence separately;
-- privacy, determinism, immutability, failure atomicity and performance effects;
-- production modification: `否` or the reviewed allowlist change;
-- formal decision path modification: `否`;
-- commit hash and residual risks;
-- exactly one conclusion: `PASS`, `PASS WITH WARNINGS` or `BLOCKED`.
+A documentation freeze may be PASS WITH WARNINGS when the correction is complete but the external 23-path manifest, fixed benchmark runner or Node 22 evidence is still awaiting authorized evidence. It must not be described as an implementation or formal test pass.

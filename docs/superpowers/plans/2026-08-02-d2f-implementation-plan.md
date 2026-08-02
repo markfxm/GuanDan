@@ -1,562 +1,569 @@
-# D2F CRN Rollout / Team Utility Implementation Plan
+# D2F CRN Rollout Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Every task ends at its own review checkpoint and must stop for human approval.
+状态：仅计划纠偏；本轮不创建实现、测试或 benchmark 文件，不开始 Task 1。
 
-**Goal:** 按已冻结的 D2F 设计，在 `src/ai/rollout/**` 中实现 detached/offline/shadow 的 CRN rollout kernel、Team Utility、加权 aggregation 和 failure-atomic result，而不改变正式出牌路径。
+## 0. 执行纪律与全局 allowlist
 
-**Architecture:** `particleBankRolloutAccess.ts` 是唯一读取 ParticleBank WeakMap internals 的窄 bridge，`particleScenarioSource.ts` 是唯一 bridge consumer。rollout kernel 对同一 immutable bank record 集合、replicate 和 CRN tape 复用场景；policy 只接收 seat-local observation。`runRollout.ts` 的结果永远是脱敏 summary，`formalExecutionAllowed` 永远是 `false`，不连接 Room 或 `decideAiAction`。
+每个 Task 独立执行以下循环：只读检查 -> 列出 allowlist/forbidden -> 写一个最小失败测试 -> 运行并记录正确失败 -> 最小实现 -> focused GREEN -> 相关回归 -> TypeScript/build/diff 检查 -> 隐私/确定性/不可变性/失败原子性审计 -> 单一 commit -> 阶段报告并停止等待人工审查。
 
-**Tech Stack:** TypeScript 5.7、Vitest 2.1.9、现有 ParticleBank/replay/canonical identity、SHA-256 identity、Node 22.22.2 正式验证环境。Node 24.15.0 仅作为 supplemental environment evidence。
+Task 1–7 的 production/test 路径只能位于：
 
-## Global Constraints
+~~~text
+src/ai/particles/particleBankRolloutAccess.ts       # 仅 Task 1
+src/ai/rollout/**
+tests/ai/rollout/**
+scripts/benchmarks/d2f-rollout-budget-calibration.ts # 仅 Task 7
+~~~
 
-- D2F 只建设 `ParticleBank → CRN finite simulation → Team Utility → weighted expectation/variance/risk → stable ranking → detached/offline/shadow evidence`。
-- `formalExecutionAllowed` 必须是 literal `false`，不能通过可变配置、默认值、调用者 cast 或未验证 adapter 绕过。
-- D2F 不改变正式出牌，不替换 evaluator，不调用完整 HandPlanner，不连接 `runAiStep`、`decideAiAction`、Room、public ledger、replay 或正式 action reducer。
-- 所有 candidate 使用同一个 immutable ParticleBank、相同 scenario/replicate/budget/depth/CRN tape；candidate input position、worker schedule、object enumeration 和 completion order 不参与语义结果。
-- policy 只能接收当前模拟座位的 `SeatLocalObservation`，不得看到其他座位的完整手牌、原 Room 或完整 `ParticleScenario`。
-- 不使用 `Math.random`、`Date.now`、`performance.now`、`process.env`、worker order 或 wall clock 产生正常结果或停止条件。
-- 所有预算字段必须是有限 safe integer；乘法溢出、工作量超限、非有限 utility/weight/aggregate 都失败关闭。
-- 任一关键失败都丢弃整个 partial result；不能返回半完成排序。
-- public diagnostics/result 脱敏，不输出 raw scenario、assignments、完整对手手牌、raw weight detail、seed 或可还原随机流的 domain/tape。
-- Task 1～6 不设置 production/shadow default profile；必须传入显式 `RolloutBudget` 和 `RolloutBudgetLimits`。
-- Node 22.22.2 是正式 CI/可重复验证基线；本机 Node 24.15.0 只能作为 supplemental evidence，不能改写 `package.json.engines` 或 Node 安装。
-- 本计划只允许当前提交创建三份文档；执行本计划时才按每个 Task 的 allowlist 创建源文件和测试文件。
+Task 8 另有一个冻结的正式旁路例外：允许修改 src/game/room.ts 的 runAiStep 一个调用点；不得修改 src/ai/aiDecisionEngine.ts 或已有 src/ai/tactics/representativeActionShadowObserver.ts。Task 9 不新增行为，只做验证。
 
-## Frozen file map and forbidden paths
+任何 Task 都禁止修改 src/ai/planning/**、除 Task 8 指定调用点外的 src/game/room.ts、正式 decideAiAction 语义、package/package-lock/tsconfig/Vite 配置、全局 timeout、已有 D2e observer、无关依赖和其他 worktree。正式 formalExecutionAllowed 必须保持 false。
 
-本计划未来的唯一 production module 根目录是 `src/ai/rollout/**`。唯一允许位于 particles 根目录的新增 production 文件是：
+所有测试和命令在可能含嵌套 worktree 的仓库环境中显式使用：
 
-```text
-src/ai/particles/particleBankRolloutAccess.ts
-```
+~~~text
+--exclude "**/.worktrees/**"
+~~~
 
-该文件只读取 `readParticleBankInternals`，不修改 `particleBankInternals.ts`，不改变 ParticleBank public API。
+正常粒子 focused regression 固定为：
 
-未来 correctness tests 只能位于 `tests/ai/rollout/**`。独立性能脚本只能位于：
+~~~text
+npx vitest run tests/ai/particles --exclude "**/.worktrees/**" --reporter=dot
+~~~
 
-```text
-scripts/benchmarks/d2f-rollout-budget-calibration.ts
-scripts/benchmarks/fixtures/d2f-rollout-budget-calibration-input.json
-```
+该命令的 fresh baseline 是 10 files / 136 tests / 136 passed，Vitest 2.1.9，Node 24.15.0 supplemental local evidence。--maxWorkers 1 --minWorkers 1 只用于逐文件诊断，不是正常回归命令；整套进程时限与单测 timeout 必须分开记录。
 
-明确禁止修改或创建：
+## 1. Frozen interface block
 
-```text
-src/ai/planning/**
-src/game/room.ts
-src/game/ai.ts
-src/ai/aiDecisionEngine.ts
-src/ai/contracts.ts
-src/ai/runtimeContracts.ts
-src/ai/planning/handPlanner.ts
-src/ai/planning/planManager.ts
-src/ai/planning/planSelector.ts
-src/ai/planning/planEvaluator.ts
-src/game/publicEvent.ts
-src/game/publicLedger.ts
-src/game/publicEventReplay.ts
-package.json
-package-lock.json
-tsconfig.json
-vite.config.ts
-tests/benchmark/**
-tests/simulation/**
-tests/performance/**
-```
+Task 1–9 使用 Design Spec 中完全相同的以下名字和字段，不另造别名：
 
-不创建 `src/ai/rollout/index.ts` 或任何 public barrel。任何需要扩大 allowlist 的事实都必须停止当前 Task，形成差异报告并等待人工批准。
+~~~ts
+type RolloutMode = "detached" | "offline" | "shadow";
 
-## Frozen interfaces used by every Task
-
-以下类型名必须在所有 Task、测试和三个冻结文档中保持一致：
-
-```ts
-export type RolloutMode = "detached" | "offline" | "shadow";
-
-export type RolloutBudget = Readonly<{
-  schemaVersion: "d2f-rollout-budget-v1";
-  replicateCount: number;
-  maxPliesPerReplicate: number;
-  maxPolicyActionsPerPly: number;
-  maxTotalWorkUnits: number;
-}>;
-
-export type RolloutBudgetLimits = Readonly<{
-  schemaVersion: "d2f-rollout-budget-limits-v1";
-  maxReplicateCount: number;
-  maxPliesPerReplicate: number;
-  maxPolicyActionsPerPly: number;
-  maxTotalWorkUnits: number;
-}>;
-
-export type RolloutRequest = Readonly<{
-  schemaVersion: "d2f-rollout-request-v1";
+type RolloutRequest = Readonly<{
+  schemaVersion: "d2f-rollout-request-v2";
   mode: RolloutMode;
   formalExecutionAllowed: false;
-  rootIdentity: RolloutRootIdentity;
-  publicState: RolloutPublicState;
-  bank: ParticleBank;
+  rootIdentity: string;
+  scenarioSourceInput: RolloutScenarioSourceInput;
   candidates: readonly RolloutCandidate[];
   budget: RolloutBudget;
   limits: RolloutBudgetLimits;
+  evidenceRequirements: RolloutEvidenceRequirements;
+  riskPolicy: RolloutRiskPolicy;
+  policy: RolloutPolicy;
 }>;
 
-export type CandidateRolloutSummary = Readonly<{
-  candidateId: string;
-  scenarioCount: number;
-  replicateCount: number;
-  expectedUtility: number;
-  variance: number;
-  risk: number;
-  terminalCount: number;
-  leafCount: number;
+type RolloutBudget = Readonly<{
+  replicateCountPerScenario: number;
+  maxPliesPerReplicate: number;
+  maxPolicyActionEvaluationsPerPly: number;
+  maxWorkUnits: number;
 }>;
 
-export type RolloutFailure = Readonly<{
-  kind: "invalid-request"
-    | "formal-execution-forbidden"
-    | "unknown-bank-handle"
-    | "invalid-budget"
-    | "work-limit-exceeded"
-    | "candidate-identity-collision"
-    | "scenario-source-failed"
-    | "policy-failed"
-    | "simulation-failed"
-    | "aggregation-failed"
-    | "non-finite-result"
-    | "internal-error";
-  count?: number;
+type RolloutBudgetLimits = Readonly<{
+  maxReplicateCountPerScenario: number;
+  maxPliesPerReplicate: number;
+  maxPolicyActionEvaluationsPerPly: number;
+  maxWorkUnits: number;
 }>;
 
-export type RolloutRunResult =
-  | Readonly<{ ok: true; result: RolloutResult }>
-  | Readonly<{ ok: false; failure: RolloutFailure }>;
-```
+type ValidatedRolloutBudget = Readonly<{
+  budget: RolloutBudget;
+  limits: RolloutBudgetLimits;
+  maximumWorkUnits: number;
+  validated: true;
+}>;
 
-`risk` 冻结为 weighted probability of `utility < 0`；不添加额外经验系数。候选排序冻结为 `expectedUtility` 降序、`variance` 升序、`risk` 升序、`candidateId` UTF-16 升序。
+type RolloutEvidenceRequirements = Readonly<{
+  schemaVersion: "d2f-rollout-evidence-requirements-v1";
+  minimumEffectiveSampleSize: number;
+  minimumAcceptedScenarioCount: number;
+  minimumCompletedReplicateCount: number;
+  requireCompleteCoverage: true;
+}>;
 
-Task interfaces that are intentionally private to their module are still named explicitly: `RolloutScenario` contains detached private replay state; `RolloutScenarioSourceResult` is the success/failure union returned by the source; `RolloutLeafInput` contains only finish order, hand counts and turn seat; `RolloutReplicateInput` contains one candidate, one scenario, one replicate identity, one immutable CRN tape, one explicit budget and one policy. Their exact fields are frozen in the design spec and are not public-barrel exports.
+type RolloutRiskPolicy = Readonly<{
+  schemaVersion: "d2f-rollout-risk-policy-v1";
+  variancePenalty: number;
+  downsideRiskPenalty: number;
+}>;
 
-```ts
-type TeamUtility = -3 | -2 | -1 | 0 | 1 | 2 | 3;
-type RolloutScenarioSourceResult =
-  | Readonly<{ ok: true; scenarios: readonly RolloutScenario[] }>
-  | Readonly<{ ok: false; failure: RolloutFailure }>;
-type RolloutLeafInput = Readonly<{
-  finishOrder: readonly PublicSeat[];
+type RolloutPublicState = Readonly<{
+  gameRank: GameRank;
+  actingSeat: PublicSeat;
+  perspectiveSeat: PublicSeat;
+  partnerSeat: PublicSeat;
   handCounts: Readonly<Record<PublicSeat, number>>;
-  turnSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+  publicPlayedCardIds: readonly string[];
+  currentLastPlay: Readonly<unknown> | null;
+  currentLastPlaySeat: PublicSeat | null;
 }>;
+
+type RolloutCandidate = Readonly<{
+  candidateId: string;
+  action: RolloutAction;
+  baselineEvaluatorScore: number;
+}>;
+
+type RolloutScenario = Readonly<{
+  scenarioIdentity: string;
+  normalizedWeight: number;
+  privateState: Readonly<unknown>;
+}>;
+
+type RolloutScenarioSourceInput = Readonly<{
+  bank: ParticleBank;
+  publicHistoryEvents: readonly PublicActionEvent[];
+  initialLedger: HardPublicLedger;
+  finalLedger: HardPublicLedger;
+  gameRank: GameRank;
+  perspectiveSeat: PublicSeat;
+  ownCurrentHand: readonly Card[];
+  publicState: RolloutPublicState;
+}>;
+
+type RolloutScenarioSourceResult =
+  | {
+      ok: true;
+      scenarios: readonly RolloutScenario[];
+      effectiveSampleSize: number;
+      acceptedScenarioCount: number;
+    }
+  | { ok: false; failure: RolloutFailure };
+
 type RolloutReplicateInput = Readonly<{
   candidate: RolloutCandidate;
   scenario: RolloutScenario;
+  publicState: RolloutPublicState;
   replicateIdentity: string;
-  crnTape: Readonly<{ valueAt(drawOrdinal: number): number }>;
-  budget: RolloutBudget;
+  random: CrnView;
+  validatedBudget: ValidatedRolloutBudget;
   policy: RolloutPolicy;
 }>;
+
+type CrnView = Readonly<{ value(semanticKey: string): number }>;
+
+type RolloutPolicyDecisionContext = Readonly<{
+  replicateIdentity: string;
+  ply: number;
+  actingSeat: PublicSeat;
+  random: CrnView;
+}>;
+
+type RolloutPolicy = Readonly<{
+  chooseAction(observation: SeatLocalObservation, context: RolloutPolicyDecisionContext): RolloutPolicyResult;
+}>;
+
+type RolloutPolicyResult =
+  | { ok: true; action: RolloutAction }
+  | { ok: false; failure: RolloutPolicyFailure };
+
+type TeamUtility = -3 | -2 | -1 | 1 | 2 | 3;
+
+type CandidateRolloutSummary = Readonly<{
+  candidateId: string;
+  riskAdjustedUtility: number;
+  expectedUtility: number;
+  variance: number;
+  risk: number;
+  baselineEvaluatorScore: number;
+  acceptedScenarioCount: number;
+  replicateCountPerScenario: number;
+  totalCompletedReplicates: number;
+  completedReplicateCount: number;
+  workUnitCount: number;
+}>;
+
+type RolloutAggregateDiagnostics = Readonly<{
+  effectiveSampleSize: number;
+  acceptedScenarioCount: number;
+  replicateCountPerScenario: number;
+  totalCompletedReplicates: number;
+  completedReplicateCount: number;
+  expectedCompletedReplicateCount: number;
+  candidateCount: number;
+  workUnitCount: number;
+  coverage: "complete";
+}>;
+
 type RolloutResult = Readonly<{
-  schemaVersion: "d2f-rollout-result-v1";
+  schemaVersion: "d2f-rollout-result-v2";
   mode: RolloutMode;
   formalExecutionAllowed: false;
+  rootDigest: string;
   candidateSummaries: readonly CandidateRolloutSummary[];
   ranking: readonly string[];
+  aggregateDiagnostics: RolloutAggregateDiagnostics;
 }>;
-```
 
----
+type D2FShadowEvidence = Readonly<{
+  schemaVersion: "d2f-shadow-v2";
+  baselineActionIdentity: string;
+  d2fRecommendedActionIdentity: string | null;
+  agreement: "agree" | "disagree" | "unavailable";
+  riskAdjustedUtilityDelta: number | null;
+  expectedUtilityDelta: number | null;
+  baselineEvaluatorScore: number;
+  effectiveSampleSize: number | null;
+  acceptedScenarioCount: number | null;
+  replicateCountPerScenario: number | null;
+  completedReplicateCount: number | null;
+  workUnitCount: number | null;
+  fallbackReason: "none" | "rollout-failure" | "low-evidence" | "budget-exhausted" | "telemetry-failure";
+  semanticBudgetUsage: Readonly<{
+    replicateCountPerScenario: number;
+    maxPliesPerReplicate: number;
+    maxPolicyActionEvaluationsPerPly: number;
+    workUnitCount: number;
+  }> | null;
+  elapsedWallClockMs: number | null;
+}>;
+
+type TeamUtilityFailure =
+  | { kind: "invalid-finish-order"; reason: "duplicate-seat" | "missing-seat" | "unknown-seat" }
+  | { kind: "unsupported-team-pair"; teamSeats: readonly PublicSeat[] };
+
+type LeafEvaluationFailure =
+  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" }
+  | { kind: "rotation-tie-break-unproven"; evidence: string };
+
+type RolloutPolicyFailure =
+  | { kind: "no-legal-action"; actingSeat: PublicSeat }
+  | { kind: "invalid-policy-context"; field: "ply" | "actingSeat" | "random" };
+
+type RolloutKernelFailure =
+  | { kind: "simulation-failed"; stage: "state-conservation" | "leaf-evaluation" | "replay" }
+  | { kind: "policy-failed"; failure: RolloutPolicyFailure }
+  | { kind: "budget-exhausted"; workUnits: number; maximumWorkUnits: number };
+
+type RolloutAggregationFailure =
+  | { kind: "non-finite-aggregate"; field: "expectedUtility" | "variance" | "risk" }
+  | { kind: "coverage-mismatch"; expected: number; actual: number }
+  | { kind: "empty-replicate-set"; candidateId: string };
+
+type TeamUtilityResult =
+  | { ok: true; utility: TeamUtility }
+  | { ok: false; failure: TeamUtilityFailure };
+
+type LeafEvaluationResult =
+  | { ok: true; predictedFinishOrder: readonly PublicSeat[]; utility: TeamUtility }
+  | { ok: false; failure: LeafEvaluationFailure };
+
+type RolloutReplicateResult =
+  | { ok: true; candidateId: string; scenarioIdentity: string; replicateIdentity: string; utility: TeamUtility; workUnits: number }
+  | { ok: false; failure: RolloutKernelFailure };
+
+type RolloutAggregationResult =
+  | { ok: true; summary: CandidateRolloutSummary }
+  | { ok: false; failure: RolloutAggregationFailure };
+
+type RolloutFailure =
+  | { kind: "invalid-request"; field: string }
+  | { kind: "invalid-budget"; field: "replicateCountPerScenario" | "maxPliesPerReplicate" | "maxPolicyActionEvaluationsPerPly" | "maxWorkUnits" }
+  | { kind: "invalid-risk-policy"; field: "variancePenalty" | "downsideRiskPenalty" }
+  | { kind: "invalid-evidence-requirements"; field: "minimumEffectiveSampleSize" | "minimumAcceptedScenarioCount" | "minimumCompletedReplicateCount" }
+  | { kind: "fake-or-unknown-particle-bank" }
+  | { kind: "scenario-source-failed"; reason: "ledger-mismatch" | "replay-context-missing" | "private-state-invalid" }
+  | { kind: "effective-sample-size-too-low"; effectiveSampleSize: number; minimumEffectiveSampleSize: number }
+  | { kind: "insufficient-scenarios"; acceptedScenarioCount: number; minimumAcceptedScenarioCount: number }
+  | { kind: "insufficient-replicates"; completedReplicateCount: number; minimumCompletedReplicateCount: number }
+  | { kind: "coverage-mismatch"; expectedCoverage: number; actualCoverage: number }
+  | { kind: "kernel-failed"; failure: RolloutKernelFailure }
+  | { kind: "aggregation-failed"; failure: RolloutAggregationFailure };
+~~~
+
+所有 utility/leaf/policy/kernel/aggregation 返回值都是 ok: true 或 ok: false 的 discriminated union；失败 kind 使用 Design Spec 的精确 union，不使用共享的 count?: number。RolloutFailure 必须包含 effective-sample-size-too-low、insufficient-scenarios、insufficient-replicates、coverage-mismatch。候选数组位置和 candidateId 不得进入 CRN 坐标；baselineEvaluatorScore 不得进入 identity、random 或 policy。
+
+## 2. Task 1 — contracts / private bridge / replay-ready source
+
+### Scope
+
+允许创建/修改：
+
+~~~text
+src/ai/particles/particleBankRolloutAccess.ts
+src/ai/rollout/contracts.ts
+src/ai/rollout/particleScenarioSource.ts
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+tests/ai/rollout/particleScenarioSource.test.ts
+~~~
+
+禁止修改所有其他 src/ai/particles/**、Room、planning、public barrel、package 和配置。
+
+### TDD actions
+
+- [ ] 只读确认 readParticleBankInternals 返回 ParticleRecord、ParticleScenario 和 normalized weight，并记录真实 replayParticleScenario 参数。
+- [ ] 创建测试骨架 describe("D2F ParticleBank bridge")，加入 it("rejects a fake ParticleBank handle before reading records")。
+- [ ] 运行 npx vitest run tests/ai/rollout/particleBankRolloutBoundary.test.ts --exclude "**/.worktrees/**" --reporter=verbose；首个 RED 预期为目标模块/函数不存在，而不是 timeout。
+- [ ] 加入 it("allows only the approved bridge to resolve readParticleBankInternals") 和 AST/symbol 检查：rollout 文件只能通过 particleScenarioSource.ts 访问桥接；不得出现对 particleBankInternals.ts 的其他 import/export。
+- [ ] 加入 it("builds replay-ready source from bank plus public history/ledger context")，构造包含 bank、publicHistoryEvents、initialLedger、finalLedger、gameRank、perspectiveSeat、ownCurrentHand、publicState 的 RolloutScenarioSourceInput。
+- [ ] 最小实现窄桥接，校验 fake/unknown handle、ledger hash/index、game rank、perspective seat 和己方 hand，再按真实 replay API 构造 RolloutScenario；只返回不可变私有投影。
+- [ ] 加入 it("does not expose raw scenario, four-seat hands, weight detail, or seed in public diagnostics")。
+- [ ] GREEN：重复执行两个 focused commands，分别得到所有测试通过，且 policy/diagnostics 不可接收 privateState。
+- [ ] 回归 npx vitest run tests/ai/particles --exclude "**/.worktrees/**" --reporter=dot；验证不少于 10 files / 136 tests，不能减少既有断言。
+- [ ] 运行 npx tsc --noEmit、仓库既有 build command、git diff --check；审计输入和 ParticleBank 未被修改。
+- [ ] 只提交本 Task 的 allowlist，使用 git commit -m "feat(ai): add D2F rollout contracts and bridge"；报告 first RED、测试数、隐私和 failure atomicity。
 
-### Task 1: Freeze contracts and the private ParticleBank bridge
+### Produces / consumes
 
-**Files:**
+Produces frozen contracts, RolloutScenarioSourceInput, source success/failure union and one private bridge. Consumes existing public ParticleBank handle plus complete replay context; does not enlarge the public ParticleBank API.
 
-- Create: `src/ai/rollout/contracts.ts`
-- Create: `src/ai/particles/particleBankRolloutAccess.ts`
-- Create: `src/ai/rollout/particleScenarioSource.ts`
-- Create: `tests/ai/rollout/particleBankRolloutBoundary.test.ts`
-- Create: `tests/ai/rollout/rolloutContractValidation.test.ts`
-- Modify: none
+## 3. Task 2 — Team Utility / terminal truth table / leaf
 
-**Allowed paths:** only the three listed production files and two listed tests. `particleBankInternals.ts` remains unchanged.
+### Scope
 
-**Forbidden paths:** all global forbidden paths, all other `src/ai/particles/**`, any public barrel, any policy/kernel/aggregation implementation, and every formal decision file.
+允许创建/修改：
 
-**Consumes:** existing `ParticleBank`, `ParticleScenario`, `ParticleRecord`, `ParticleBankInternals`, `ParticleBankFailureReason` and canonical identity contracts from `src/ai/particles/**`.
+~~~text
+src/ai/rollout/teamUtility.ts
+src/ai/rollout/leafEvaluation.ts
+tests/ai/rollout/teamUtility.test.ts
+tests/ai/rollout/leafEvaluation.test.ts
+~~~
 
-**Produces:**
+### TDD actions
 
-- `readParticleBankRecordsForRollout(bank: ParticleBank): readonly ParticleRecord[] | undefined` in the bridge. It is the only new reader of `readParticleBankInternals`; it clones and deep-freezes the returned records.
-- `createParticleScenarioSource(bank: ParticleBank): RolloutScenarioSourceResult` in `particleScenarioSource.ts`. This is the only rollout module allowed to call the bridge.
-- request/budget/candidate/identity/result/failure types in `contracts.ts`; no source file exports a public barrel.
+- [ ] 创建 describe("teamUtility")，先加入 it("maps all six valid team rank pairs")，断言 {1,2} 到 {3,4} 的六个值为 3,2,1,-1,-2,-3。
+- [ ] RED：npx vitest run tests/ai/rollout/teamUtility.test.ts --exclude "**/.worktrees/**" --reporter=verbose；预期为 export/module/function 不存在。
+- [ ] 加入 it("rejects zero utility and malformed finish orders")，覆盖缺失、重复、未知座位和 zero。
+- [ ] 加入 it("preserves team swap sign, seat rotation, and partner interchange")；使用相对团队座位，不用绝对 seat number。
+- [ ] 创建 describe("leafEvaluation") 与 it("projects unfinished seats by hand count then relative turn distance")。
+- [ ] 加入 it("keeps completed finish order before unfinished projection") 和 it("replays the same leaf state identically")。
+- [ ] 最小实现 utility lookup、finish validation、hand-count/tie-distance projection 和同一 utility truth table；禁止经验系数、额外搭档奖励。
+- [ ] 若仓库轮转事实无法证明 tie-break 旋转等变，停止该实现并报告证据，不能改成绝对 seat number。
+- [ ] GREEN focused：两个文件全部通过；回归 Task 1 contracts。
+- [ ] 运行 npx tsc --noEmit、build、git diff --check；审计 TeamUtility 不包含 zero。
+- [ ] 使用 git commit -m "feat(ai): add D2F team utility and leaf evaluation"；提交后停止。
 
-**First failing test:**
+### Produces / consumes
 
-```text
-npx vitest run tests/ai/rollout/particleBankRolloutBoundary.test.ts --exclude "**/.worktrees/**" --reporter=verbose
-```
+Produces TeamUtilityResult、LeafEvaluationResult 和纯函数 leaf evaluator。Consumes RolloutPublicState、finish order、hand counts、team seat metadata；不读取 Room 或 hidden hands。
 
-Expected failure: the approved bridge/source modules and contract symbols do not yet exist, so module resolution or symbol-boundary assertions fail. This is a boundary RED, not a production behavior failure.
+## 4. Task 3 — keyed CRN identity and replay
 
-**Implementation steps:**
+### Scope
 
-- [ ] Write the AST/symbol RED test that resolves imports and proves exactly one particles-side module imports `readParticleBankInternals`, exactly one rollout module imports the bridge, and no `src/ai/rollout/**` module imports `particleBankInternals.ts` directly.
-- [ ] Write contract RED assertions for literal `formalExecutionAllowed: false`, explicit budget/limits fields, failure union, absence of `privateState` from `RolloutResult`, and unknown/fake handle failure.
-- [ ] Run the two focused RED commands and record the exact missing-symbol/import failure.
-- [ ] Add only the frozen contracts, bridge clone/freeze, and scenario-source mapping. The bridge must not import `src/ai/rollout/**`; the source maps particle records into private rollout scenarios and never returns them through diagnostics.
-- [ ] Run both focused files again. Verify fake handles return `unknown-bank-handle`, bridge outputs cannot mutate registry state, and all output nodes are detached/frozen.
-- [ ] Run `npx tsc --noEmit`, `npm run build`, `git diff --check`, and the D2F privacy/import scan from `tests/ai/rollout/particleBankRolloutBoundary.test.ts`.
-- [ ] Audit privacy, immutability, determinism and failure atomicity: no scenario/assignment/weight/seed appears in a public result or failure.
-- [ ] Commit only the five Task 1 files with `feat(ai): add private D2F particle bridge contracts`.
-- [ ] Stop and produce the Task 1 report; wait for human review before Task 2.
+允许创建/修改：
 
-**Task Gate:** bridge import graph is exact, fake handles fail closed, no public API expands, and no formal path changes.
+~~~text
+src/ai/rollout/crn.ts
+src/ai/rollout/identity.ts
+tests/ai/rollout/crnIdentity.test.ts
+tests/ai/rollout/crnInvariance.test.ts
+~~~
 
----
+### TDD actions
 
-### Task 2: Implement Team Utility and non-terminal leaf evaluation
+- [ ] 加入 it("does not include candidateId in random domain or semantic key")，对两个 candidateId 使用同一 coordinate 逐字段比较 random bytes/value。
+- [ ] RED：npx vitest run tests/ai/rollout/crnIdentity.test.ts --exclude "**/.worktrees/**" --reporter=verbose；预期为候选无关 deriveRandomDomain/CrnView 尚不存在或签名不匹配。
+- [ ] 加入 it("returns the same keyed value for the same scenario replicate ply seat and semantic key")。
+- [ ] 加入 it("gives common legal actions the same priority across candidate simulations")，semantic key 使用 canonical action identity。
+- [ ] 加入 it("changes the deterministic stream when replicate ordinal changes")，证明 replicateCount 不是无意义循环。
+- [ ] 加入 it("is independent of candidate array order and completion order")，将结果按 candidateId 重排后比较 byte-stable canonical summary。
+- [ ] 最小实现 canonical identity encoding、候选无关 deriveRandomDomain(coordinate) 和无 cursor 的 CrnView.value(semanticKey)；不得使用 Math.random、object enumeration 或 shared mutable RNG。
+- [ ] GREEN：focused CRN tests 全通过；回归 Task 1–2。
+- [ ] 运行 npx tsc --noEmit、build、git diff --check；扫描 candidateId 不在 random domain/tape/key/draw 调用链。
+- [ ] 使用 git commit -m "feat(ai): add keyed D2F CRN identity"；提交后停止。
 
-**Files:**
+### Produces / consumes
 
-- Create: `src/ai/rollout/teamUtility.ts`
-- Create: `src/ai/rollout/leafEvaluation.ts`
-- Create: `tests/ai/rollout/teamUtility.test.ts`
-- Create: `tests/ai/rollout/leafEvaluation.test.ts`
-- Modify: none
+Produces CrnView、CrnCoordinate、canonical identity helpers and deterministic replicate streams. Consumes root/scenario/replicate/ply/seat/domain coordinates and semantic action keys only.
 
-**Allowed paths:** the four listed files only.
+## 5. Task 4 — seat-local policy and rollout kernel
 
-**Forbidden paths:** all existing game settlement/room files, formal decision files, particles files, benchmark files, and all Task 3+ rollout files.
+### Scope
 
-**Consumes:** `PublicSeat`, `GameRank` only where needed for observation typing, and Task 1 frozen rollout types.
+允许创建/修改：
 
-**Produces:**
+~~~text
+src/ai/rollout/policy.ts
+src/ai/rollout/kernel.ts
+src/ai/rollout/stateConservation.ts
+tests/ai/rollout/policy.test.ts
+tests/ai/rollout/kernel.test.ts
+tests/ai/rollout/rolloutPrivacyAst.test.ts
+~~~
 
-- `teamUtilityForFinishOrder(finishOrder: readonly PublicSeat[], perspectiveSeat: PublicSeat): TeamUtility`.
-- `projectFinishOrder(input: RolloutLeafInput): readonly PublicSeat[]`.
-- A pure relative-seat distance helper based on the repository’s existing `(seat + 3) % 4` turn direction, never absolute seat number.
+### TDD actions
 
-**First failing test:**
+- [ ] 加入 it("receives RolloutPolicyDecisionContext and uses keyed random")，spy 只提供 value(semanticKey)，拒绝 next() 属性。
+- [ ] RED：npx vitest run tests/ai/rollout/policy.test.ts --exclude "**/.worktrees/**" --reporter=verbose；预期为 chooseAction(observation, context) 或 keyed policy 不存在。
+- [ ] 加入 it("does not expose other seats' complete hands or ParticleScenario to policy")，检查 observation shape 和 AST/symbol imports。
+- [ ] 加入 it("does not import full HandPlanner")，对 src/ai/rollout/** 做 AST import prohibition。
+- [ ] 在 kernel test 加入 it("uses the explicit ValidatedRolloutBudget and stops by work-unit count")；传入小的 explicit budget/limits，不读取全局 profile 或 wall clock。
+- [ ] 加入 it("preserves card conservation and fails atomically on invalid state")。
+- [ ] 最小实现 canonical legal-action enumeration、keyed priority、seat-local observation、validated budget consumption 和 state conservation checks；所有 kernel errors 返回 RolloutReplicateResult failure。
+- [ ] GREEN：policy/kernel/privacy focused tests 全部通过；回归 Task 1–3。
+- [ ] 运行 npx tsc --noEmit、build、git diff --check；确认候选顺序和 worker 调度不改变 result。
+- [ ] 使用 git commit -m "feat(ai): add D2F seat-local rollout kernel"；提交后停止。
 
-```text
-npx vitest run tests/ai/rollout/teamUtility.test.ts --exclude "**/.worktrees/**" --reporter=verbose
-```
+### Produces / consumes
 
-Expected failure: `teamUtilityForFinishOrder` is not defined.
+Produces RolloutPolicyResult、RolloutReplicateResult、seat-local policy and finite-budget kernel. Consumes RolloutReplicateInput、CrnView、ValidatedRolloutBudget and replayed private state only inside the kernel; policy sees only its seat-local projection.
 
-**Implementation steps:**
+## 6. Task 5 — evidence gate / aggregation / risk ranking
 
-- [ ] Write the six truth-table cases `{1,2}:+3`, `{1,3}:+2`, `{1,4}:+1`, `{2,3}:-1`, `{2,4}:-2`, `{3,4}:-3`.
-- [ ] Add RED tests for duplicate/missing/out-of-range seats, team swap sign, global seat rotation, and partner seat interchange.
-- [ ] Run focused RED tests and record the first missing-function or assertion failure.
-- [ ] Implement only the pure table lookup and validation; do not add partner bonus, experience factor, or settlement mutation.
-- [ ] Write leaf RED tests for preserving real finish order, ascending remaining hand count, equal-count relative turn distance, and complete predicted order.
-- [ ] Run the leaf RED tests, then implement `projectFinishOrder` using the existing counterclockwise numeric step as the project’s clockwise traversal relation. Do not import `room.ts`.
-- [ ] Add a rotation-equivalence property fixture. If the actual turn relation fails the property, stop with evidence and replace the tie-break only with a relative relation plus canonical state key; never use absolute seat number.
-- [ ] Run `npx tsc --noEmit`, `npm run build`, focused Task 2 tests, and `git diff --check`.
-- [ ] Audit privacy, immutability, determinism and failure atomicity; functions must not mutate input finish order/counts.
-- [ ] Commit only the four Task 2 files with `feat(ai): add D2F team utility leaf evaluation`.
-- [ ] Stop and report; wait for human review before Task 3.
+### Scope
 
-**Task Gate:** every valid complete order maps to the frozen table; all symmetry tests pass; no room/settlement decision path changes.
+允许创建/修改：
 
----
+~~~text
+src/ai/rollout/aggregation.ts
+src/ai/rollout/ranking.ts
+src/ai/rollout/evidenceGate.ts
+tests/ai/rollout/evidenceGate.test.ts
+tests/ai/rollout/aggregation.test.ts
+tests/ai/rollout/ranking.test.ts
+~~~
 
-### Task 3: Freeze identity domains and CRN deterministic streams
+### TDD actions
 
-**Files:**
+- [ ] 加入 it("rejects low ESS before entering the candidate loop")，断言 failure.kind 为 effective-sample-size-too-low，并用 spy 证明 kernel 未被调用。
+- [ ] RED：npx vitest run tests/ai/rollout/evidenceGate.test.ts --exclude "**/.worktrees/**" --reporter=verbose；预期 evidence gate/export 不存在。
+- [ ] 加入 it("rejects insufficient scenarios before entering the candidate loop") 与 it("rejects insufficient replicates and coverage mismatch")，覆盖四个 exact failure kinds。
+- [ ] 加入 it("uses scenario weight times replicate as the aggregation denominator")，断言 candidate 数量不改变分母。
+- [ ] 加入 it("computes riskAdjustedUtility with the frozen variance and downside formula")。
+- [ ] 加入 it("orders unrounded risk adjusted utility, expected utility, baseline score, then UTF-16 candidateId")。
+- [ ] 加入 it("does not change ranking when public values are rounded to six digits")。
+- [ ] 最小实现 pre-candidate evidence validation、complete scenario/replicate coverage check、weighted expected/variance/risk、risk formula 和未舍入排序；只有最后一步才生成 RolloutResult。
+- [ ] GREEN：focused evidence/aggregation/ranking tests 全通过；回归 Task 1–4。
+- [ ] 运行 npx tsc --noEmit、build、git diff --check；审计 RolloutResult 只使用 rootDigest，且 aggregateDiagnostics 字段完全一致。
+- [ ] 使用 git commit -m "feat(ai): add D2F evidence aggregation and ranking"；提交后停止。
 
-- Create: `src/ai/rollout/rolloutIdentity.ts`
-- Create: `src/ai/rollout/crnStream.ts`
-- Create: `tests/ai/rollout/rolloutIdentity.test.ts`
-- Create: `tests/ai/rollout/crnStream.test.ts`
-- Modify: none
+### Produces / consumes
 
-**Allowed paths:** the four listed files only.
+Produces RolloutAggregationResult、CandidateRolloutSummary、RolloutAggregateDiagnostics and complete RolloutResult. Consumes all candidate-independent scenario/replicate records with the same coverage and explicit RolloutEvidenceRequirements/RolloutRiskPolicy.
 
-**Forbidden paths:** every formal decision path, every particle producer/contract file, any worker module, any benchmark script, and any mutable global RNG.
+## 7. Task 6 — detached orchestration and failure atomicity
 
-**Consumes:** Task 1 `RolloutRootIdentity`, `RolloutCandidate`, `RolloutScenario` identity fields and existing canonical particle scenario identity function.
+### Scope
 
-**Produces:**
+允许创建/修改：
 
-- `createRolloutRootIdentity(input)`.
-- `deriveScenarioIdentity(root, scenario)`.
-- `deriveCandidateIdentity(action)`.
-- `deriveReplicateIdentity(root, scenarioIdentity, replicateOrdinal)`.
-- `deriveRandomDomain(root, scenarioIdentity, candidateId, replicateIdentity, domain)`.
-- `createCrnTape(domain, drawCount)` returning immutable indexed values; no `next()` cursor shared between candidates.
+~~~text
+src/ai/rollout/rolloutOrchestrator.ts
+src/ai/rollout/rolloutInputFreeze.ts
+tests/ai/rollout/rolloutOrchestrator.test.ts
+tests/ai/rollout/failureAtomicity.test.ts
+~~~
 
-**First failing test:**
+Task 6 是 detached orchestration + failure atomicity；它不是 Shadow integration，不创建 observer，不修改 Room，不添加 call site。
 
-```text
-npx vitest run tests/ai/rollout/rolloutIdentity.test.ts --exclude "**/.worktrees/**" --reporter=verbose
-```
+### TDD actions
 
-Expected failure: identity functions are not defined.
+- [ ] 加入 it("returns no partial RolloutResult when one candidate replicate fails")。
+- [ ] RED：npx vitest run tests/ai/rollout/rolloutOrchestrator.test.ts --exclude "**/.worktrees/**" --reporter=verbose；预期 orchestrator/export 不存在。
+- [ ] 加入 it("keeps formalExecutionAllowed false and never returns an action to formal decision code")。
+- [ ] 加入 it("does not mutate Room, ParticleBank, public ledger, candidates, or request input")，前后做 deep snapshot。
+- [ ] 加入 it("reuses one immutable scenario set for every candidate")，spy source call count 为一次，candidate loops 只读取同一 source result。
+- [ ] 加入 it("is invariant to candidate and scenario completion order")。
+- [ ] 最小实现 request validation、input freeze、source once、evidence gate before candidate loop、candidate-independent CRN coordinates、atomic aggregation 和 detached return。
+- [ ] GREEN：orchestration/failure tests 全通过；回归 Task 1–5 与粒子 focused command。
+- [ ] 运行 npx tsc --noEmit、build、git diff --check；确认仍无 observer/call site。
+- [ ] 使用 git commit -m "feat(ai): add detached D2F rollout orchestration"；提交后停止。
 
-**Implementation steps:**
+### Produces / consumes
 
-- [ ] Write RED tests for same inputs producing byte-identical identities, candidate identity excluding array position, same scenario/replicate sharing the candidate-independent tape, and different domain/draw values being distinct.
-- [ ] Add RED tests for candidate permutation, scenario completion-order permutation, same-seed particle replay, and independent repeated calls.
-- [ ] Run RED and record the missing-symbol failure.
-- [ ] Implement canonical identity serialization with existing SHA-256 conventions and fixed UTF-8/UTF-16 comparator rules. Do not include raw seed, process state, object address or worker id.
-- [ ] Implement indexed deterministic stream derivation. Each candidate receives the same immutable CRN tape for a scenario/replicate; no mutable RNG is consumed in candidate iteration.
-- [ ] Add AST/symbol assertions rejecting `Math.random`, `Date.now`, `performance.now`, `process.env`, `Worker`, and locale-dependent ordering in rollout modules.
-- [ ] Run focused Task 3 tests, `npx tsc --noEmit`, `npm run build`, and `git diff --check`.
-- [ ] Audit privacy, immutability, determinism and failure atomicity; domain/tape internals must never appear in public diagnostics.
-- [ ] Commit only the four Task 3 files with `feat(ai): add D2F CRN identity domains`.
-- [ ] Stop and report; wait for human review before Task 4.
+Produces the detached orchestrator and atomic RolloutResult/RolloutFailure boundary. Consumes only explicit request, immutable ParticleBank source and prior Task contracts. It produces no formal action and no Shadow telemetry.
 
-**Task Gate:** candidate order, worker order and repeated same-input runs are byte-stable; CRN values are common across candidates and independent of candidate position.
+## 8. Task 7 — measured budget calibration benchmark
 
----
+### Scope
 
-### Task 4: Add the fixed-budget seat-local policy and finite rollout kernel
+允许创建/修改：
 
-**Files:**
+~~~text
+scripts/benchmarks/d2f-rollout-budget-calibration.ts
+tests/ai/rollout/d2fBenchmarkContract.test.ts
+~~~
 
-- Create: `src/ai/rollout/rolloutPolicy.ts`
-- Create: `src/ai/rollout/rolloutKernel.ts`
-- Create: `tests/ai/rollout/rolloutPolicyPrivacy.test.ts`
-- Create: `tests/ai/rollout/rolloutKernel.test.ts`
-- Modify: none
+当前只读工具证据：package.json 和 package-lock.json 声明 tsx ^4.19.2，但当前 node_modules/tsx 与 node_modules/.bin/tsx 不存在。不得用 npx tsx 触发临时下载；Task 7 只有在已固定依赖的 Node 22.22.2 CI/环境完成 npm ci 后，才允许使用 npm exec --no -- tsx ...，否则状态为 AWAITING_FIXED_BENCHMARK_RUNNER。
 
-**Allowed paths:** the four listed files only.
+### TDD actions
 
-**Forbidden paths:** `src/ai/planning/**`, `src/ai/aiDecisionEngine.ts`, `src/game/room.ts`, `src/game/ai.ts`, `HandPlanner`, all worker/benchmark modules, and all public serialization modules.
+- [ ] 只读确认 benchmark entry 不存在、tsx package/lock declaration 和当前 local module 状态；不安装依赖。
+- [ ] 先写 tests/ai/rollout/d2fBenchmarkContract.test.ts 的非计时契约测试：it("builds a ParticleBank from public tracked fixture data without serializing a handle")。
+- [ ] 命令级 RED 使用固定工具链命令 npm exec --no -- tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json；在 entry 尚不存在时预期为 entry/module not found。这个 RED 只针对 benchmark entry，不改变既有 correctness Gate，也不修改测试断言。
+- [ ] fixture 只承载已跟踪的 public identity、public ledger/history、game rank、acting/perspective seat、己方 hand 和公开配置；不得承载 WeakMap handle、raw hidden scenario、particle weights 或 seed。
+- [ ] 最小脚本在进程内调用已有 public buildParticleBank(input) 创建 handle，再调用 detached orchestrator；seed 由 fixture identity 的 canonical deterministic derivation 在进程内产生，不写入 fixture、stdout 或 report。
+- [ ] 输出只包含预算坐标、work units、elapsed telemetry 和脱敏 aggregate；不把 elapsed time 作为语义结果。
+- [ ] GREEN 只能在 npm ci 后用 npm exec --no -- tsx ... 运行；禁止网络下载、禁止 npx 自动解析。
+- [ ] correctness command 与 benchmark command 分开运行：先 npx vitest run tests/ai/rollout --exclude "**/.worktrees/**" --reporter=dot，再执行固定 runner benchmark。
+- [ ] 运行 npx tsc --noEmit、build、git diff --check；记录 measured budget，不把它写成 production/active 默认值。
+- [ ] 使用 git commit -m "bench(ai): calibrate D2F rollout budget"；提交后停止并等待人工批准 shadow profile。
 
-**Consumes:** Task 1 private `RolloutScenario` source, Task 2 leaf evaluation, Task 3 CRN tape, explicit `RolloutBudget` and `RolloutBudgetLimits`.
+### Produces / consumes
 
-**Produces:**
+Produces independent microbenchmark evidence and a public fixture builder. Consumes the detached orchestrator and public build inputs; does not expose hidden scenario/weight/seed data.
 
-- `createFixedRolloutPolicy(): RolloutPolicy`.
-- `runRolloutReplicate(input: RolloutReplicateInput): RolloutReplicateResult`.
-- A kernel that applies one candidate action, then selects bounded policy actions from seat-local observations until terminal or explicit ply cap.
+## 9. Task 8 — real Shadow observer and non-interference
 
-**First failing test:**
+### Scope and required read-only audit
 
-```text
-npx vitest run tests/ai/rollout/rolloutKernel.test.ts --exclude "**/.worktrees/**" --reporter=verbose
-```
+允许创建/修改：
 
-Expected failure: `runRolloutReplicate` is not defined.
+~~~text
+src/ai/rollout/d2fShadowObserver.ts
+src/game/room.ts                         # 仅 runAiStep 一个调用点
+tests/ai/rollout/d2fShadowObserver.test.ts
+tests/ai/rollout/d2fShadowObserverIntegration.test.ts
+tests/ai/rollout/d2fShadowByteLock.test.ts
+~~~
 
-**Implementation steps:**
+先只读审计：
 
-- [ ] Write RED tests with explicit tiny budgets for terminal completion, max-ply leaf evaluation, invalid/non-finite budgets, multiplication overflow, and work-limit rejection.
-- [ ] Write RED privacy tests proving policy receives only `SeatLocalObservation`, never `RolloutScenario`, complete hands, RoomState or another seat’s cards.
-- [ ] Write RED AST/symbol tests rejecting imports/calls to `HandPlanner`, `generateHandPlans`, `generateFastHandPlans`, `generateRapidHandPlan`, `ensurePlans`, `decideAiAction`, `runAiStep`, `Room`, `RoomState`, and `Math.random`/wall clock APIs.
-- [ ] Run RED focused tests and record the first missing-kernel failure.
-- [ ] Implement finite safe-integer validation before any simulation loop. Check every work-product multiplication before execution.
-- [ ] Implement the deterministic lightweight policy with canonical legal-action tie-break. It must not regenerate plans or call evaluator/planner code.
-- [ ] Construct each seat-local observation from private scenario state, apply actions to a detached state, and stop only on terminal or explicit `maxPliesPerReplicate`.
-- [ ] For each candidate use a fresh state clone and the exact same scenario/replicate CRN tape. Do not resample or regenerate the ParticleBank per candidate.
-- [ ] Run focused Task 4 tests, the Task 1–3 focused files, `npx tsc --noEmit`, `npm run build`, and `git diff --check`.
-- [ ] Audit privacy, immutability, determinism and failure atomicity; a failed policy/action/state transition returns typed failure and no partial replicate result.
-- [ ] Commit only the four Task 4 files with `feat(ai): add bounded D2F rollout kernel`.
-- [ ] Stop and report; wait for human review before Task 5.
+~~~text
+src/ai/tactics/representativeActionShadowObserver.ts
+src/ai/aiDecisionEngine.ts
+src/game/room.ts:runAiStep
+~~~
 
-**Task Gate:** explicit small budgets are the only budgets used, no planner path is reachable, candidate order does not affect replicate bytes, and seat-local privacy is proven by symbols and runtime fixtures.
+当前 representative observer 是 D2e 且位于正式 action 选择之前，不能被用作 D2F 接入证明。正式选择点的最小旁路冻结为 src/game/room.ts:runAiStep 中原 passTurn/playCards 和 runtime/plan 更新全部完成之后、函数返回之前；此处调用 void observeD2FShadow(projectD2FShadowInput(...))。不修改 aiDecisionEngine.ts，不修改已有 representative observer。
 
----
+### TDD actions
 
-### Task 5: Aggregate weighted Team Utility and stable candidate ordering
+- [ ] 先建立审计记录：observer 现有输入/diagnostics、decideAiAction 的选择顺序、Room action mutation 和返回点。
+- [ ] 写 it("returns void and cannot change the committed formal action")；RED 命令 npx vitest run tests/ai/rollout/d2fShadowObserver.test.ts --exclude "**/.worktrees/**" --reporter=verbose，预期 D2F observer/export 不存在。
+- [ ] 写 it("runs only after formal action and Room transition are frozen")，使用 call-order spy。
+- [ ] 写 it("swallows rollout, low-evidence, budget, and telemetry failures")。
+- [ ] 写 it("emits only redacted shadow evidence")，禁止 raw scenario、full opponent hands、weight detail、seed。
+- [ ] 写 it("does not return data to evaluator, candidate filter, plan selector, or Room transition")。
+- [ ] 写 byte-lock test it("keeps formal action and public state byte-identical with Shadow enabled")；比较 action、Room transition、ledger、runtime、plan、replay bytes，排除 elapsedWallClockMs。
+- [ ] 最小实现 observeD2FShadow(input): void，内部 try/catch，使用 Task 7 approved explicit budget，失败写 D2FShadowEvidence fallback；sink 是 best-effort void sink。
+- [ ] 在 runAiStep 只加入一个旁路调用，adapter 传 public ledger/history、game rank、己方 hand、public counts、baseline action identity/score、candidate projection 和 explicit source context，不传完整 Room/对手 private hands。
+- [ ] GREEN：observer/unit/integration/byte-lock tests 全通过；回归已有 D2e observer tests、Task 1–7 和 particle focused command。
+- [ ] 运行 npx tsc --noEmit、build、git diff --check；确认正式决策路径语义未变，D2F result 不回流。
+- [ ] 使用 git commit -m "feat(ai): add non-interfering D2F shadow observer"；提交后停止。
 
-**Files:**
+### Produces / consumes
 
-- Create: `src/ai/rollout/rolloutAggregation.ts`
-- Create: `tests/ai/rollout/rolloutAggregation.test.ts`
-- Create: `tests/ai/rollout/rolloutOrdering.test.ts`
-- Modify: none
+Produces real detached Shadow observation and redacted D2FShadowEvidence. Consumes frozen action/public projection only after formal commit; all failures are swallowed and cannot affect formal state.
 
-**Allowed paths:** the three listed files only.
+## 10. Task 9 — final verification and handoff
 
-**Forbidden paths:** all production decision modules, ParticleBank contracts/internals, public diagnostics, package/config files, and Task 6 service integration.
+### Scope
 
-**Consumes:** Task 4 `RolloutReplicateResult`, Task 1 weights and summaries, Task 3 candidate identities, frozen Team Utility values.
+Task 9 不添加功能。允许修改仅限于实现后必要的 verification report artifact if the task owner explicitly requests one；正常情况下只运行命令、收集证据和提交阶段报告，不修改 source/test/config。
 
-**Produces:**
+### Verification actions
 
-- `aggregateCandidateRollouts(input): CandidateRolloutSummary`.
-- `rankCandidateSummaries(summaries): readonly CandidateRolloutSummary[]`.
-- `expectedUtility`, `variance`, `risk` using only normalized particle weights and equal replicate count.
+- [ ] git status --short、git diff --check、git diff --name-only；确认每个前序 commit 范围单一。
+- [ ] 运行 D2F rollout focused manifest，显式 --exclude "**/.worktrees/**"，记录 exact files/tests/passed/failed/skipped。
+- [ ] 运行冻结 particle command，必须保持 10 files / 136 tests 基线并核对无重复。
+- [ ] 读取并运行 D2e/D2d/D2c/D2a/D2b 的 exact 23-file/222-test manifest；当前仓库及已有报告没有这四个缺失路径的证据，不能用当前 19-file candidate list 代替，状态保持 AWAITING_D2_REGRESSION_MANIFEST，直到人工提供或 CI 输出精确 manifest。
+- [ ] 对 Vitest 2.1.9 做多次 --exclude 语义验证，记录每个 exclude 的实际收集结果；在证据存在前不得冻结旧的递归 full regression 命令。
+- [ ] 只有取得精确 87-file manifest 后，运行 historical full permitted regression 并单独记录 87 files / 898 tests / 898 passed；898 不是 D2F 实现后的固定总数。
+- [ ] 在 Node 22.22.2 已存在环境或经授权 CI workflow 运行 npx tsc --noEmit、build、focused/regression/benchmark；当前只有 Node 24.15.0 supplemental local evidence 时，最终状态必须是 AWAITING_NODE22_CI。
+- [ ] 运行 privacy AST/import scan、candidateId random scan、ESS/risk/sort scan、shadow call-site scan、failure atomicity and immutability checks。
+- [ ] 生成最终阶段报告：start/end HEAD、branch/worktree、changed paths、全部命令/结果/耗时、test counts、privacy/determinism/immutability/fallback/performance、正式决策路径是否修改、遗留风险和下一步精确前置条件。
+- [ ] 只在所有 required gates 通过后创建 final verification commit；任何强制 Gate 未通过都报告 BLOCKED 或对应等待状态，不写“基本完成”。
 
-**First failing test:**
+### Final acceptance
 
-```text
-npx vitest run tests/ai/rollout/rolloutAggregation.test.ts --exclude "**/.worktrees/**" --reporter=verbose
-```
+Task 9 不把 D2F ranking 接入正式 action。最终报告必须同时列出新 D2F manifest/新增测试数、10/136 particle baseline、23/222 D2 regression handoff、87/898 historical baseline，并明确每一个 manifest 是否有可审计路径和 exit code。
 
-Expected failure: `aggregateCandidateRollouts` is not defined.
+## 11. Commit/report contract
 
-**Implementation steps:**
-
-- [ ] Write RED tests for exact expectation, second moment variance, weighted downside probability, bounded outputs, and six-decimal public rounding.
-- [ ] Write RED tests for candidate order permutation, summary order, tie-break ordering, same-state replay, and caller input immutability.
-- [ ] Write RED tests for non-finite weights/utilities, weight mismatch, missing replicate, duplicate candidate identity and variance below tolerance; every case must fail atomically.
-- [ ] Run RED and record the first missing-aggregation failure.
-- [ ] Implement aggregate formulas without extra coefficients. Clamp only tolerance-sized negative zero variance; reject larger invalid values.
-- [ ] Sort with the frozen tuple: expected utility descending, variance ascending, risk ascending, candidateId UTF-16 ascending.
-- [ ] Return only aggregate fields; never retain candidate action/group, scenario, weight array, tape or private state references.
-- [ ] Run focused Task 5 tests, Task 1–4 rollout tests, `npx tsc --noEmit`, `npm run build`, and `git diff --check`.
-- [ ] Audit privacy, immutability, determinism and failure atomicity, including repeated serialization bytes.
-- [ ] Commit only the three Task 5 files with `feat(ai): aggregate D2F rollout utility summaries`.
-- [ ] Stop and report; wait for human review before Task 6.
-
-**Task Gate:** every candidate has the same scenario/replicate coverage, aggregation is weighted and finite, ranking is input-order independent, and no private reference leaks.
-
----
-
-### Task 6: Add detached/offline/shadow orchestration and no-interference proof
-
-**Files:**
-
-- Create: `src/ai/rollout/runRollout.ts`
-- Create: `tests/ai/rollout/rolloutFailureAtomicity.test.ts`
-- Create: `tests/ai/rollout/rolloutDetachedShadow.test.ts`
-- Create: `tests/ai/rollout/rolloutInputImmutability.test.ts`
-- Modify: none
-
-**Allowed paths:** the four listed files only.
-
-**Forbidden paths:** every formal decision and room path, every public barrel, package/config files, and all benchmark/calibration files.
-
-**Consumes:** Task 1 scenario source/contracts, Task 2 utility/leaf, Task 3 identities/tape, Task 4 kernel/policy, Task 5 aggregation/order.
-
-**Produces:**
-
-- `runD2FRollout(request: RolloutRequest): RolloutRunResult`.
-- `formalExecutionAllowed` literal false in both request validation and successful result.
-- Detached/offline/shadow metadata only; no action callback, runtime writer, candidate mutator or room adapter.
-
-**First failing test:**
-
-```text
-npx vitest run tests/ai/rollout/rolloutFailureAtomicity.test.ts --exclude "**/.worktrees/**" --reporter=verbose
-```
-
-Expected failure: `runD2FRollout` is not defined.
-
-**Implementation steps:**
-
-- [ ] Write RED tests for invalid mode/envelope, `formalExecutionAllowed: true` cast, unknown bank, invalid candidate identity, budget failure, policy failure, scenario failure, aggregate failure and non-finite output.
-- [ ] Assert each failure has no candidate summaries, no ranking and no partial private diagnostics.
-- [ ] Write detached/shadow characterization using cloned inputs. Run the existing formal decision baseline separately, then run D2F beside it and compare action, runtime, candidate count/order, score, public event, ledger, replay and room bytes.
-- [ ] Run RED and record the missing-service failure.
-- [ ] Implement validate-first orchestration: validate envelope → source immutable scenarios → validate workload → run all candidates/scenarios/replicates → aggregate → validate result → freeze result. Any exception maps to one sanitized failure.
-- [ ] Keep all three modes semantically detached; mode is evidence metadata, never an action-control flag. Do not add a production observer or call site.
-- [ ] Add AST/symbol tests proving no imports from `room.ts`, `game/ai.ts`, `aiDecisionEngine.ts`, `ai/planning/**`, public serialization or D2G treatment modules.
-- [ ] Run all `tests/ai/rollout/*.test.ts`, the 10-file particle focused command, the fixed D2 regression manifest, `npx tsc --noEmit`, `npm run build`, and `git diff --check`.
-- [ ] Audit privacy, immutability, determinism and failure atomicity. Verify the original request, bank handle, candidate array, public state and cloned Room remain byte-identical.
-- [ ] Commit only the four Task 6 files with `feat(ai): freeze detached D2F rollout orchestration`.
-- [ ] Stop and report; wait for human review before Task 7.
-
-**Task Gate:** D2F can produce detached/shadow summaries but cannot alter the formal action path; all key failures discard the whole result.
-
----
-
-### Task 7: Run independent budget calibration behind D2F_BUDGET_CALIBRATION_GATE
-
-**Files:**
-
-- Create: `scripts/benchmarks/d2f-rollout-budget-calibration.ts`
-- Create: `scripts/benchmarks/fixtures/d2f-rollout-budget-calibration-input.json`
-- Modify: none
-- Test: existing `tests/ai/rollout/rolloutKernel.test.ts`, `tests/ai/rollout/rolloutAggregation.test.ts`, and the Task 6 rollout manifest; no benchmark code is imported by correctness tests
-
-**Allowed paths:** the two listed benchmark files only. No production default profile is created.
-
-**Forbidden paths:** `package.json`, lockfile, config, production AI/room paths, tests/benchmark/**, tests/simulation/**, tests/performance/**, and any shadow/active configuration.
-
-**Consumes:** the approved Task 1–6 rollout API, fixed benchmark fixture, explicit budget vectors supplied through the input JSON, and the fixed particle manifest. It must not infer a production default from a test count or a single local run.
-
-**Produces:** a standalone report containing input budget vector, manifest, files, scenarios, replicates, natural completion, output digest, throughput and measured wall-clock. Timing is report-only and never enters kernel semantics or stopping.
-
-**Gate prerequisite:** before starting Task 7, record `D2F_BUDGET_CALIBRATION_GATE: APPROVED` from a human reviewer. Without that approval, stop and report blocked for Task 7; do not fabricate budget values.
-
-**First failing test:**
-
-```text
-npx vitest run tests/ai/rollout/rolloutKernel.test.ts tests/ai/rollout/rolloutAggregation.test.ts --exclude "**/.worktrees/**" --reporter=verbose
-```
-
-Expected failure for the benchmark gate: no approved calibration input or benchmark artifact exists. This is an authorization failure, not permission to add a default.
-
-**Implementation and verification steps:**
-
-- [ ] Write the standalone runner contract and input fixture schema; require explicit budget vectors and fixed manifest entries.
-- [ ] Run Task 4/5 correctness tests and record the natural outputs before measuring performance.
-- [ ] Run `npx tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts --input scripts/benchmarks/fixtures/d2f-rollout-budget-calibration-input.json` in an approved environment.
-- [ ] Repeat with the same input to prove output digest, candidate summaries and ranking are identical; record only timing differences as environment evidence.
-- [ ] Verify no budget vector exceeds `RolloutBudgetLimits`, no command uses wall clock as semantic input, and no test/fixture is reduced or skipped.
-- [ ] Run `npx tsc --noEmit`, `npm run build`, and `git diff --check` without changing package/config files.
-- [ ] Audit privacy, immutability, determinism and failure atomicity of the report; no raw scenario/weight/seed appears.
-- [ ] Commit only the two benchmark files with `bench(ai): calibrate explicit D2F rollout budgets`.
-- [ ] Stop and report the measured vectors; wait for explicit approval before any shadow profile is documented or used.
-
-**Task Gate:** benchmark correctness and performance are separate, values are measured rather than guessed, and no production/shadow default is established implicitly.
-
----
-
-### Task 8: Complete the Node 22.22.2 formal verification gate
-
-**Files:**
-
-- Create: none
-- Modify: none
-- Test: all planned `tests/ai/rollout/*.test.ts`; the frozen 10-file `tests/ai/particles/*.test.ts` manifest; the fixed D2a/D2b, D2c and D2d regression manifests listed in `2026-08-02-d2f-test-gate-matrix.md`
-
-**Allowed paths:** no file changes. This Task is verification-only.
-
-**Forbidden paths:** all files, including package/config changes, Node installation/switching, global timeout edits, fixture reduction, test deletion and active-mode work.
-
-**Consumes:** reviewed Task 1–7 commits, approved calibration report, frozen manifests and CI Node 22.22.2 environment.
-
-**Produces:** final D2F Gate report with command, environment, files/tests, passed/failed/skipped, exit code, duration, worker/unhandled state, shard coverage when applicable, privacy/determinism/immutability/atomicity evidence, and explicit active/formal boundary result.
-
-**First failing test:**
-
-```text
-npx vitest run tests/ai/rollout --exclude "**/.worktrees/**" --reporter=dot
-```
-
-Expected failure if Task 1–7 is incomplete: missing rollout modules, missing approved budget evidence, or a failed contract Gate. No failure is fixed by changing timeout or reducing scope.
-
-**Verification steps:**
-
-- [ ] Reconfirm worktree, branch, starting HEAD, clean status and `git diff --check` before running.
-- [ ] Run D2F correctness with default Vitest parallelism and explicit `--exclude "**/.worktrees/**"`.
-- [ ] Run the frozen Particle focused regression exactly as `npx vitest run tests/ai/particles --exclude "**/.worktrees/**" --reporter=dot`.
-- [ ] Run the fixed D2a/D2b, D2c and D2d manifests; exclude nested worktrees and restricted benchmark/simulation/performance suites.
-- [ ] Run the permitted full regression with default parallelism, TypeScript, and `npm run build`.
-- [ ] Run the independent calibration command separately and attach its approved report; correctness and benchmark outputs remain separate.
-- [ ] Execute the formal CI verification under Node 22.22.2. Do not install or switch Node locally. If Node 24.15.0 is also available, label its result supplemental only.
-- [ ] If a command exceeds the Codex single-command limit, use the fixed manifest shard rules: each file exactly once, no overlap, no omission, explicit worktree exclusion, each shard natural exit 0, aggregate tests equal the manifest baseline.
-- [ ] Audit privacy, determinism, immutability, failure atomicity, no HandPlanner call, no formal decision import, and no D2F result feedback into action selection.
-- [ ] Run final `git status --short`, `git diff --check`, and changed-path allowlist audit. No commit is created by this verification-only Task.
-- [ ] Stop and submit the final report for human review. Do not begin D2G or active-mode work.
-
-**Task Gate:** Node 22.22.2 formal verification is complete, all permitted regressions pass without duplicates/omissions, and D2F remains detached/offline/shadow.
-
-## Commit boundaries and reports
-
-Each Task 1–7 has exactly one scoped commit and one report. The report must include starting/ending HEAD, branch/worktree, exact changed paths, first RED command/failure/reason, final commands/results/counts/durations, privacy/determinism/immutability/failure-atomicity/performance impact, formal decision path answer `否`, residual risks, next-task prerequisites, commit hash and one of `PASS`, `PASS WITH WARNINGS`, `BLOCKED`.
-
-Task 8 is verification-only and creates no commit. Any mandatory Gate failure is `BLOCKED`; “基本完成” is not an acceptable status.
-
-The current Prompt 1 document-freeze commit is separate from all future Task commits and uses:
-
-```text
-docs(ai): freeze D2F rollout design and gates
-```
-
-## Plan self-review checklist
-
-- [ ] Every task contains concrete paths, interfaces, RED evidence, implementation boundary, verification commands and stop conditions.
-- [ ] All type and function names match the frozen contract section and the design spec.
-- [ ] No production/shadow budget value is asserted before Task 7 calibration and approval.
-- [ ] No active-mode implementation, formal action feedback, HandPlanner call or ParticleBank public API expansion is authorized.
-- [ ] All Task 1–8 paths, RED tests, expected failures, focused tests, regression, TypeScript/build, privacy, determinism, immutability, failure atomicity, commit and stop gates are listed.
-- [ ] Standard particle command explicitly excludes `**/.worktrees/**` and uses default parallelism.
-- [ ] Node 22.22.2 formal evidence and Node 24.15.0 supplemental evidence are clearly separated.
+每个 Task 一个 commit；不得 amend、squash 或跨 Task 夹带修改。每个阶段报告必须包含：起始/结束 HEAD、branch/worktree、changed paths、契约/算法决策及理由、首次 RED 命令/失败信息/原因、全部验证命令/结果/测试数/耗时、privacy/determinism/immutability/fallback/performance、正式决策路径是否修改、遗留风险、下一 Task 精确前置条件和 commit hash。
