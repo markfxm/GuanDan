@@ -304,7 +304,7 @@ function isPlainDataRecord(value: unknown, allowedKeys?: readonly string[], exac
 
 function isPlainDataArray(value: unknown): value is readonly unknown[] {
   try {
-    if (!Array.isArray(value)) return false;
+    if (value === null || typeof value !== "object" || Object.getPrototypeOf(value) !== Array.prototype || !Array.isArray(value)) return false;
     const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
     if (!isDataDescriptor(lengthDescriptor) || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0) return false;
     const length = lengthDescriptor.value;

@@ -2,7 +2,7 @@ import type { Card, GameRank } from "../../engine/cards";
 import { isHeartRankWild, RANKS, SUITS } from "../../engine/cards";
 import type { CardGroup, GroupPurpose, GroupType } from "../../engine/groups";
 import { assertFinalizedPublicActionEvent, playPublicStableKey, type PublicActionEvent, type PublicSeat } from "../../game/publicEvent";
-import { canonicalPublicLedgerHash, type HardPublicLedger } from "../../game/publicLedger";
+import { applyPublicEvent, canonicalPublicLedgerHash, type HardPublicLedger } from "../../game/publicLedger";
 import { sha256Bytes, verifyPublicActionEventHash } from "../../game/publicEventHash";
 import type {
   ParticleBank,
@@ -695,11 +695,13 @@ function createRolloutResultUnchecked(requestInput: unknown, assemblyInput: unkn
     ids.add(summary.candidateId);
     summaries.push(deepFreeze(structuredClone(summary)));
   }
-  if (rankingInput.length !== summaries.length) return invalid("ranking");
+  const requestCandidateIds = new Set(requestResult.value.candidates.map((candidate) => candidate.candidateId));
+  if (ids.size !== requestCandidateIds.size || [...ids].some((candidateId) => !requestCandidateIds.has(candidateId))) return invalid("candidateSummaries");
+  if (rankingInput.length !== requestCandidateIds.size) return invalid("ranking");
   const ranking: string[] = [];
   for (let index = 0; index < rankingInput.length; index += 1) {
     const id = getOwnDataProperty(rankingInput, String(index));
-    if (typeof id !== "string" || !ids.has(id) || ranking.includes(id)) return invalid("ranking");
+    if (typeof id !== "string" || !requestCandidateIds.has(id) || !ids.has(id) || ranking.includes(id)) return invalid("ranking");
     ranking.push(id);
   }
   if (!isAggregateDiagnostics(aggregateDiagnosticsInput, summaries.length)) return invalid("aggregateDiagnostics");
@@ -885,7 +887,12 @@ function cloneHardPublicLedger(value: unknown): HardPublicLedger | undefined {
   if (ledger.currentTrick.lastPlaySeat !== undefined) currentTrick.lastPlaySeat = ledger.currentTrick.lastPlaySeat;
   if (ledger.currentTrick.lastPlayStableKey !== undefined) currentTrick.lastPlayStableKey = ledger.currentTrick.lastPlayStableKey;
   const seenEventHashes: Record<string, string> = {};
-  for (const key of Object.keys(ledger.seenEventHashes)) seenEventHashes[key] = ledger.seenEventHashes[Number(key)]!;
+  for (let index = 0; index <= ledger.lastAppliedEventIndex; index += 1) {
+    const key = String(index);
+    const descriptor = Object.getOwnPropertyDescriptor(ledger.seenEventHashes, key);
+    if (!isDataDescriptor(descriptor) || !isDigest(descriptor.value)) return undefined;
+    seenEventHashes[key] = descriptor.value;
+  }
   const revealedTransferEvents = ledger.revealedTransferEvents.map((event) => {
     const clone: { eventIndex: number; kind: "tribute" | "return"; fromSeat: PublicSeat; toSeat: PublicSeat; cardId?: string } = {
       eventIndex: event.eventIndex,
@@ -937,8 +944,7 @@ function isParticleSnapshotIdentity(value: unknown): value is ParticleSnapshotId
 
 function isHardPublicLedger(value: unknown): value is HardPublicLedger {
   if (!isRecord(value) || !hasExactKeys(value, LEDGER_KEYS) || value.schemaVersion !== "d2-public-ledger-v1" || !isNonEmptyString(value.gameId) || !isNonEmptyString(value.roundIdentity) || !isNonEmptyString(value.handIdentity) || !isLedgerEventIndex(value.lastAppliedEventIndex) || !isNonNegativeSafeInteger(value.nextEventIndex) || value.nextEventIndex !== value.lastAppliedEventIndex + 1 || !isRecord(value.seenEventHashes) || !isRecord(value.handCounts) || !hasExactKeys(value.handCounts, ["0", "1", "2", "3"]) || !isRecord(value.currentTrick) || !Array.isArray(value.playedCardIds) || !Array.isArray(value.revealedTransferEvents) || !Array.isArray(value.finishOrder) || !Array.isArray(value.publicTributeEvents) || !Array.isArray(value.recentActionSummaries)) return false;
-  const seenKeys = Object.keys(value.seenEventHashes);
-  if (seenKeys.length !== value.lastAppliedEventIndex + 1 || seenKeys.some((key) => !/^\d+$/.test(key) || String(Number(key)) !== key || Number(key) > value.lastAppliedEventIndex || !isDigest(value.seenEventHashes[key]))) return false;
+  if (!isValidSeenEventHashes(value.seenEventHashes, value.lastAppliedEventIndex)) return false;
   if (!SEATS.every((seat) => isNonNegativeSafeInteger(value.handCounts[seat]))) return false;
   if (!value.playedCardIds.every(isCardIdentifier) || new Set(value.playedCardIds).size !== value.playedCardIds.length) return false;
   if (!isLedgerTrick(value.currentTrick) || !value.finishOrder.every(isSeat) || new Set(value.finishOrder).size !== value.finishOrder.length || !value.publicTributeEvents.every((event) => typeof event === "string" && event.length > 0) || !value.recentActionSummaries.every(isPublicSummary)) return false;
@@ -994,6 +1000,26 @@ function isCardIdentifier(value: unknown): value is string {
 
 function isLedgerEventIndex(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= -1;
+}
+
+function isValidSeenEventHashes(value: unknown, lastAppliedEventIndex: number): value is Readonly<Record<number, string>> {
+  try {
+    if (!isRecord(value)) return false;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== lastAppliedEventIndex + 1) return false;
+    for (const key of ownKeys) {
+      if (typeof key !== "string" || !/^(?:0|[1-9]\d*)$/.test(key)) return false;
+      const index = Number(key);
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!Number.isSafeInteger(index) || index > lastAppliedEventIndex || !isDataDescriptor(descriptor) || !isDigest(descriptor.value)) return false;
+    }
+    for (let index = 0; index <= lastAppliedEventIndex; index += 1) {
+      if (!ownKeys.includes(String(index))) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isDigest(value: unknown): value is string {
@@ -1075,17 +1101,62 @@ function matchesHistoryShape(events: readonly PublicActionEvent[], initialLedger
   if (!isInitialOpeningLedger(initialLedger)) return false;
   if (events.length === 0) return finalLedger.lastAppliedEventIndex === -1 && finalLedger.nextEventIndex === 0 && canonicalPublicLedgerHash(initialLedger) === canonicalPublicLedgerHash(finalLedger);
   if (events[0]?.eventIndex !== 0 || events[events.length - 1]?.eventIndex !== finalLedger.lastAppliedEventIndex || finalLedger.nextEventIndex !== finalLedger.lastAppliedEventIndex + 1) return false;
-  return events.every((event, index) => event.eventIndex === index
+  if (!events.every((event, index) => event.eventIndex === index
     && event.gameId === finalLedger.gameId
     && event.roundIdentity === finalLedger.roundIdentity
     && event.handIdentity === finalLedger.handIdentity
-    && finalLedger.seenEventHashes[event.eventIndex] === event.publicPayloadHash);
+    && finalLedger.seenEventHashes[event.eventIndex] === event.publicPayloadHash)) return false;
+  if (!matchesOpeningTransferHistory(events, initialLedger)) return false;
+  let replayedLedger = initialLedger;
+  for (const event of events) {
+    const applied = applyPublicEvent(replayedLedger, event);
+    if (!applied.ok || applied.kind !== "applied") return false;
+    replayedLedger = applied.ledger;
+  }
+  return canonicalPublicLedgerHash(replayedLedger) === canonicalPublicLedgerHash(finalLedger);
+}
+
+function matchesOpeningTransferHistory(events: readonly PublicActionEvent[], initialLedger: HardPublicLedger): boolean {
+  let ordinaryActionIndex = events.findIndex((event) => event.kind !== "tribute" && event.kind !== "return" && event.kind !== "anti-tribute");
+  if (ordinaryActionIndex < 0) ordinaryActionIndex = events.length;
+  if (events.slice(ordinaryActionIndex).some((event) => event.kind === "tribute" || event.kind === "return" || event.kind === "anti-tribute")) return false;
+  const openingEvents = events.slice(0, ordinaryActionIndex);
+  if (openingEvents.length === 0) return true;
+  if (openingEvents.length === 1 && openingEvents[0]!.kind === "anti-tribute") {
+    const event = openingEvents[0]!;
+    return event.seat === initialLedger.currentTrick.leadSeat
+      && event.trickIndex === initialLedger.currentTrick.trickIndex
+      && event.publicStableKey === "anti-tribute:anti-tribute";
+  }
+  if (openingEvents.some((event) => event.kind === "anti-tribute")) return false;
+  let returnStarted = false;
+  let tributeCount = 0;
+  let returnCount = 0;
+  for (const event of openingEvents) {
+    if (event.kind === "tribute") {
+      if (returnStarted || !isOpeningTransferEvent(event, initialLedger)) return false;
+      tributeCount += 1;
+      continue;
+    }
+    if (event.kind !== "return" || !isOpeningTransferEvent(event, initialLedger)) return false;
+    returnStarted = true;
+    returnCount += 1;
+  }
+  return tributeCount > 0 && tributeCount === returnCount;
+}
+
+function isOpeningTransferEvent(event: Extract<PublicActionEvent, { kind: "tribute" | "return" }>, initialLedger: HardPublicLedger): boolean {
+  if (event.seat !== event.fromSeat || event.fromSeat === event.toSeat || event.trickIndex !== initialLedger.currentTrick.trickIndex || !event.publicStableKey.startsWith(`${event.kind}:${event.fromSeat}:${event.toSeat}:`)) return false;
+  const expectedChanges: Record<PublicSeat, number> = { 0: 0, 1: 0, 2: 0, 3: 0 };
+  expectedChanges[event.fromSeat] = -1;
+  expectedChanges[event.toSeat] = 1;
+  return SEATS.every((seat) => event.handCountChanges[seat] === expectedChanges[seat]);
 }
 
 function isInitialOpeningLedger(ledger: HardPublicLedger): boolean {
   return ledger.lastAppliedEventIndex === -1
     && ledger.nextEventIndex === 0
-    && Object.keys(ledger.seenEventHashes).length === 0
+    && isValidSeenEventHashes(ledger.seenEventHashes, -1)
     && ledger.playedCardIds.length === 0
     && ledger.revealedTransferEvents.length === 0
     && ledger.finishOrder.length === 0
@@ -1097,6 +1168,7 @@ function isInitialOpeningLedger(ledger: HardPublicLedger): boolean {
 
 function deriveActingSeat(events: readonly PublicActionEvent[], ledger: HardPublicLedger): PublicSeat | undefined {
   if (events.length === 0) return ledger.currentTrick.leadSeat;
+  if (events.every((event) => event.kind === "tribute" || event.kind === "return" || event.kind === "anti-tribute")) return ledger.currentTrick.leadSeat;
   let actionIndex = events.length - 1;
   while (actionIndex >= 0 && events[actionIndex]!.kind === "finish") actionIndex -= 1;
   if (actionIndex < 0) return undefined;
@@ -1276,7 +1348,7 @@ function hasExactOwnDataKeys(value: unknown, keys: readonly string[]): value is 
 
 function isPlainDataArray(value: unknown): value is readonly unknown[] {
   try {
-    if (!Array.isArray(value)) return false;
+    if (value === null || typeof value !== "object" || Object.getPrototypeOf(value) !== Array.prototype || !Array.isArray(value)) return false;
     const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
     if (!isDataDescriptor(lengthDescriptor) || !isNonNegativeSafeInteger(lengthDescriptor.value)) return false;
     const length = lengthDescriptor.value;

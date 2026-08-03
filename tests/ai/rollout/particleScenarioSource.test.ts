@@ -157,6 +157,135 @@ function makeEmptyHistoryFixture(): ReturnType<typeof makeFixture> {
   };
 }
 
+function makeTransferOnlyFixture(): ReturnType<typeof makeFixture> {
+  const deck = createDeck();
+  const identity = buildPublicGameIdentity("d2f-transfer-only-fixture", 0, 0, "benchmark-scenario");
+  const initialLedger = createInitialPublicLedger({
+    identity,
+    initialHandCounts: { 0: 27, 1: 27, 2: 27, 3: 27 },
+    openingLeader: 1,
+    initialTrickIndex: 0,
+    openingTributePublicState: { status: "pending" },
+  });
+  const events = [
+    finalizePublicActionEvent({
+      schemaVersion: "d2-public-event-v2",
+      gameId: identity.gameId,
+      roundIdentity: identity.roundIdentity,
+      handIdentity: identity.handIdentity,
+      eventIndex: 0,
+      kind: "tribute",
+      seat: 1,
+      publicCardIds: [],
+      fromSeat: 1,
+      toSeat: 0,
+      handCountChanges: { 0: 1, 1: -1, 2: 0, 3: 0 },
+      publicStableKey: "tribute:1:0:hidden",
+      trickIndex: 0,
+    } as PublicActionEventDraft),
+    finalizePublicActionEvent({
+      schemaVersion: "d2-public-event-v2",
+      gameId: identity.gameId,
+      roundIdentity: identity.roundIdentity,
+      handIdentity: identity.handIdentity,
+      eventIndex: 1,
+      kind: "return",
+      seat: 0,
+      publicCardIds: [],
+      fromSeat: 0,
+      toSeat: 1,
+      handCountChanges: { 0: -1, 1: 1, 2: 0, 3: 0 },
+      publicStableKey: "return:0:1:hidden",
+      trickIndex: 0,
+    } as PublicActionEventDraft),
+  ];
+  let finalLedger = initialLedger;
+  for (const event of events) {
+    const applied = applyPublicEvent(finalLedger, event);
+    if (!applied.ok) throw new Error("TRANSFER_ONLY_FIXTURE_EVENT_REJECTED");
+    finalLedger = applied.ledger;
+  }
+  const scenario: ParticleScenario = {
+    schemaVersion: "d2-particle-scenario-v1",
+    initialDeal: {
+      schemaVersion: "d2-particle-initial-deal-v1",
+      hands: {
+        0: deck.slice(0, 27),
+        1: deck.slice(27, 54),
+        2: deck.slice(54, 81),
+        3: deck.slice(81, 108),
+      },
+    } satisfies CanonicalInitialDeal,
+    hiddenTransferAssignments: [
+      { eventIndex: 0, eventKind: "tribute", fromSeat: 1, toSeat: 0, cardId: deck[27]!.id },
+      { eventIndex: 1, eventKind: "return", fromSeat: 0, toSeat: 1, cardId: deck[0]!.id },
+    ],
+  };
+  const snapshot = {
+    gameId: identity.gameId,
+    roundIdentity: identity.roundIdentity,
+    handIdentity: identity.handIdentity,
+    initialLedgerHash: canonicalPublicLedgerHash(initialLedger),
+    lastAppliedEventIndex: finalLedger.lastAppliedEventIndex,
+    ledgerHash: canonicalPublicLedgerHash(finalLedger),
+    perspectiveSeat: 0 as const,
+    gameRank: "2" as const,
+  };
+  const bank = createParticleBankHandle(
+    {
+      schemaVersion: "d2-particle-bank-v1",
+      snapshot,
+      config: {
+        schemaVersion: "d2-particle-bank-config-identity-v1",
+        particleCount: 1,
+        maxSamplingAttempts: 1,
+        maxIndexDraws: 1,
+        samplerConfigVersion: "d2f-transfer-only-fixture",
+        likelihoodConfigHash: "a".repeat(64),
+      },
+      particleCount: 1,
+      effectiveSampleSize: 1,
+      status: "ready",
+      summary: {
+        status: "ready",
+        requestedParticleCount: 1,
+        acceptedParticleCount: 1,
+        samplingAttempts: 1,
+        duplicateCount: 0,
+        zeroWeightCount: 0,
+        effectiveSampleSize: 1,
+      },
+    },
+    { records: [{ particleId: particleScenarioIdentity(snapshot, scenario), scenario, normalizedWeight: 1 }] },
+  );
+  return {
+    input: {
+      bank,
+      publicHistoryEvents: events,
+      initialLedger,
+      finalLedger,
+      gameRank: "2",
+      perspectiveSeat: 0,
+      ownCurrentHand: deck.slice(1, 28),
+      publicState: {
+        gameRank: "2",
+        actingSeat: 1,
+        perspectiveSeat: 0,
+        partnerSeat: 2,
+        handCounts: { 0: 27, 1: 27, 2: 27, 3: 27 },
+        finishOrder: [],
+        publicPlayedCardIds: [],
+        currentLastPlay: null,
+        currentLastPlaySeat: null,
+      },
+    },
+    bank,
+    scenario,
+    initialLedger,
+    finalLedger,
+  };
+}
+
 function makeRequestForSourceInput(input: RolloutScenarioSourceInput, rootIdentityOverride?: string): unknown {
   const action = { type: "pass" } as const;
   const rootIdentity = rootIdentityOverride ?? canonicalReplayContextIdentity({
@@ -272,6 +401,16 @@ describe("particleScenarioSource", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.acceptedScenarioCount).toBe(1);
+  });
+
+  test("accepts a finalized tribute-and-return-only history with ledger-derived acting seat", () => {
+    const fixture = makeTransferOnlyFixture();
+    const result = createParticleScenarioSource(fixture.input);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.acceptedScenarioCount).toBe(1);
+    expect(result.scenarios[0]?.privateState).toMatchObject({ handCounts: { 0: 27, 1: 27, 2: 27, 3: 27 } });
   });
 
   test("rejects non-empty history that starts at event one", () => {

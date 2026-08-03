@@ -1,11 +1,13 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "vitest";
 import * as ts from "typescript";
 import { createDeck } from "../../../src/engine/cards";
 import { detectGroups } from "../../../src/engine/groups";
 import { buildPublicGameIdentity, type PublicSeat } from "../../../src/game/publicEvent";
+import { finalizePublicActionEvent } from "../../../src/game/publicEventHash";
 import { playPower } from "../../../src/game/playRules";
-import { canonicalPublicLedgerHash, createInitialPublicLedger } from "../../../src/game/publicLedger";
+import { applyPublicEvent, canonicalPublicLedgerHash, createInitialPublicLedger, type HardPublicLedger } from "../../../src/game/publicLedger";
 import type {
   CanonicalInitialDeal,
   ParticleBank,
@@ -28,6 +30,7 @@ import {
   validateRolloutRiskPolicy,
 } from "../../../src/ai/rollout/contracts";
 import * as rolloutContracts from "../../../src/ai/rollout/contracts";
+import { createParticleScenarioSource } from "../../../src/ai/rollout/particleScenarioSource";
 import type {
   RolloutAction,
   RolloutCandidate,
@@ -57,16 +60,29 @@ function makeScenario(): ParticleScenario {
   };
 }
 
-function makeKnownBank(normalizedWeight = 1, snapshotOverride?: ParticleSnapshotIdentity, scenarioOverride?: ParticleScenario, recordsOverride?: readonly { particleId: string; scenario: ParticleScenario; normalizedWeight: number }[], effectiveSampleSizeOverride?: number): ParticleBank {
+function makeKnownBank(
+  normalizedWeight = 1,
+  snapshotOverride?: ParticleSnapshotIdentity,
+  scenarioOverride?: ParticleScenario,
+  recordsOverride?: readonly { particleId: string; scenario: ParticleScenario; normalizedWeight: number }[],
+  effectiveSampleSizeOverride?: number,
+  metadataOverrides: Readonly<{
+    particleCount?: number;
+    status?: ParticleBank["status"];
+    summary?: Partial<PrivateParticleSummary>;
+  }> = {},
+): ParticleBank {
   const scenario = scenarioOverride ?? makeScenario();
+  const particleCount = metadataOverrides.particleCount ?? 1;
   const summary: PrivateParticleSummary = {
     status: "ready",
-    requestedParticleCount: 1,
+    requestedParticleCount: particleCount,
     acceptedParticleCount: 1,
     samplingAttempts: 1,
     duplicateCount: 0,
     zeroWeightCount: 0,
     effectiveSampleSize: 1,
+    ...metadataOverrides.summary,
   };
   const snapshot = snapshotOverride ?? {
     gameId: "bridge-fixture",
@@ -84,15 +100,15 @@ function makeKnownBank(normalizedWeight = 1, snapshotOverride?: ParticleSnapshot
       snapshot,
       config: {
         schemaVersion: "d2-particle-bank-config-identity-v1",
-        particleCount: 1,
-        maxSamplingAttempts: 1,
+        particleCount,
+        maxSamplingAttempts: Math.max(1, particleCount),
         maxIndexDraws: 1,
         samplerConfigVersion: "bridge-fixture",
         likelihoodConfigHash: "2".repeat(64),
       },
-      particleCount: 1,
+      particleCount,
       effectiveSampleSize: effectiveSampleSizeOverride ?? 1,
-      status: "ready",
+      status: metadataOverrides.status ?? "ready",
       summary,
     },
     { records: recordsOverride ?? [{ particleId: particleScenarioIdentity(snapshot, scenario), scenario, normalizedWeight }] },
@@ -158,6 +174,187 @@ function makeSourceInput(bank?: ParticleBank, openingLeader: PublicSeat = 0): Ro
     ownCurrentHand: createDeck().slice(0, 27),
     publicState: makePublicState(openingLeader),
   };
+}
+
+function makeAntiTributeSourceInput(): RolloutScenarioSourceInput {
+  const base = makeSourceInput();
+  const event = finalizePublicActionEvent({
+    schemaVersion: "d2-public-event-v2",
+    gameId: base.initialLedger.gameId,
+    roundIdentity: base.initialLedger.roundIdentity,
+    handIdentity: base.initialLedger.handIdentity,
+    eventIndex: 0,
+    kind: "anti-tribute",
+    seat: base.initialLedger.currentTrick.leadSeat,
+    publicStableKey: "anti-tribute:anti-tribute",
+    trickIndex: base.initialLedger.currentTrick.trickIndex,
+    reasonCode: "anti-tribute",
+  });
+  const applied = applyPublicEvent(base.initialLedger, event);
+  if (!applied.ok) throw new Error("ANTI_TRIBUTE_FIXTURE_REJECTED");
+  const finalLedger = applied.ledger;
+  const snapshot = {
+    ...base.bank.snapshot,
+    lastAppliedEventIndex: finalLedger.lastAppliedEventIndex,
+    ledgerHash: canonicalPublicLedgerHash(finalLedger),
+  };
+  return {
+    ...base,
+    bank: makeKnownBank(1, snapshot),
+    publicHistoryEvents: [event],
+    finalLedger,
+  };
+}
+
+class IndependentCanonicalWriter {
+  private readonly bytes: number[] = [];
+
+  string(value: string): void {
+    const encoded = new TextEncoder().encode(value);
+    this.uint32(encoded.length);
+    this.bytes.push(...encoded);
+  }
+
+  integer(value: number): void {
+    this.string(value.toString(10));
+  }
+
+  number(value: number): void {
+    this.string(Object.is(value, -0) ? "-0" : value.toString(10));
+  }
+
+  uint8(value: number): void {
+    this.bytes.push(value);
+  }
+
+  uint32(value: number): void {
+    this.bytes.push((value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff);
+  }
+
+  finish(): Uint8Array {
+    return Uint8Array.from(this.bytes);
+  }
+}
+
+function independentSha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function independentLedgerHash(ledger: HardPublicLedger): string {
+  const seenEventHashes: Record<string, string> = {};
+  for (let index = 0; index <= ledger.lastAppliedEventIndex; index += 1) seenEventHashes[String(index)] = ledger.seenEventHashes[index]!;
+  const canonical = {
+    schemaVersion: ledger.schemaVersion,
+    gameId: ledger.gameId,
+    roundIdentity: ledger.roundIdentity,
+    handIdentity: ledger.handIdentity,
+    nextEventIndex: ledger.nextEventIndex,
+    lastAppliedEventIndex: ledger.lastAppliedEventIndex,
+    seenEventHashes,
+    playedCardIds: [...ledger.playedCardIds],
+    revealedTransferEvents: ledger.revealedTransferEvents.map((event) => {
+      const clone: Record<string, unknown> = { eventIndex: event.eventIndex, kind: event.kind };
+      if (event.cardId !== undefined) clone.cardId = event.cardId;
+      clone.fromSeat = event.fromSeat;
+      clone.toSeat = event.toSeat;
+      return clone;
+    }),
+    handCounts: { 0: ledger.handCounts[0], 1: ledger.handCounts[1], 2: ledger.handCounts[2], 3: ledger.handCounts[3] },
+    currentTrick: {
+      trickIndex: ledger.currentTrick.trickIndex,
+      leadSeat: ledger.currentTrick.leadSeat,
+      lastPlaySeat: ledger.currentTrick.lastPlaySeat,
+      lastPlayStableKey: ledger.currentTrick.lastPlayStableKey,
+      passSeats: [...ledger.currentTrick.passSeats],
+    },
+    finishOrder: [...ledger.finishOrder],
+    publicTributeEvents: [...ledger.publicTributeEvents],
+    recentActionSummaries: ledger.recentActionSummaries.map((summary) => ({
+      eventIndex: summary.eventIndex,
+      kind: summary.kind,
+      seat: summary.seat,
+      trickIndex: summary.trickIndex,
+      publicStableKey: summary.publicStableKey,
+    })),
+  };
+  return independentSha256(new TextEncoder().encode(JSON.stringify(canonical)));
+}
+
+function independentCardIds(writer: IndependentCanonicalWriter, cards: readonly { id: string }[]): void {
+  const ids = cards.map((card) => card.id).sort();
+  writer.uint32(ids.length);
+  for (const id of ids) writer.string(id);
+}
+
+function independentSemanticCards(writer: IndependentCanonicalWriter, cards: readonly { id: string; kind: string; rank: string; suit?: string; copy: number }[]): void {
+  const sorted = [...cards].sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+  writer.uint32(sorted.length);
+  for (const card of sorted) {
+    writer.string(card.id);
+    writer.string(card.kind);
+    writer.string(card.rank);
+    if (card.kind === "suited") writer.string(card.suit!);
+    writer.uint8(card.copy);
+  }
+}
+
+function independentPublicState(writer: IndependentCanonicalWriter, state: RolloutPublicState): void {
+  writer.string(state.gameRank);
+  writer.uint8(state.actingSeat);
+  writer.uint8(state.perspectiveSeat);
+  writer.uint8(state.partnerSeat);
+  for (const seat of [0, 1, 2, 3] as const) writer.integer(state.handCounts[seat]);
+  writer.uint32(state.finishOrder.length);
+  for (const seat of state.finishOrder) writer.uint8(seat);
+  writer.uint32(state.publicPlayedCardIds.length);
+  for (const id of state.publicPlayedCardIds) writer.string(id);
+  writer.integer(state.currentLastPlaySeat === null ? -1 : state.currentLastPlaySeat);
+  if (state.currentLastPlay === null) {
+    writer.string("no-current-last-play");
+    return;
+  }
+  writer.string("current-last-play");
+  const group = state.currentLastPlay as { type: string; strength: number; cards: readonly { id: string; kind: string; rank: string; suit?: string; copy: number }[]; wildcards: readonly { id: string; kind: string; rank: string; suit?: string; copy: number }[] };
+  writer.string(group.type);
+  writer.number(group.strength);
+  independentSemanticCards(writer, group.cards);
+  independentSemanticCards(writer, group.wildcards);
+}
+
+function independentReplayContextIdentity(input: RolloutScenarioSourceInput): string {
+  const writer = new IndependentCanonicalWriter();
+  writer.string("d2f-replay-context-identity-v1");
+  writer.string(independentLedgerHash(input.initialLedger));
+  writer.integer(input.initialLedger.lastAppliedEventIndex);
+  writer.string(independentLedgerHash(input.finalLedger));
+  writer.integer(input.finalLedger.lastAppliedEventIndex);
+  writer.uint32(input.publicHistoryEvents.length);
+  for (const event of input.publicHistoryEvents) {
+    writer.integer(event.eventIndex);
+    writer.string(event.publicPayloadHash);
+  }
+  writer.string(input.gameRank);
+  writer.uint8(input.perspectiveSeat);
+  writer.uint8(input.publicState.actingSeat);
+  independentCardIds(writer, input.ownCurrentHand);
+  independentPublicState(writer, input.publicState);
+  const snapshot = input.bank.snapshot;
+  writer.string(snapshot.gameId);
+  writer.string(snapshot.roundIdentity);
+  writer.string(snapshot.handIdentity);
+  writer.string(snapshot.initialLedgerHash);
+  writer.integer(snapshot.lastAppliedEventIndex);
+  writer.string(snapshot.ledgerHash);
+  writer.uint8(snapshot.perspectiveSeat);
+  writer.string(snapshot.gameRank);
+  return independentSha256(writer.finish());
+}
+
+function independentRootDigest(identity: string): string {
+  const writer = new IndependentCanonicalWriter();
+  writer.string("d2f-root-digest-v1");
+  writer.string(identity);
+  return independentSha256(writer.finish());
 }
 
 function makeRequestInput(): RolloutRequest {
@@ -275,7 +472,89 @@ function makeResultAssemblyInput(input: RolloutResult = makeResultInput()): {
   };
 }
 
+function withHostileArrayPrototype<T>(value: T[], input: Readonly<{
+  onIterator: () => void;
+  onMap: () => void;
+}>): T[] {
+  const prototype = Object.create(Array.prototype) as Record<PropertyKey, unknown>;
+  Object.defineProperty(prototype, Symbol.iterator, {
+    configurable: true,
+    value: function* hostileIterator(): IterableIterator<T> {
+      input.onIterator();
+      throw new Error("HOSTILE_ITERATOR_EXECUTED");
+    },
+  });
+  Object.defineProperty(prototype, "map", {
+    configurable: true,
+    value: () => {
+      input.onMap();
+      throw new Error("HOSTILE_MAP_EXECUTED");
+    },
+  });
+  Object.setPrototypeOf(value, prototype);
+  return value;
+}
+
+function createRegisteredHostileBank<T>(callback: () => T): T {
+  const originalStructuredClone = globalThis.structuredClone;
+  globalThis.structuredClone = ((value: unknown) => value) as typeof structuredClone;
+  try {
+    return callback();
+  } finally {
+    globalThis.structuredClone = originalStructuredClone;
+  }
+}
+
 describe("D2F ParticleBank bridge", () => {
+  test("rejects inherited array execution at request, scenario-source and bridge boundaries", () => {
+    let iteratorCallCount = 0;
+    let mapCallCount = 0;
+    const requestInput = makeRequestInput() as unknown as Record<string, unknown>;
+    const hostileCandidates = withHostileArrayPrototype([...makeRequestInput().candidates], {
+      onIterator: () => { iteratorCallCount += 1; },
+      onMap: () => { mapCallCount += 1; },
+    });
+    const requestResult = createRolloutRequest({ ...requestInput, candidates: hostileCandidates });
+    expect(() => requestResult).not.toThrow();
+    expect(requestResult.ok).toBe(false);
+
+    const sourceInput = makeSourceInput();
+    const hostileOwnCurrentHand = withHostileArrayPrototype([...sourceInput.ownCurrentHand], {
+      onIterator: () => { iteratorCallCount += 1; },
+      onMap: () => { mapCallCount += 1; },
+    });
+    const sourceResult = createParticleScenarioSource({ ...sourceInput, ownCurrentHand: hostileOwnCurrentHand });
+    expect(sourceResult).toEqual({
+      ok: false,
+      failure: { kind: "scenario-source-failed", reason: "replay-context-missing" },
+    });
+
+    const validBank = makeKnownBank();
+    const scenario = makeScenario();
+    const hostileAssignments = withHostileArrayPrototype([], {
+      onIterator: () => { iteratorCallCount += 1; },
+      onMap: () => { mapCallCount += 1; },
+    });
+    const hostileScenario = { ...scenario, hiddenTransferAssignments: hostileAssignments } as ParticleScenario;
+    const bridgeResult = createRegisteredHostileBank(() => readParticleBankRolloutAccess(createParticleBankHandle(
+      { ...validBank },
+      {
+        records: [{
+          particleId: particleScenarioIdentity(validBank.snapshot, scenario),
+          scenario: hostileScenario,
+          normalizedWeight: 1,
+        }],
+      },
+    )));
+    expect(bridgeResult).toEqual({
+      ok: false,
+      failure: { kind: "fake-or-unknown-particle-bank" },
+    });
+
+    expect(iteratorCallCount).toBe(0);
+    expect(mapCallCount).toBe(0);
+  });
+
   test("rejects a fake ParticleBank handle before reading records", () => {
     const result = readParticleBankRolloutAccess({} as ParticleBank);
 
@@ -316,6 +595,207 @@ describe("D2F ParticleBank bridge", () => {
         ok: false,
         failure: { kind: "fake-or-unknown-particle-bank" },
       });
+    }
+  });
+
+  test("rejects registered banks whose public metadata disagrees with summary or records", () => {
+    const baseline = makeKnownBank();
+    const snapshot = baseline.snapshot;
+    const scenario = makeScenario();
+    const secondScenario = {
+      ...scenario,
+      hiddenTransferAssignments: [{ eventIndex: 0, eventKind: "tribute", fromSeat: 0, toSeat: 1, cardId: "C2-1" }],
+    } as ParticleScenario;
+    const firstId = particleScenarioIdentity(snapshot, scenario);
+    const secondId = particleScenarioIdentity(snapshot, secondScenario);
+    const twoRecords = [
+      { particleId: firstId, scenario, normalizedWeight: 0.5 },
+      { particleId: secondId, scenario: secondScenario, normalizedWeight: 0.5 },
+    ];
+    const foreignSnapshot = { ...snapshot, gameId: "foreign-bank" };
+    const cases: readonly ParticleBank[] = [
+      makeKnownBank(1, snapshot, scenario, undefined, undefined, { summary: { status: "degraded" } }),
+      makeKnownBank(1, snapshot, scenario, undefined, undefined, { summary: { acceptedParticleCount: 0 } }),
+      makeKnownBank(1, snapshot, scenario, undefined, 1, { summary: { effectiveSampleSize: 2 } }),
+      makeKnownBank(0.5, snapshot, scenario, twoRecords, 2, { particleCount: 2, summary: { acceptedParticleCount: 2, samplingAttempts: 2, effectiveSampleSize: 1 } }),
+      makeKnownBank(0.5, snapshot, scenario, twoRecords, 1, { summary: { acceptedParticleCount: 1 } }),
+      makeKnownBank(1, snapshot, scenario, undefined, undefined, { summary: { status: "failed", acceptedParticleCount: 0, failureReason: "insufficient-particles" } }),
+      makeKnownBank(1, snapshot, scenario, [{ particleId: particleScenarioIdentity(foreignSnapshot, scenario), scenario, normalizedWeight: 1 }]),
+    ];
+
+    for (const bank of cases) {
+      const result = readParticleBankRolloutAccess(bank);
+      expect(result).toEqual({ ok: false, failure: { kind: "fake-or-unknown-particle-bank" } });
+      expect(result).not.toHaveProperty("access");
+    }
+  });
+
+  test("rejects scenario cards and nested envelopes with hostile or unknown structure", () => {
+    const snapshot = makeKnownBank().snapshot;
+    const cases: readonly [string, () => { scenario: ParticleScenario; particleId: string; getterCallCount: () => number; resetGetterCallCount: () => void }][] = [
+      ["card enumerable extra", () => {
+        const scenario = structuredClone(makeScenario()) as ParticleScenario;
+        const particleId = particleScenarioIdentity(snapshot, scenario);
+        const card = scenario.initialDeal.hands[0]![0]! as unknown as Record<string, unknown>;
+        Object.defineProperty(card, "extra", { configurable: true, enumerable: true, value: "unknown" });
+        return { scenario, particleId, getterCallCount: () => 0, resetGetterCallCount: () => undefined };
+      }],
+      ["card non-enumerable extra", () => {
+        const scenario = structuredClone(makeScenario()) as ParticleScenario;
+        const particleId = particleScenarioIdentity(snapshot, scenario);
+        const card = scenario.initialDeal.hands[0]![0]! as unknown as Record<string, unknown>;
+        Object.defineProperty(card, "extra", { configurable: true, enumerable: false, value: "unknown" });
+        return { scenario, particleId, getterCallCount: () => 0, resetGetterCallCount: () => undefined };
+      }],
+      ["card symbol key", () => {
+        const scenario = structuredClone(makeScenario()) as ParticleScenario;
+        const particleId = particleScenarioIdentity(snapshot, scenario);
+        const card = scenario.initialDeal.hands[0]![0]! as unknown as Record<PropertyKey, unknown>;
+        Object.defineProperty(card, Symbol("extra"), { configurable: true, enumerable: true, value: "unknown" });
+        return { scenario, particleId, getterCallCount: () => 0, resetGetterCallCount: () => undefined };
+      }],
+      ["card accessor", () => {
+        const scenario = structuredClone(makeScenario()) as ParticleScenario;
+        const particleId = particleScenarioIdentity(snapshot, scenario);
+        const card = scenario.initialDeal.hands[0]![0]! as unknown as Record<string, unknown>;
+        let getterCallCount = 0;
+        Object.defineProperty(card, "id", {
+          configurable: true,
+          enumerable: true,
+          get: () => {
+            getterCallCount += 1;
+            return "S2-1";
+          },
+        });
+        return {
+          scenario,
+          particleId,
+          getterCallCount: () => getterCallCount,
+          resetGetterCallCount: () => { getterCallCount = 0; },
+        };
+      }],
+      ["card abnormal prototype", () => {
+        const scenario = structuredClone(makeScenario()) as ParticleScenario;
+        const particleId = particleScenarioIdentity(snapshot, scenario);
+        const card = scenario.initialDeal.hands[0]![0]! as object;
+        Object.setPrototypeOf(card, []);
+        return { scenario, particleId, getterCallCount: () => 0, resetGetterCallCount: () => undefined };
+      }],
+      ["card inherited property", () => {
+        const scenario = structuredClone(makeScenario()) as ParticleScenario;
+        const particleId = particleScenarioIdentity(snapshot, scenario);
+        const card = scenario.initialDeal.hands[0]![0]! as object;
+        Object.setPrototypeOf(card, { inherited: "unknown" });
+        return { scenario, particleId, getterCallCount: () => 0, resetGetterCallCount: () => undefined };
+      }],
+      ["unknown deal envelope field", () => {
+        const scenario = structuredClone(makeScenario()) as ParticleScenario;
+        const particleId = particleScenarioIdentity(snapshot, scenario);
+        const hostileScenario = {
+          ...scenario,
+          initialDeal: { ...scenario.initialDeal, extra: "unknown" } as unknown as CanonicalInitialDeal,
+        } as ParticleScenario;
+        return { scenario: hostileScenario, particleId, getterCallCount: () => 0, resetGetterCallCount: () => undefined };
+      }],
+      ["unknown hands envelope field", () => {
+        const scenario = structuredClone(makeScenario()) as ParticleScenario;
+        const particleId = particleScenarioIdentity(snapshot, scenario);
+        const hostileScenario = {
+          ...scenario,
+          initialDeal: {
+            ...scenario.initialDeal,
+            hands: { ...scenario.initialDeal.hands, extra: [] },
+          } as unknown as CanonicalInitialDeal,
+        } as ParticleScenario;
+        return { scenario: hostileScenario, particleId, getterCallCount: () => 0, resetGetterCallCount: () => undefined };
+      }],
+      ["unknown assignment envelope field", () => {
+        const scenario = structuredClone(makeScenario()) as ParticleScenario;
+        const assignment = { eventIndex: 0, eventKind: "tribute", fromSeat: 0, toSeat: 1, cardId: "C2-1" } as const;
+        const cleanScenario = { ...scenario, hiddenTransferAssignments: [assignment] } as ParticleScenario;
+        const particleId = particleScenarioIdentity(snapshot, cleanScenario);
+        const hostileScenario = {
+          ...cleanScenario,
+          hiddenTransferAssignments: [{ ...assignment, extra: "unknown" }] as unknown as ParticleScenario["hiddenTransferAssignments"],
+        } as ParticleScenario;
+        return { scenario: hostileScenario, particleId, getterCallCount: () => 0, resetGetterCallCount: () => undefined };
+      }],
+    ];
+
+    for (const [label, buildCase] of cases) {
+      const { scenario, particleId, getterCallCount, resetGetterCallCount } = buildCase();
+      const bank = createRegisteredHostileBank(() => makeKnownBank(
+        1,
+        snapshot,
+        scenario,
+        [{ particleId, scenario, normalizedWeight: 1 }],
+      ));
+      resetGetterCallCount();
+      const result = readParticleBankRolloutAccess(bank);
+      expect(result, label).toEqual({ ok: false, failure: { kind: "fake-or-unknown-particle-bank" } });
+      expect(result, label).not.toHaveProperty("access");
+      expect(getterCallCount(), label).toBe(0);
+    }
+  });
+
+  test("rejects noncanonical seenEventHashes dictionaries without reading hostile accessors", () => {
+    const base = makeRequestInput();
+    const validHash = "0".repeat(64);
+    const makeInput = (seenEventHashes: unknown, ledgerOverrides: Readonly<Record<string, unknown>> = {}) => ({
+      ...base,
+      scenarioSourceInput: {
+        ...base.scenarioSourceInput,
+        initialLedger: {
+          ...base.scenarioSourceInput.initialLedger,
+          ...ledgerOverrides,
+          seenEventHashes,
+        },
+      },
+    } as unknown as RolloutRequest);
+    const cases: readonly [string, () => { input: RolloutRequest; getterCallCount: () => number }][] = [
+      ["non-enumerable unknown key", () => {
+        const seenEventHashes: Record<string, string> = {};
+        Object.defineProperty(seenEventHashes, "foreign", { configurable: true, enumerable: false, value: validHash });
+        return { input: makeInput(seenEventHashes), getterCallCount: () => 0 };
+      }],
+      ["symbol key", () => {
+        const seenEventHashes: Record<PropertyKey, string> = {};
+        Object.defineProperty(seenEventHashes, Symbol("foreign"), { configurable: true, enumerable: true, value: validHash });
+        return { input: makeInput(seenEventHashes), getterCallCount: () => 0 };
+      }],
+      ["accessor key", () => {
+        const seenEventHashes: Record<string, string> = {};
+        let getterCallCount = 0;
+        Object.defineProperty(seenEventHashes, "0", {
+          configurable: true,
+          enumerable: true,
+          get: () => {
+            getterCallCount += 1;
+            return validHash;
+          },
+        });
+        return { input: makeInput(seenEventHashes, { lastAppliedEventIndex: 0, nextEventIndex: 1 }), getterCallCount: () => getterCallCount };
+      }],
+      ["inherited key", () => {
+        const seenEventHashes = Object.create({ foreign: validHash }) as Record<string, string>;
+        return { input: makeInput(seenEventHashes), getterCallCount: () => 0 };
+      }],
+      ["leading-zero index", () => ({ input: makeInput({ "01": validHash }, { lastAppliedEventIndex: 0, nextEventIndex: 1 }), getterCallCount: () => 0 })],
+      ["negative index", () => ({ input: makeInput({ "-1": validHash }, { lastAppliedEventIndex: 0, nextEventIndex: 1 }), getterCallCount: () => 0 })],
+      ["fractional index", () => ({ input: makeInput({ "1.5": validHash }, { lastAppliedEventIndex: 0, nextEventIndex: 1 }), getterCallCount: () => 0 })],
+      ["over-safe-integer index", () => ({ input: makeInput({ "9007199254740992": validHash }, { lastAppliedEventIndex: 0, nextEventIndex: 1 }), getterCallCount: () => 0 })],
+      ["index beyond ledger", () => ({ input: makeInput({ 1: validHash }, { lastAppliedEventIndex: 0, nextEventIndex: 1 }), getterCallCount: () => 0 })],
+      ["missing necessary index", () => ({ input: makeInput({}, { lastAppliedEventIndex: 0, nextEventIndex: 1 }), getterCallCount: () => 0 })],
+      ["invalid hash value", () => ({ input: makeInput({ 0: "not-a-hash" }, { lastAppliedEventIndex: 0, nextEventIndex: 1 }), getterCallCount: () => 0 })],
+      ["sparse ledger index gap", () => ({ input: makeInput({ 1: validHash }, { lastAppliedEventIndex: 1, nextEventIndex: 2 }), getterCallCount: () => 0 })],
+    ];
+
+    for (const [label, buildCase] of cases) {
+      const { input, getterCallCount } = buildCase();
+      let result: RolloutContractResult<RolloutRequest> | undefined;
+      expect(() => { result = createRolloutRequest(input); }, label).not.toThrow();
+      expect(result, label).toEqual({ ok: false, failure: { kind: "invalid-request", field: "scenarioSourceInput" } });
+      expect(getterCallCount(), label).toBe(0);
     }
   });
 
@@ -721,6 +1201,81 @@ describe("D2F ParticleBank bridge", () => {
     });
   });
 
+  test("binds result summaries and ranking exactly to validated request candidates", () => {
+    const singleCandidateRequest = makeRequestInput();
+    const firstCandidate = singleCandidateRequest.candidates[0]!;
+    const secondAction = makeAction(1);
+    const secondCandidate = { ...firstCandidate, candidateId: canonicalActionIdentity(secondAction), action: secondAction };
+    const request = { ...singleCandidateRequest, candidates: [firstCandidate, secondCandidate] };
+    const firstSummary = makeResultInput().candidateSummaries[0]!;
+    const secondSummary = { ...firstSummary, candidateId: secondCandidate.candidateId };
+    const sortedSummaries = [firstSummary, secondSummary].sort((left, right) => left.candidateId < right.candidateId ? -1 : left.candidateId > right.candidateId ? 1 : 0);
+    const validAssembly = {
+      candidateSummaries: sortedSummaries,
+      ranking: [secondCandidate.candidateId, firstCandidate.candidateId],
+      aggregateDiagnostics: {
+        ...makeResultInput().aggregateDiagnostics,
+        completedReplicateCount: 2,
+        expectedCompletedReplicateCount: 2,
+        candidateCount: 2,
+        workUnitCount: 2,
+      },
+    };
+    const valid = createRolloutResult(request, validAssembly);
+    expect(valid.ok).toBe(true);
+    if (!valid.ok) return;
+    expect(valid.value.ranking).toEqual([secondCandidate.candidateId, firstCandidate.candidateId]);
+
+    const foreignCandidateId = "f".repeat(64);
+    const cases = [
+      {
+        label: "foreign summary",
+        assembly: { ...validAssembly, candidateSummaries: [firstSummary, { ...secondSummary, candidateId: foreignCandidateId }] },
+      },
+      {
+        label: "missing request candidate",
+        assembly: {
+          candidateSummaries: [firstSummary],
+          ranking: [firstCandidate.candidateId],
+          aggregateDiagnostics: { ...validAssembly.aggregateDiagnostics, candidateCount: 1, workUnitCount: 1, completedReplicateCount: 1, expectedCompletedReplicateCount: 1 },
+        },
+      },
+      {
+        label: "extra summary",
+        assembly: {
+          candidateSummaries: [firstSummary, secondSummary, { ...firstSummary, candidateId: foreignCandidateId }].sort((left, right) => left.candidateId < right.candidateId ? -1 : left.candidateId > right.candidateId ? 1 : 0),
+          ranking: [firstCandidate.candidateId, secondCandidate.candidateId, foreignCandidateId],
+          aggregateDiagnostics: { ...validAssembly.aggregateDiagnostics, candidateCount: 3, workUnitCount: 3, completedReplicateCount: 3, expectedCompletedReplicateCount: 3 },
+        },
+      },
+      {
+        label: "duplicate summary",
+        assembly: { ...validAssembly, candidateSummaries: [firstSummary, firstSummary] },
+      },
+      {
+        label: "foreign ranking",
+        assembly: { ...validAssembly, ranking: [firstCandidate.candidateId, foreignCandidateId] },
+      },
+      {
+        label: "missing ranking candidate",
+        assembly: { ...validAssembly, ranking: [firstCandidate.candidateId] },
+      },
+      {
+        label: "duplicate ranking",
+        assembly: { ...validAssembly, ranking: [firstCandidate.candidateId, firstCandidate.candidateId] },
+      },
+      {
+        label: "summary and ranking sets differ",
+        assembly: { ...validAssembly, ranking: [firstCandidate.candidateId, foreignCandidateId] },
+      },
+    ] as const;
+    for (const testCase of cases) {
+      const result = createRolloutResult(request, testCase.assembly);
+      expect(result.ok, testCase.label).toBe(false);
+      expect(result).not.toHaveProperty("value");
+    }
+  });
+
   test("rejects a noncanonical root identity even when it is non-empty", () => {
     expect(createRolloutRequest({ ...makeRequestInput(), rootIdentity: "f".repeat(64) })).toEqual({
       ok: false,
@@ -749,6 +1304,65 @@ describe("D2F ParticleBank bridge", () => {
       bank: makeKnownBank(1, { ...base.bank.snapshot, perspectiveSeat: 1 }),
     })).not.toBe(baseRoot);
 
+  });
+
+  test("matches an independent replay-root oracle and rejects root-digest injection", () => {
+    const base = makeSourceInput();
+    const independentRoot = independentReplayContextIdentity(base);
+    const independentDigest = independentRootDigest(independentRoot);
+    expect(independentLedgerHash(base.initialLedger)).toBe(base.bank.snapshot.initialLedgerHash);
+    expect(independentLedgerHash(base.finalLedger)).toBe(base.bank.snapshot.ledgerHash);
+    expect(independentRoot).toBe("9873bd3e9d2bb06a623b9e534a5dc1f125f1aeb4f6e6d2318816e16d2a255a23");
+    expect(independentDigest).toBe("6d9ddb8e5dce2c2311708720cd37a673954adfc0a357b9dd0c47b9f8f29b9d13");
+    expect(replayRoot(base)).toBe(independentRoot);
+
+    const request = makeRequestInput();
+    const assembly = makeResultAssemblyInput();
+    const result = createRolloutResult(request, assembly);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.rootDigest).toBe(independentRootDigest(independentRoot));
+    expect(createRolloutResult(request, { ...assembly, rootDigest: "f".repeat(64) } as unknown)).toEqual({
+      ok: false,
+      failure: { kind: "invalid-request", field: "assemblyInput" },
+    });
+
+    const changedTrickLedger = {
+      ...base.initialLedger,
+      currentTrick: { ...base.initialLedger.currentTrick, trickIndex: 1 },
+    } as HardPublicLedger;
+    const changedTrickHash = canonicalPublicLedgerHash(changedTrickLedger);
+    const mutationCases: readonly [string, RolloutScenarioSourceInput][] = [
+      ["public history", makeAntiTributeSourceInput()],
+      ["ledger hash and index", { ...makeAntiTributeSourceInput(), publicHistoryEvents: [] }],
+      ["game rank", {
+        ...base,
+        gameRank: "A",
+        publicState: { ...base.publicState, gameRank: "A" },
+        bank: makeKnownBank(1, { ...base.bank.snapshot, gameRank: "A" }),
+      }],
+      ["acting seat", makeSourceInput(undefined, 1)],
+      ["own hand", { ...base, ownCurrentHand: [...base.ownCurrentHand.slice(0, -1), createDeck()[27]!] }],
+      ["current trick", {
+        ...base,
+        initialLedger: changedTrickLedger,
+        finalLedger: changedTrickLedger,
+        bank: makeKnownBank(1, {
+          ...base.bank.snapshot,
+          initialLedgerHash: changedTrickHash,
+          ledgerHash: changedTrickHash,
+        }),
+      }],
+      ["ParticleBank snapshot identity", {
+        ...base,
+        bank: makeKnownBank(1, { ...base.bank.snapshot, handIdentity: "independent-oracle-foreign-hand" }),
+      }],
+    ];
+    const changedRoots = mutationCases.map(([label, input]) => {
+      const changedRoot = independentReplayContextIdentity(input);
+      expect(changedRoot, label).not.toBe(independentRoot);
+      return changedRoot;
+    });
+    expect(new Set(changedRoots).size).toBe(changedRoots.length);
   });
 
   test("rejects private fields in source input, public state, events and ledgers", () => {
@@ -1049,12 +1663,17 @@ describe("D2F ParticleBank bridge", () => {
 
   test("keeps candidate replicate counts local while aggregate counts sum candidates", () => {
     const first = makeResultInput();
+    const request = makeRequestInput();
     const secondCandidateId = canonicalActionIdentity(makeAction(1));
+    const secondCandidate = { ...request.candidates[0]!, candidateId: secondCandidateId, action: makeAction(1) };
     const summaries = [
       { ...first.candidateSummaries[0]!, acceptedScenarioCount: 2, completedReplicateCount: 2, expectedReplicateCount: 2 },
       { ...first.candidateSummaries[0]!, candidateId: secondCandidateId, acceptedScenarioCount: 2, completedReplicateCount: 2, expectedReplicateCount: 2 },
     ].sort((left, right) => left.candidateId < right.candidateId ? -1 : left.candidateId > right.candidateId ? 1 : 0);
-    const result = createRolloutResult(makeRequestInput(), makeResultAssemblyInput({
+    const result = createRolloutResult({
+      ...request,
+      candidates: [request.candidates[0]!, secondCandidate],
+    }, makeResultAssemblyInput({
       ...first,
       candidateSummaries: summaries,
       ranking: summaries.map((summary) => summary.candidateId),

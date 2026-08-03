@@ -1,4 +1,4 @@
-import { RANKS, type Card, type GameRank } from "../../engine/cards";
+import { RANKS, SUITS, type Card, type GameRank } from "../../engine/cards";
 import type { ParticleBank, ParticleScenario, ParticleSnapshotIdentity, CanonicalInitialDeal, HiddenTransferAssignment } from "./contracts";
 import { particleScenarioIdentity } from "./canonicalDeal";
 import { validateCanonicalInitialDeal } from "./particleConservation";
@@ -29,8 +29,17 @@ const CONFIG_KEYS = ["schemaVersion", "particleCount", "maxSamplingAttempts", "m
 const SUMMARY_KEYS = ["status", "requestedParticleCount", "acceptedParticleCount", "samplingAttempts", "duplicateCount", "zeroWeightCount", "effectiveSampleSize", "failureReason"] as const;
 const SCENARIO_KEYS = ["schemaVersion", "initialDeal", "hiddenTransferAssignments"] as const;
 const DEAL_KEYS = ["schemaVersion", "hands"] as const;
+const SUITED_CARD_KEYS = ["id", "kind", "rank", "suit", "copy"] as const;
+const JOKER_CARD_KEYS = ["id", "kind", "rank", "copy"] as const;
 const ASSIGNMENT_KEYS = ["eventIndex", "eventKind", "fromSeat", "toSeat", "cardId"] as const;
 const INTERNAL_KEYS = ["records"] as const;
+const NUMERIC_TOLERANCE = 1e-9;
+const SUIT_CODES: Readonly<Record<(typeof SUITS)[number], string>> = {
+  spades: "S",
+  clubs: "C",
+  hearts: "H",
+  diamonds: "D",
+};
 
 export function readParticleBankRolloutAccess(bank: ParticleBank): ParticleBankRolloutAccessResult {
   try {
@@ -47,6 +56,8 @@ export function readParticleBankRolloutAccess(bank: ParticleBank): ParticleBankR
     const records: ParticleBankRolloutRecord[] = [];
     const particleIds = new Set<string>();
     let weightTotal = 0;
+    let squaredWeightTotal = 0;
+    let zeroWeightCount = 0;
     for (let index = 0; index < recordsInput.length; index += 1) {
       const record = getOwnDataProperty(recordsInput, String(index));
       if (!isPlainDataGraph(record) || !isPlainDataRecord(record, ["particleId", "scenario", "normalizedWeight"], true)) return unknownBankFailure();
@@ -57,6 +68,8 @@ export function readParticleBankRolloutAccess(bank: ParticleBank): ParticleBankR
       if (particleId !== particleScenarioIdentity(validatedBank.snapshot, scenario)) return unknownBankFailure();
       particleIds.add(particleId);
       weightTotal += normalizedWeight;
+      squaredWeightTotal += normalizedWeight ** 2;
+      if (normalizedWeight === 0) zeroWeightCount += 1;
       if (!Number.isFinite(weightTotal)) return unknownBankFailure();
       records.push({
         particleId,
@@ -65,7 +78,19 @@ export function readParticleBankRolloutAccess(bank: ParticleBank): ParticleBankR
       });
     }
 
-    if (Math.abs(weightTotal - 1) > 1e-9 || validatedBank.effectiveSampleSize > records.length + 1e-9) return unknownBankFailure();
+    const summary = validatedBank.summary;
+    const internalEffectiveSampleSize = squaredWeightTotal > 0 ? 1 / squaredWeightTotal : Number.NaN;
+    if (records.length !== summary.acceptedParticleCount
+      || records.length > validatedBank.particleCount
+      || Math.abs(weightTotal - 1) > NUMERIC_TOLERANCE
+      || !Number.isFinite(internalEffectiveSampleSize)
+      || internalEffectiveSampleSize < 1 - NUMERIC_TOLERANCE
+      || internalEffectiveSampleSize > records.length + NUMERIC_TOLERANCE
+      || Math.abs(internalEffectiveSampleSize - validatedBank.effectiveSampleSize) > NUMERIC_TOLERANCE
+      || summary.effectiveSampleSize === undefined
+      || Math.abs(internalEffectiveSampleSize - summary.effectiveSampleSize) > NUMERIC_TOLERANCE
+      || zeroWeightCount !== summary.zeroWeightCount
+      || summary.samplingAttempts < summary.acceptedParticleCount + summary.duplicateCount) return unknownBankFailure();
     return {
       ok: true,
       access: deepFreeze({ records, effectiveSampleSize: validatedBank.effectiveSampleSize }),
@@ -85,6 +110,12 @@ function isValidPublicBank(value: unknown): value is ParticleBank {
   const effectiveSampleSize = bank.effectiveSampleSize;
   if (bank.schemaVersion !== "d2-particle-bank-v1" || !isPositiveSafeInteger(bank.particleCount) || typeof effectiveSampleSize !== "number" || !Number.isFinite(effectiveSampleSize) || effectiveSampleSize < 0 || (bank.status !== "ready" && bank.status !== "degraded")) return false;
   if (!isValidSnapshot(bank.snapshot) || !isValidConfig(bank.config, bank.particleCount) || !isValidSummary(bank.summary, bank.particleCount)) return false;
+  const summary = bank.summary as ParticleBank["summary"];
+  if (summary.status === "failed"
+    || summary.status !== bank.status
+    || summary.effectiveSampleSize === undefined
+    || typeof summary.effectiveSampleSize !== "number"
+    || Object.prototype.hasOwnProperty.call(summary, "failureReason")) return false;
   return true;
 }
 
@@ -147,9 +178,45 @@ function isValidParticleScenario(value: unknown): value is ParticleScenario {
 function isValidInitialDeal(value: unknown): value is CanonicalInitialDeal {
   if (!isPlainDataRecord(value, DEAL_KEYS, true)) return false;
   const deal = value as Record<string, unknown>;
-  if (deal.schemaVersion !== "d2-particle-initial-deal-v1" || !isPlainDataRecord(deal.hands, ["0", "1", "2", "3"], true)) return false;
-  const hands = deal.hands as Record<string, unknown>;
-  return ["0", "1", "2", "3"].every((seat) => isPlainDataArray(hands[seat]));
+  if (getOwnDataProperty(deal, "schemaVersion") !== "d2-particle-initial-deal-v1") return false;
+  const hands = getOwnDataProperty(deal, "hands");
+  if (!isPlainDataRecord(hands, ["0", "1", "2", "3"], true)) return false;
+  return ["0", "1", "2", "3"].every((seat) => {
+    const hand = getOwnDataProperty(hands, seat);
+    if (!isPlainDataArray(hand)) return false;
+    for (let index = 0; index < hand.length; index += 1) {
+      if (!isValidCard(getOwnDataProperty(hand, String(index)))) return false;
+    }
+    return true;
+  });
+}
+
+function isValidCard(value: unknown): value is Card {
+  if (!isPlainDataRecord(value)) return false;
+  const kindDescriptor = Object.getOwnPropertyDescriptor(value, "kind");
+  if (!isDataDescriptor(kindDescriptor)) return false;
+  if (kindDescriptor.value === "suited") {
+    if (!isPlainDataRecord(value, SUITED_CARD_KEYS, true)) return false;
+    const card = value as Record<string, unknown>;
+    return isNonEmptyString(card.id)
+      && RANKS.includes(card.rank as (typeof RANKS)[number])
+      && SUITS.includes(card.suit as (typeof SUITS)[number])
+      && isCardCopy(card.copy)
+      && card.id === `${SUIT_CODES[card.suit as (typeof SUITS)[number]]}${card.rank}-${card.copy}`;
+  }
+  if (kindDescriptor.value === "joker") {
+    if (!isPlainDataRecord(value, JOKER_CARD_KEYS, true)) return false;
+    const card = value as Record<string, unknown>;
+    return isNonEmptyString(card.id)
+      && (card.rank === "SJ" || card.rank === "BJ")
+      && isCardCopy(card.copy)
+      && card.id === `Joker-${card.rank}-${card.copy}`;
+  }
+  return false;
+}
+
+function isCardCopy(value: unknown): value is 1 | 2 {
+  return value === 1 || value === 2;
 }
 
 function isValidAssignment(value: unknown): value is HiddenTransferAssignment {
@@ -217,7 +284,7 @@ function isPlainDataRecord(value: unknown, allowedKeys?: readonly string[], exac
 
 function isPlainDataArray(value: unknown): value is readonly unknown[] {
   try {
-    if (!Array.isArray(value)) return false;
+    if (value === null || typeof value !== "object" || Object.getPrototypeOf(value) !== Array.prototype || !Array.isArray(value)) return false;
     const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
     if (!isDataDescriptor(lengthDescriptor) || !isNonNegativeSafeInteger(lengthDescriptor.value)) return false;
     const length = lengthDescriptor.value;
