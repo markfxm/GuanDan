@@ -1,6 +1,6 @@
 # D2F CRN Rollout Implementation Plan
 
-状态：仅计划纠偏；本轮不创建实现、测试或 benchmark 文件，不开始 Task 1。
+状态：DESIGN CORRECTED；TASK 1 POLICY GREEN PENDING；本轮仅计划纠偏，不创建实现、测试或 benchmark 文件，不开始代码 Task 1。
 
 ## 0. 执行纪律与全局 allowlist
 
@@ -40,6 +40,8 @@ Task 1–9 使用 Design Spec 中完全相同的以下名字和字段，不另�
 ~~~ts
 type RolloutMode = "detached" | "offline" | "shadow";
 
+type RolloutPolicyId = "d2f-lightweight-v1";
+
 type RolloutRequest = Readonly<{
   schemaVersion: "d2f-rollout-request-v2";
   mode: RolloutMode;
@@ -51,7 +53,7 @@ type RolloutRequest = Readonly<{
   limits: RolloutBudgetLimits;
   evidenceRequirements: RolloutEvidenceRequirements;
   riskPolicy: RolloutRiskPolicy;
-  policy: RolloutPolicy;
+  policyId: RolloutPolicyId;
 }>;
 
 type RolloutBudget = Readonly<{
@@ -90,6 +92,10 @@ type RolloutRiskPolicy = Readonly<{
   variancePenalty: number;
   downsideRiskPenalty: number;
 }>;
+
+`RolloutRequest` 是纯数据 public configuration。它只接受 `policyId: "d2f-lightweight-v1"`，不接受、执行、bind、clone、freeze 或保存 caller-provided policy、callback、factory 或 registry entry；validated request 及其递归可达属性不得含 function。未知 policy id、未知字段和 callback 注入返回既有 typed `invalid-request` failure。
+
+当前唯一 policy id 不开放隐式扩展；新增 ID 必须由 D2G 或其他后续明确任务同步修改 literal union、内部 factory mapping、privacy/determinism/CRN pairing/regression tests，不得通过配置文件、环境变量或运行时 registry 绕过代码审查。
 
 type RolloutPublicState = Readonly<{
   gameRank: GameRank;
@@ -142,7 +148,6 @@ type RolloutReplicateInput = Readonly<{
   replicateIdentity: string;
   random: CrnView;
   validatedBudget: ValidatedRolloutBudget;
-  policy: RolloutPolicy;
 }>;
 
 type CrnCoordinate = Readonly<{
@@ -162,16 +167,25 @@ type RolloutPolicyDecisionContext = Readonly<{
   replicateIdentity: string;
   ply: number;
   actingSeat: PublicSeat;
-  random: CrnView;
 }>;
 
-type RolloutPolicy = Readonly<{
-  chooseAction(observation: SeatLocalObservation, context: RolloutPolicyDecisionContext): RolloutPolicyResult;
+type InternalRolloutPolicy = Readonly<{
+  chooseAction(observation: SeatLocalObservation, context: RolloutPolicyDecisionContext, crn: CrnView): RolloutPolicyResult;
 }>;
+
+type InternalRolloutPolicyFactoryResult =
+  | { ok: true; policy: InternalRolloutPolicy }
+  | { ok: false; failure: { kind: "unsupported-policy-id" } };
+
+declare function createInternalRolloutPolicy(policyId: RolloutPolicyId): InternalRolloutPolicyFactoryResult;
 
 type RolloutPolicyResult =
   | { ok: true; action: RolloutAction }
   | { ok: false; failure: RolloutPolicyFailure };
+
+`RolloutReplicateInput` 不携带 executable policy。Task 4 kernel 只能通过 `createInternalRolloutPolicy(policyId)` 的 exhaustive literal mapping 获得固定 policy；factory 不接受 callback、class、factory、registry entry、模块路径或动态注册。`InternalRolloutPolicy` 只能接收 `SeatLocalObservation`、`RolloutPolicyDecisionContext` 和 `CrnView`，不得读取 Room/RoomState、对手完整手牌、`RolloutScenario.privateState`、raw ParticleBank scenario/record/weight/seed、HandPlanner、正式 `decideAiAction`、wall clock、`Math.random()`、global mutable state、worker id 或对象地址。
+
+`policyId` 进入独立 evaluation/rollout configuration identity、configuration provenance、`RolloutResult` 或 aggregate diagnostics 中允许公开的 policy provenance，以及 offline/shadow evidence configuration record；不进入 `canonicalReplayContextIdentity`、`rootIdentity`、`rootDigest`、ParticleBank snapshot identity、scenario/replicate identity、ply/decision identity、acting-seat identity、random domain、semantic key、`CrnCoordinate` 或 CRN keyed value。root identity 描述动作前游戏事实，`policyId` 描述评估配置；相同 root/scenario/replicate 下不同 policy 必须共享 CRN coordinates，`candidateId` 继续不得进入 CRN coordinate。
 
 type TeamUtility = -3 | -2 | -1 | 1 | 2 | 3;
 
@@ -206,6 +220,7 @@ type RolloutResult = Readonly<{
   schemaVersion: "d2f-rollout-result-v2";
   mode: RolloutMode;
   formalExecutionAllowed: false;
+  policyId: RolloutPolicyId;
   rootDigest: string;
   candidateSummaries: readonly CandidateRolloutSummary[];
   ranking: readonly string[];
@@ -214,6 +229,7 @@ type RolloutResult = Readonly<{
 
 type D2FShadowEvidence = Readonly<{
   schemaVersion: "d2f-shadow-v2";
+  policyId: RolloutPolicyId;
   baselineActionIdentity: string;
   d2fRecommendedActionIdentity: string | null;
   agreement: "agree" | "disagree" | "unavailable";
@@ -245,7 +261,7 @@ type LeafEvaluationFailure =
 
 type RolloutPolicyFailure =
   | { kind: "no-legal-action"; actingSeat: PublicSeat }
-  | { kind: "invalid-policy-context"; field: "ply" | "actingSeat" | "random" };
+  | { kind: "invalid-policy-context"; field: "ply" | "actingSeat" };
 
 type RolloutKernelFailure =
   | { kind: "simulation-failed"; stage: "state-conservation" | "leaf-evaluation" | "replay" }
@@ -317,9 +333,8 @@ tests/ai/rollout/particleScenarioSource.test.ts
 
 Task 1 只冻结 contracts 中的 identity 基础契约（`CrnCoordinate`、root/scenario/replicate
 identity 字段和 `candidateId === canonicalActionIdentity(action)` 的边界）、窄 bridge 与
-replay-ready source。它不得创建或实现 `identity.ts`/`crn.ts` 的 deterministic stream、Team
-Utility、leaf、policy、kernel、aggregation、ranking、shadow observer 或 Room 接入；这些行为
-分别留给后序 Task。
+replay-ready source，并冻结纯数据的 `RolloutPolicyId`/`RolloutRequest.policyId` 输入边界。它不得创建或实现 `identity.ts`/`crn.ts` 的 deterministic stream、Team
+Utility、leaf、executable policy、kernel、aggregation、ranking、shadow observer 或 Room 接入；这些行为分别留给后序 Task。
 
 ### TDD actions
 
@@ -331,6 +346,9 @@ Utility、leaf、policy、kernel、aggregation、ranking、shadow observer 或 R
 - [ ] 加入 it("builds replay-ready source from bank plus public history/ledger context")，构造包含 bank、publicHistoryEvents、initialLedger、finalLedger、gameRank、perspectiveSeat、ownCurrentHand、publicState 的 RolloutScenarioSourceInput。
 - [ ] 最小实现窄桥接，校验 fake/unknown handle、ledger hash/index、game rank、perspective seat 和己方 hand，再按真实 replay API 构造 RolloutScenario；只返回不可变私有投影。
 - [ ] 加入 it("does not expose raw scenario, four-seat hands, weight detail, or seed in public diagnostics")。
+- [ ] PolicyId remediation RED：在 `tests/ai/rollout/particleBankRolloutBoundary.test.ts` 保留并运行 callback/closure 注入探针；预期旧 `RolloutRequest.policy` 接口会错误接受 callback，失败原因必须是目标 policy 输入边界仍为 executable function，而不是导入或环境错误。
+- [ ] PolicyId remediation 最小实现：将 request 字段替换为 `policyId: RolloutPolicyId`，只接受 `"d2f-lightweight-v1"`，拒绝 `policy`、`chooseAction`、`policyFactory`、`callback` 和未知字段；不执行、bind、clone、freeze 或保存 caller function。
+- [ ] PolicyId remediation GREEN：重复运行同一 focused test，确认合法 literal 成功、任意 policy id/callback/closure/函数递归可达性失败，并保留 typed failure；Task 4 再验证 internal factory。
 - [ ] GREEN：重复执行两个 focused commands，分别得到所有测试通过，且 policy/diagnostics 不可接收 privateState。
 - [ ] 回归 npx vitest run tests/ai/particles --exclude "**/.worktrees/**" --reporter=dot；验证不少于 10 files / 136 tests，不能减少既有断言。
 - [ ] 运行 npx tsc --noEmit、仓库既有 build command、git diff --check；审计输入和 ParticleBank 未被修改。
@@ -421,21 +439,26 @@ tests/ai/rollout/rolloutPrivacyAst.test.ts
 
 ### TDD actions
 
-- [ ] 加入 it("receives RolloutPolicyDecisionContext and uses keyed random")，spy 只提供 value(semanticKey)，拒绝 next() 属性。
-- [ ] RED：npx vitest run tests/ai/rollout/policy.test.ts --exclude "**/.worktrees/**" --reporter=verbose；预期为 chooseAction(observation, context) 或 keyed policy 不存在。
+- [ ] 加入 it("maps the supported policy id to one fixed internal policy")，只调用 `createInternalRolloutPolicy("d2f-lightweight-v1")`，不得传 callback、factory 或 registry。
+- [ ] RED：npx vitest run tests/ai/rollout/policy.test.ts --exclude "**/.worktrees/**" --reporter=verbose；预期为 `InternalRolloutPolicy`/factory 或 keyed policy 不存在。
+- [ ] 加入 it("rejects unknown policy ids without fallback")，覆盖 `custom`、空字符串、非字符串和未知 literal，返回 typed `unsupported-policy-id` 或 exhaustive unreachable。
+- [ ] 加入 it("receives RolloutPolicyDecisionContext and CrnView only")，spy 只提供 `value(semanticKey)`，拒绝 `next()` 属性，并断言 policy 不能访问 Room、privateState 或 full hands。
+- [ ] 加入 it("keeps the validated request free of function values")，递归检查 request 可达属性不存在 `typeof value === "function"`。
+- [ ] 加入 it("rejects callback, closure, factory and registry injection")，确认 callback 不被调用、bind、保存或进入返回对象，捕获状态变化不影响 request。
 - [ ] 加入 it("does not expose other seats' complete hands or ParticleScenario to policy")，检查 observation shape 和 AST/symbol imports。
 - [ ] 加入 it("does not import full HandPlanner")，对 src/ai/rollout/** 做 AST import prohibition。
+- [ ] 加入 AST/symbol gate：request factory 不出现 `.bind(`，public contracts 不暴露 caller policy factory；Task 4 policy 不导入 Room、HandPlanner、ParticleBank internals/source，且不存在 dynamic policy registry、Math.random 或 wall-clock。
 - [ ] 加入 malformed-number/seat test：NaN、Infinity、负数、小数、overflow work-unit、非法 seat 和 mutable observation 都在 policy/kernel 边界 typed-fail，不能进入 success result。
 - [ ] 在 kernel test 加入 it("uses the explicit ValidatedRolloutBudget and stops by work-unit count")；传入小的 explicit budget/limits，不读取全局 profile 或 wall clock。
 - [ ] 加入 it("preserves card conservation and fails atomically on invalid state")。
-- [ ] 最小实现 canonical legal-action enumeration、keyed priority、seat-local observation、validated budget consumption 和 state conservation checks；所有 kernel errors 返回 RolloutReplicateResult failure。
+- [ ] 最小实现 exhaustive policy-id mapping、canonical legal-action enumeration、keyed priority、seat-local observation、validated budget consumption 和 state conservation checks；所有 kernel errors 返回 RolloutReplicateResult failure。
 - [ ] GREEN：policy/kernel/privacy focused tests 全部通过；回归 Task 1–3。
 - [ ] 运行 npx tsc --noEmit、build、git diff --check；确认候选顺序和 worker 调度不改变 result。
 - [ ] 使用 git commit -m "feat(ai): add D2F seat-local rollout kernel"；提交后停止。
 
 ### Produces / consumes
 
-Produces RolloutPolicyResult、RolloutReplicateResult、seat-local policy and finite-budget kernel. Consumes RolloutReplicateInput、CrnView、ValidatedRolloutBudget and replayed private state only inside the kernel; policy sees only its seat-local projection.
+Produces `InternalRolloutPolicy`、RolloutPolicyResult、RolloutReplicateResult、fixed policy factory、seat-local policy and finite-budget kernel. Consumes `RolloutRequest.policyId`、RolloutReplicateInput、CrnView、ValidatedRolloutBudget and replayed private state only inside the kernel; policy sees only its seat-local projection and is never caller-injected.
 
 ## 6. Task 5 — evidence gate / aggregation / risk ranking
 

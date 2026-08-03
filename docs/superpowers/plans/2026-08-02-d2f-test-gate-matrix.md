@@ -1,6 +1,6 @@
 # D2F Test Gate Matrix
 
-状态：文档纠偏冻结；本轮只修改文档，不创建测试、benchmark 或 production 文件。
+状态：DESIGN CORRECTED；TASK 1 POLICY GREEN PENDING；本轮只修改文档，不创建测试、benchmark 或 production 文件。
 
 ## 1. Gate policy
 
@@ -68,6 +68,8 @@ type RolloutScenarioSourceResult =
   | { ok: false; failure: RolloutFailure };
 
 type RolloutMode = "detached" | "offline" | "shadow";
+
+type RolloutPolicyId = "d2f-lightweight-v1";
 
 type RolloutPublicState = Readonly<{
   gameRank: GameRank;
@@ -137,7 +139,6 @@ type RolloutReplicateInput = Readonly<{
   replicateIdentity: string;
   random: CrnView;
   validatedBudget: ValidatedRolloutBudget;
-  policy: RolloutPolicy;
 }>;
 
 type CrnCoordinate = Readonly<{
@@ -157,12 +158,27 @@ type RolloutPolicyDecisionContext = Readonly<{
   replicateIdentity: string;
   ply: number;
   actingSeat: PublicSeat;
-  random: CrnView;
 }>;
 
-type RolloutPolicy = Readonly<{
-  chooseAction(observation: SeatLocalObservation, context: RolloutPolicyDecisionContext): RolloutPolicyResult;
+type InternalRolloutPolicy = Readonly<{
+  chooseAction(
+    observation: SeatLocalObservation,
+    context: RolloutPolicyDecisionContext,
+    crn: CrnView,
+  ): RolloutPolicyResult;
 }>;
+
+type InternalRolloutPolicyFactoryResult =
+  | { ok: true; policy: InternalRolloutPolicy }
+  | { ok: false; failure: { kind: "unsupported-policy-id" } };
+
+declare function createInternalRolloutPolicy(
+  policyId: RolloutPolicyId,
+): InternalRolloutPolicyFactoryResult;
+
+type RolloutPolicyResult =
+  | { ok: true; action: RolloutAction }
+  | { ok: false; failure: RolloutPolicyFailure };
 
 type RolloutRequest = Readonly<{
   schemaVersion: "d2f-rollout-request-v2";
@@ -175,12 +191,12 @@ type RolloutRequest = Readonly<{
   limits: RolloutBudgetLimits;
   evidenceRequirements: RolloutEvidenceRequirements;
   riskPolicy: RolloutRiskPolicy;
-  policy: RolloutPolicy;
+  policyId: RolloutPolicyId;
 }>;
 
-type RolloutPolicyResult =
-  | { ok: true; action: RolloutAction }
-  | { ok: false; failure: RolloutPolicyFailure };
+`RolloutRequest` 是纯数据 public configuration；它只接受唯一 literal `policyId: "d2f-lightweight-v1"`，不接受任何 executable policy、callback、factory、registry entry 或 function value。未知 policy id、未知字段以及 callback/closure 注入必须返回既有 typed `invalid-request` failure，且 validated request 的递归可达属性不得含 function。Task 4 才能通过 `createInternalRolloutPolicy` 的 exhaustive literal mapping 构造固定内部 policy；不存在 caller-supplied policy、动态注册或 fallback policy。
+
+`policyId` 进入独立的 evaluation/rollout configuration identity、configuration provenance、`RolloutResult`/aggregate diagnostics 的允许公开 policy provenance 和 offline/shadow evidence configuration record；它明确不得进入 `canonicalReplayContextIdentity`、`rootIdentity`、`rootDigest`、ParticleBank snapshot identity、scenario/replicate identity、ply/decision identity、acting-seat identity、`randomDomain`、`semanticKey`、`CrnCoordinate` 或 CRN keyed value。root identity 描述动作前游戏事实，`policyId` 描述评估配置；相同 root/scenario/replicate 下不同 policy 必须共享 CRN coordinates，`candidateId` 继续不得进入 CRN coordinate。
 
 type TeamUtility = -3 | -2 | -1 | 1 | 2 | 3;
 
@@ -215,6 +231,7 @@ type RolloutResult = Readonly<{
   schemaVersion: "d2f-rollout-result-v2";
   mode: RolloutMode;
   formalExecutionAllowed: false;
+  policyId: RolloutPolicyId;
   rootDigest: string;
   candidateSummaries: readonly CandidateRolloutSummary[];
   ranking: readonly string[];
@@ -223,6 +240,7 @@ type RolloutResult = Readonly<{
 
 type D2FShadowEvidence = Readonly<{
   schemaVersion: "d2f-shadow-v2";
+  policyId: RolloutPolicyId;
   baselineActionIdentity: string;
   d2fRecommendedActionIdentity: string | null;
   agreement: "agree" | "disagree" | "unavailable";
@@ -270,7 +288,7 @@ type LeafEvaluationFailure =
 
 type RolloutPolicyFailure =
   | { kind: "no-legal-action"; actingSeat: PublicSeat }
-  | { kind: "invalid-policy-context"; field: "ply" | "actingSeat" | "random" };
+  | { kind: "invalid-policy-context"; field: "ply" | "actingSeat" };
 
 type RolloutKernelFailure =
   | { kind: "simulation-failed"; stage: "state-conservation" | "leaf-evaluation" | "replay" }
@@ -305,6 +323,44 @@ duplicate identity and missing identity must produce an existing typed failure r
 `candidateId === canonicalActionIdentity(action)`, `scenarioIdentity` is the canonical particle
 scenario identity, `replicateIdentity` is canonical replicate-ordinal encoding, and `rootDigest`
 comes only from the same pre-action replay-context identity.
+
+## 1.2 PolicyId ownership and identity gate
+
+`RolloutRequest` is a serializable public configuration boundary, not a policy execution boundary.
+Its only policy field is `policyId: RolloutPolicyId`, whose current and only legal value is
+`"d2f-lightweight-v1"`. A request containing `policy`, `chooseAction`, `policyFactory`, callback,
+factory, registry entry, unknown field or recursively reachable function must fail with typed
+`invalid-request`; the validator must not invoke, bind, clone, freeze or retain the caller value.
+The validated request must be safe to structure-clone/serialize except for the explicitly opaque
+ParticleBank handle, and no public barrel may export an executable policy or the private source
+envelope.
+
+The current literal is not an implicit D2F Task 1–9 extension. D2G or another explicitly approved
+future task must change the literal union, internal factory mapping, privacy/determinism/CRN-pairing
+tests and regression gates; configuration files, environment variables and runtime registries cannot
+bypass that review.
+
+Task 4 owns `createInternalRolloutPolicy(policyId)`. The factory must use an exhaustive literal
+mapping with no dynamic registration, caller-supplied function/class/factory, module path or fallback.
+`InternalRolloutPolicy` receives only `SeatLocalObservation`, `RolloutPolicyDecisionContext` and
+`CrnView`; it cannot access Room/RoomState, full opponent hands, `privateState`, raw ParticleBank
+scenario/record/weight/seed, HandPlanner, formal `decideAiAction`, wall clock, `Math.random()`,
+global mutable state, worker id or object address.
+
+The focused RED/GREEN gate must prove all of the following:
+
+1. The legal literal succeeds; arbitrary/empty/unknown policy IDs fail with typed failure.
+2. Callback, closure, `chooseAction`, factory, registry and unknown-key injection fail even when a
+   legal `policyId` is present; no callback is invoked, bound or retained, and no function is
+   reachable from the validated request.
+3. Changing `policyId` changes only the independent evaluation/rollout configuration identity and
+   provenance. It must not change `canonicalReplayContextIdentity`, `rootIdentity`, `rootDigest`,
+   ParticleBank snapshot identity, scenario/replicate/ply/decision/acting-seat identity,
+   `randomDomain`, `semanticKey`, `CrnCoordinate` or CRN keyed value. Different policies at the
+   same root/scenario/replicate must share CRN coordinates; `candidateId` remains excluded.
+4. The Task 4 policy test proves the fixed factory and seat-local inputs. The AST/symbol test rejects
+   public executable-policy exports, `.bind`, dynamic policy registries, Room/HandPlanner/Particle
+   internals/source access and `Math.random()`/wall-clock policy semantics.
 
 ## 2. Exact accepted Particle focused manifest
 
@@ -500,6 +556,7 @@ The final report must replace the planned list with the actual git ls-files 'tes
 | gate | test evidence | failure condition |
 | --- | --- | --- |
 | Contract envelope | particleBankRolloutBoundary.test.ts | missing required field, non-literal formal flag, non-finite input, mutable public result |
+| Policy ownership | particleBankRolloutBoundary.test.ts, policy.test.ts, rolloutPrivacyAst.test.ts | public request accepts executable policy/callback, policy id is not a fixed literal, policy id changes game/CRN identity, or caller factory/registry/bind path exists |
 | Unified result | particleScenarioSource.test.ts, aggregation.test.ts | any document/code uses an obsolete digest field instead of rootDigest, or fields differ |
 | Rollout budget | kernel.test.ts | kernel reads global/default budget, unsafe integer, overflow or wall-clock stop |
 | Evidence requirements | evidenceGate.test.ts | no explicit minimum ESS/scenarios/replicates, or candidate loop starts before validation |
@@ -523,6 +580,12 @@ root identity
 -> deterministic value
 ~~~
 
+`policyId` is evaluation configuration provenance only. It is not a component of the random chain,
+`canonicalReplayContextIdentity`, `rootIdentity`, `rootDigest`, ParticleBank snapshot identity,
+scenario/replicate/ply/decision/acting-seat identity, `randomDomain`, `semanticKey`,
+`CrnCoordinate` or the CRN keyed value. Different fixed policies at the same root/scenario/replicate
+must share the coordinate and keyed value; `candidateId` remains excluded as well.
+
 CrnView only offers value(semanticKey), never next(). Common legal actions use canonical action identity as semantic key. candidateId is restricted to result association, identity validation and final sorting.
 
 The CRN collision and unpaired-event rules are mandatory: candidateId, baseline score, candidate array
@@ -539,7 +602,7 @@ order must not change summaries or ranking.
 
 | gate | required evidence | required result |
 | --- | --- | --- |
-| seat-local policy | policy.test.ts | policy receives only current seat observation and RolloutPolicyDecisionContext |
+| seat-local policy | policy.test.ts | fixed `InternalRolloutPolicy` is selected only by literal `RolloutPolicyId` and receives only current seat observation, `RolloutPolicyDecisionContext` and `CrnView`; no caller callback |
 | no full HandPlanner | rolloutPrivacyAst.test.ts | no import or call to complete HandPlanner under src/ai/rollout/** |
 | ParticleBank bridge | particleBankRolloutBoundary.test.ts | exactly one bridge resolves WeakMap internals; fake handle fails safely |
 | replay context | particleScenarioSource.test.ts | source receives bank plus public history/initial/final ledger/game rank/perspective/own hand/public state |
@@ -553,7 +616,8 @@ Private bridge is a single production chain: particles-side `particleBankRollout
 only symbol that resolves `readParticleBankInternals`; rollout-side `particleScenarioSource.ts` is
 the only caller; only kernel internals may receive raw scenario, four-seat hands and particle weights;
 policy sees seat-local observation only; diagnostics/sink sees no raw scenario, assignment, weight detail
-or seed. AST/symbol tests must fail on both forbidden import and forbidden re-export/barrel exposure of
+or seed. `policyId` may appear only as redacted configuration provenance. AST/symbol tests must fail
+on both forbidden import and forbidden re-export/barrel exposure of
 `particleBankInternals.ts`. Fake/unknown handles must return `fake-or-unknown-particle-bank`, and the
 bridge result must be immutable or a deep copy.
 
@@ -644,6 +708,7 @@ Required Shadow evidence fields：
 
 ~~~text
 baselineActionIdentity
+policyId
 d2fRecommendedActionIdentity
 agreement
 riskAdjustedUtilityDelta

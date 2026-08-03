@@ -1,6 +1,6 @@
 # D2F CRN Rollout / Team Utility Design Specification
 
-状态：文档纠偏冻结；仅定义后续实现边界，不开始 Task 1。
+状态：DESIGN CORRECTED；TASK 1 POLICY GREEN PENDING；仅定义后续实现边界，本轮不开始代码 Task 1。
 
 ## 1. 阶段定位与不可突破约束
 
@@ -92,6 +92,8 @@ seat、current trick/public state 和同一 ParticleBank snapshot identity。所
 ```ts
 type RolloutMode = "detached" | "offline" | "shadow";
 
+type RolloutPolicyId = "d2f-lightweight-v1";
+
 type RolloutRequest = Readonly<{
   schemaVersion: "d2f-rollout-request-v2";
   mode: RolloutMode;
@@ -103,7 +105,7 @@ type RolloutRequest = Readonly<{
   limits: RolloutBudgetLimits;
   evidenceRequirements: RolloutEvidenceRequirements;
   riskPolicy: RolloutRiskPolicy;
-  policy: RolloutPolicy;
+  policyId: RolloutPolicyId;
 }>;
 
 type RolloutBudget = Readonly<{
@@ -141,6 +143,10 @@ type RolloutRiskPolicy = Readonly<{
   downsideRiskPenalty: number;
 }>;
 ```
+
+`RolloutRequest` 是 caller 可构造的纯数据配置。它只接受受支持的 literal `policyId`，不接受、执行、bind、clone、freeze 或保存任何 caller-provided policy、callback、factory 或 registry entry；validated request 及其递归可达属性不得包含 function。未知 policy id、未知字段和 callback 注入都返回既有 typed `invalid-request` failure，不能让 caller callback throw 逃逸。
+
+`policyId` 当前唯一合法值为 `"d2f-lightweight-v1"`。新增 policy id 不属于当前 D2F Task 1–9 的隐式扩展，必须由 D2G 或其他后续明确任务修改 literal union、内部 factory mapping、privacy/determinism/CRN pairing/regression tests；不得通过配置文件、环境变量或运行时 registry 绕过审查。
 
 `RolloutBudget`、`RolloutBudgetLimits`、`RolloutEvidenceRequirements` 和 `RolloutRiskPolicy` 均为调用者显式传入，Task 1–6 不设置 production/shadow 默认值。budget/limits 的字段必须是 finite safe integer；evidence 的 ESS 和三个阈值必须是正的 finite safe integer，并且 validated request 不得要求超过 `maximumWorkUnits` 的证据上限；风险系数必须 finite 且 `>= 0`。工作量乘积必须在校验中逐步检查溢出和 limits。kernel 只消费 `ValidatedRolloutBudget`，不读取全局配置、wall clock、进程状态或 worker 调度。
 
@@ -192,11 +198,12 @@ type RolloutReplicateInput = Readonly<{
   replicateIdentity: string;
   random: CrnView;
   validatedBudget: ValidatedRolloutBudget;
-  policy: RolloutPolicy;
 }>;
 ```
 
 `candidateId` 是 action 的 canonical identity，用于候选关联、identity validation 和最终排序；它必须等于 `canonicalActionIdentity(action)` 且在 request 内唯一。`baselineEvaluatorScore` 是有限 number，只用于第三层稳定排序和 shadow 对照。它不进入 candidate identity、CRN、policy context 或 random key。`scenarioIdentity` 必须非空、canonical、唯一且与 source 使用的 ParticleBank snapshot 相符；`normalizedWeight` 必须 finite、非负，所有 accepted scenario 的权重和必须通过固定归一化容差验证为 1。`RolloutScenario` 和 `RolloutReplicateInput` 是 source/kernel 内部共享契约，不得经 public barrel 导出；`privateState` 只能在 kernel 内部消费，不能进入 policy、diagnostics 或 shadow sink。
+
+`RolloutReplicateInput` 不携带 executable policy。Task 4 kernel 如需 policy，只能在内部由 `policyId` 构造固定的 `InternalRolloutPolicy`，不得由 detached/offline/shadow caller 注入。
 
 ### 3.3 CRN identity 与 policy
 
@@ -235,16 +242,28 @@ type RolloutPolicyDecisionContext = Readonly<{
   replicateIdentity: string;
   ply: number;
   actingSeat: PublicSeat;
-  random: CrnView;
 }>;
 
-type RolloutPolicy = Readonly<{
+type InternalRolloutPolicy = Readonly<{
   chooseAction(
     observation: SeatLocalObservation,
     context: RolloutPolicyDecisionContext,
+    crn: CrnView,
   ): RolloutPolicyResult;
 }>;
+
+type InternalRolloutPolicyFactoryResult =
+  | { ok: true; policy: InternalRolloutPolicy }
+  | { ok: false; failure: { kind: "unsupported-policy-id" } };
+
+declare function createInternalRolloutPolicy(
+  policyId: RolloutPolicyId,
+): InternalRolloutPolicyFactoryResult;
 ```
+
+`createInternalRolloutPolicy` 只能使用穷尽式 literal mapping 或 exhaustive `switch` 创建仓库内固定、已审查的 policy。它不接受 caller function、class、factory、registry entry、模块路径或动态注册；未知 id 必须 typed-fail 或由穷尽检查成为不可达。`InternalRolloutPolicy` 只能接收 `SeatLocalObservation`、`RolloutPolicyDecisionContext` 和 `CrnView`，不得读取 Room/RoomState、对手完整手牌、`RolloutScenario.privateState`、raw ParticleBank scenario/record/weight/seed、ParticleBank internals/source、HandPlanner、正式 `decideAiAction`、wall clock、`Math.random()`、global mutable state、worker id 或对象地址。
+
+`policyId` 必须进入独立的 evaluation/rollout configuration identity、configuration provenance、`RolloutResult` 或 aggregate diagnostics 中允许公开的 policy provenance，以及 offline/shadow evidence 的 configuration record。它不得进入 `canonicalReplayContextIdentity`、`rootIdentity`、`rootDigest`、ParticleBank snapshot identity、scenario identity、replicate identity、ply/decision identity、acting-seat identity、`randomDomain`、`semanticKey`、`CrnCoordinate` 或 CRN keyed value。root identity 描述同一个动作前游戏事实；`policyId` 描述评估配置，不是游戏事实。相同 root/scenario/replicate 下，不同编译内 policy 必须得到相同 CRN coordinates，以支持后续 policy ablation 和公平对照；`candidateId` 继续不得进入 CRN random coordinate。
 
 `CrnView` 没有共享 `next()` cursor；每次查询使用 semantic key。相同 scenario/replicate/ply/seat/domain/semantic key 在所有 candidate 中返回相同值。policy v1 枚举当前 seat-local legal actions，以 `policy-action:${canonicalActionIdentity(action)}` 查询 keyed value，按 value 降序、canonical action identity 升序选取；共同合法动作因此保留同一优先级。`replicateIdentity` 由 `replicateOrdinal` 的 canonical encoding 产生，改变 replicate 的独立 keyed stream，因此 replicateCount 有实际证据意义。candidate 数组位置和 candidateId 均不进入坐标。
 
@@ -263,7 +282,7 @@ root identity
 
 `randomDomain` 和 `semanticKey` 都必须使用 canonical encoding；它们不得包含 candidateId、candidate 数组位置、worker id、对象地址、Map 插入顺序、localeCompare 结果或绝对 seat number。相同坐标重复查询同一 semantic key 明确复用同一个值；需要独立随机事件必须使用不同的 canonical semantic key，碰撞测试必须区分“有意复用”与“意外碰撞”。有对应候选事件的随机事件使用相同 domain/key；candidate 特有且没有可比较对应物的事件不允许偷偷取得独有 random draw：若它能被描述为公共语义事件，使用固定的 `unpaired:<event-kind>` domain 和不含 candidate identity 的状态/ply semantic key；否则返回 typed kernel failure。`CrnView.value` 只返回有限的 normalized value（例如 `[0,1)`），没有 raw seed、seed getter、tape 或 draw cursor；keyed-value 测试必须证明无法反向暴露 raw seed。
 
-policy 只接收当前 acting seat 的 `SeatLocalObservation`：自己的 hand、公开 history、public hand counts、公开 last play、公开 finish order 和 game rank。不得读取 Room、原始对手手牌、其他座位的完整 privateState 或 ParticleScenario。
+固定的 `d2f-lightweight-v1` policy 只接收当前 acting seat 的 `SeatLocalObservation`、`RolloutPolicyDecisionContext` 和 `CrnView`：自己的 hand、公开 history、public hand counts、公开 last play、公开 finish order 和 game rank。不得读取 Room、原始对手手牌、其他座位的完整 privateState 或 ParticleScenario。
 
 ### 3.4 Team Utility 与 leaf evaluation
 
@@ -313,7 +332,7 @@ type LeafEvaluationFailure =
 
 type RolloutPolicyFailure =
   | { kind: "no-legal-action"; actingSeat: PublicSeat }
-  | { kind: "invalid-policy-context"; field: "ply" | "actingSeat" | "random" };
+  | { kind: "invalid-policy-context"; field: "ply" | "actingSeat" };
 
 type RolloutPolicyResult =
   | { ok: true; action: RolloutAction }
@@ -406,6 +425,7 @@ type RolloutResult = Readonly<{
   schemaVersion: "d2f-rollout-result-v2";
   mode: RolloutMode;
   formalExecutionAllowed: false;
+  policyId: RolloutPolicyId;
   rootDigest: string;
   candidateSummaries: readonly CandidateRolloutSummary[];
   ranking: readonly string[];
@@ -418,7 +438,8 @@ type RolloutResult = Readonly<{
 `candidateSummaries` 按 canonical candidate identity 稳定排列，`ranking` 只包含同一组唯一
 candidateId；所有 diagnostics 数值先通过上述 numeric domain 校验。`RolloutResult`、
 `RolloutScenarioSourceResult` 和所有 kernel records 都是 detached/internal contracts，不进入
-正式 evaluator、candidate filter、plan selector 或 Room transition。
+正式 evaluator、candidate filter、plan selector 或 Room transition；`policyId` 只是 configuration
+provenance，不改变 `rootDigest` 或 CRN coordinates。
 
 候选排序严格为：
 
@@ -437,7 +458,7 @@ root/scenario/candidate/replicate/random-domain identity 使用 canonical encodi
 
 入口在校验后冻结或深度只读投影 `RolloutRequest`、候选数组、ParticleBank public handle、Room public input 和 diagnostics sink；不能修改 Room、ParticleBank、candidates、public ledger 或调用者拥有的输入对象。成功只允许完整 coverage；低 ESS、场景不足、replicate 不足、coverage mismatch、budget failure、policy failure、telemetry failure 都丢弃整个 D2F result，原子回退原 evaluator。
 
-成功 diagnostics 只记录脱敏的 `effectiveSampleSize`、`acceptedScenarioCount`、`replicateCountPerScenario`、`expectedCompletedReplicateCount`、`completedReplicateCount`、`workUnitCount` 和 `coverage`。禁止 raw scenario、assignments、对手完整手牌、particle 私有 weight 明细和可还原 random seed。
+成功 diagnostics 只记录脱敏的 `policyId`、`effectiveSampleSize`、`acceptedScenarioCount`、`replicateCountPerScenario`、`expectedCompletedReplicateCount`、`completedReplicateCount`、`workUnitCount` 和 `coverage`。禁止 raw scenario、assignments、对手完整手牌、particle 私有 weight 明细和可还原 random seed。
 
 ## 5. Shadow 旁路契约
 
@@ -476,6 +497,7 @@ evidence 可记录 disagreement。
 ```ts
 type D2FShadowEvidence = Readonly<{
   schemaVersion: "d2f-shadow-v2";
+  policyId: RolloutPolicyId;
   baselineActionIdentity: string;
   d2fRecommendedActionIdentity: string | null;
   agreement: "agree" | "disagree" | "unavailable";
