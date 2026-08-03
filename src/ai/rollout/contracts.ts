@@ -330,6 +330,16 @@ const LEDGER_KEYS = [
 const SNAPSHOT_KEYS = [
   "gameId", "roundIdentity", "handIdentity", "initialLedgerHash", "lastAppliedEventIndex", "ledgerHash", "perspectiveSeat", "gameRank",
 ] as const;
+const PARTICLE_BANK_KEYS = [
+  "schemaVersion", "snapshot", "config", "particleCount", "effectiveSampleSize", "status", "summary",
+] as const;
+const PARTICLE_BANK_CONFIG_KEYS = [
+  "schemaVersion", "particleCount", "maxSamplingAttempts", "maxIndexDraws", "samplerConfigVersion", "likelihoodConfigHash",
+] as const;
+const PARTICLE_BANK_SUMMARY_KEYS = [
+  "status", "requestedParticleCount", "acceptedParticleCount", "samplingAttempts", "duplicateCount", "zeroWeightCount", "effectiveSampleSize", "failureReason",
+] as const;
+const PARTICLE_BANK_METADATA_TOLERANCE = 1e-9;
 const REQUEST_KEYS = [
   "schemaVersion", "mode", "formalExecutionAllowed", "rootIdentity", "scenarioSourceInput", "candidates", "budget", "limits",
   "evidenceRequirements", "riskPolicy", "policyId",
@@ -753,7 +763,9 @@ function isAggregateDiagnostics(value: unknown, candidateCount: number): value i
 }
 
 function cloneScenarioSourceInput(value: unknown): RolloutScenarioSourceInput | undefined {
-  if (!isPlainDataGraph(value) || !isRecord(value) || !hasExactKeys(value, SOURCE_INPUT_KEYS) || !isRecord(value.bank) || !isDeeplyFrozen(value.bank) || !isParticleSnapshotIdentity(value.bank.snapshot)) return undefined;
+  if (!isPlainDataGraph(value) || !isRecord(value) || !hasExactKeys(value, SOURCE_INPUT_KEYS)) return undefined;
+  const bank = getOwnDataProperty(value, "bank");
+  if (!isValidPublicParticleBank(bank)) return undefined;
   if (!RANKS.includes(value.gameRank as GameRank) || !isSeat(value.perspectiveSeat)) return undefined;
   const publicHistoryEvents = clonePublicHistoryEvents(value.publicHistoryEvents);
   const initialLedger = cloneHardPublicLedger(value.initialLedger);
@@ -762,7 +774,7 @@ function cloneScenarioSourceInput(value: unknown): RolloutScenarioSourceInput | 
   const publicState = clonePublicState(value.publicState);
   if (publicHistoryEvents === undefined || initialLedger === undefined || finalLedger === undefined || ownCurrentHand === undefined || publicState === undefined) return undefined;
   return deepFreeze({
-    bank: value.bank as ParticleBank,
+    bank: bank as ParticleBank,
     publicHistoryEvents,
     initialLedger,
     finalLedger,
@@ -940,6 +952,77 @@ function isParticleSnapshotIdentity(value: unknown): value is ParticleSnapshotId
     && isDigest(value.ledgerHash)
     && isSeat(value.perspectiveSeat)
     && RANKS.includes(value.gameRank as GameRank);
+}
+
+function isValidPublicParticleBank(value: unknown): value is ParticleBank {
+  try {
+    if (!isPlainDataGraph(value) || !isRecord(value) || !hasExactKeys(value, PARTICLE_BANK_KEYS) || !isDeeplyFrozen(value)) return false;
+    const bank = value as Record<string, unknown>;
+    const schemaVersion = getOwnDataProperty(bank, "schemaVersion");
+    const snapshot = getOwnDataProperty(bank, "snapshot");
+    const config = getOwnDataProperty(bank, "config");
+    const particleCount = getOwnDataProperty(bank, "particleCount");
+    const effectiveSampleSize = getOwnDataProperty(bank, "effectiveSampleSize");
+    const status = getOwnDataProperty(bank, "status");
+    const summary = getOwnDataProperty(bank, "summary");
+    if (schemaVersion !== "d2-particle-bank-v1"
+      || !isPositiveSafeInteger(particleCount)
+      || (status !== "ready" && status !== "degraded")
+      || typeof effectiveSampleSize !== "number"
+      || !Number.isFinite(effectiveSampleSize)
+      || !isParticleSnapshotIdentity(snapshot)
+      || !isValidPublicParticleBankConfig(config, particleCount)) return false;
+    return isValidPublicParticleBankSummary(summary, particleCount, effectiveSampleSize, status);
+  } catch {
+    return false;
+  }
+}
+
+function isValidPublicParticleBankConfig(value: unknown, particleCount: number): boolean {
+  if (!isPlainDataRecord(value, PARTICLE_BANK_CONFIG_KEYS, true)) return false;
+  const config = value as Record<string, unknown>;
+  return getOwnDataProperty(config, "schemaVersion") === "d2-particle-bank-config-identity-v1"
+    && getOwnDataProperty(config, "particleCount") === particleCount
+    && isPositiveSafeInteger(getOwnDataProperty(config, "particleCount"))
+    && isPositiveSafeInteger(getOwnDataProperty(config, "maxSamplingAttempts"))
+    && isPositiveSafeInteger(getOwnDataProperty(config, "maxIndexDraws"))
+    && isNonEmptyString(getOwnDataProperty(config, "samplerConfigVersion"))
+    && isDigest(getOwnDataProperty(config, "likelihoodConfigHash"));
+}
+
+function isValidPublicParticleBankSummary(value: unknown, particleCount: number, effectiveSampleSize: unknown, bankStatus: unknown): boolean {
+  if (!isPlainDataRecord(value, PARTICLE_BANK_SUMMARY_KEYS, false)) return false;
+  const summary = value as Record<string, unknown>;
+  const status = getOwnDataProperty(summary, "status");
+  const requestedParticleCount = getOwnDataProperty(summary, "requestedParticleCount");
+  const acceptedParticleCount = getOwnDataProperty(summary, "acceptedParticleCount");
+  const samplingAttempts = getOwnDataProperty(summary, "samplingAttempts");
+  const duplicateCount = getOwnDataProperty(summary, "duplicateCount");
+  const zeroWeightCount = getOwnDataProperty(summary, "zeroWeightCount");
+  const summaryEffectiveSampleSize = getOwnDataProperty(summary, "effectiveSampleSize");
+  const requiredSamplingAttempts = isNonNegativeSafeInteger(acceptedParticleCount) && isNonNegativeSafeInteger(duplicateCount)
+    ? safeSum([acceptedParticleCount, duplicateCount])
+    : undefined;
+  return (status === "ready" || status === "degraded")
+    && status === bankStatus
+    && requestedParticleCount === particleCount
+    && isPositiveSafeInteger(requestedParticleCount)
+    && isPositiveSafeInteger(acceptedParticleCount)
+    && acceptedParticleCount <= particleCount
+    && isNonNegativeSafeInteger(samplingAttempts)
+    && isNonNegativeSafeInteger(duplicateCount)
+    && isNonNegativeSafeInteger(zeroWeightCount)
+    && zeroWeightCount <= acceptedParticleCount
+    && requiredSamplingAttempts !== undefined
+    && samplingAttempts >= requiredSamplingAttempts
+    && typeof effectiveSampleSize === "number"
+    && Number.isFinite(effectiveSampleSize)
+    && effectiveSampleSize >= 1 - PARTICLE_BANK_METADATA_TOLERANCE
+    && effectiveSampleSize <= acceptedParticleCount + PARTICLE_BANK_METADATA_TOLERANCE
+    && typeof summaryEffectiveSampleSize === "number"
+    && Number.isFinite(summaryEffectiveSampleSize)
+    && Math.abs(effectiveSampleSize - summaryEffectiveSampleSize) <= PARTICLE_BANK_METADATA_TOLERANCE
+    && !Object.prototype.hasOwnProperty.call(summary, "failureReason");
 }
 
 function isHardPublicLedger(value: unknown): value is HardPublicLedger {

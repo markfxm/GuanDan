@@ -799,6 +799,130 @@ describe("D2F ParticleBank bridge", () => {
     }
   });
 
+  test("rejects a snapshot-only fake bank at the request boundary without retaining it", () => {
+    const base = makeRequestInput();
+    const snapshotOnlyBank = Object.freeze({ snapshot: base.scenarioSourceInput.bank.snapshot });
+    const input = {
+      ...base,
+      scenarioSourceInput: {
+        ...base.scenarioSourceInput,
+        bank: snapshotOnlyBank,
+      },
+    } as unknown;
+
+    let result: RolloutContractResult<RolloutRequest> | undefined;
+    expect(() => { result = createRolloutRequest(input); }).not.toThrow();
+    expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "scenarioSourceInput" } });
+    expect(result).not.toHaveProperty("value");
+  });
+
+  test("rejects inconsistent or hostile public ParticleBank metadata before request success", () => {
+    const base = makeRequestInput();
+    const bank = base.scenarioSourceInput.bank;
+    const makePublicBank = (
+      overrides: Readonly<Record<string, unknown>> = {},
+      summaryOverrides: Partial<PrivateParticleSummary> = {},
+    ): unknown => Object.freeze({
+      ...bank,
+      ...overrides,
+      summary: Object.freeze({ ...bank.summary, ...summaryOverrides }),
+    });
+    const missingStatus = (() => {
+      const { status: _status, ...value } = bank;
+      return Object.freeze(value);
+    })();
+    const nonEnumerableExtra = (() => {
+      const value = { ...bank } as Record<string, unknown>;
+      Object.defineProperty(value, "unknownMetadata", { configurable: true, enumerable: false, value: 1 });
+      return Object.freeze(value);
+    })();
+    const symbolExtra = (() => {
+      const value = { ...bank } as Record<PropertyKey, unknown>;
+      Object.defineProperty(value, Symbol("unknownMetadata"), { configurable: true, enumerable: true, value: 1 });
+      return Object.freeze(value);
+    })();
+    let getterCallCount = 0;
+    const accessorStatus = (() => {
+      const value = { ...bank } as Record<string, unknown>;
+      Object.defineProperty(value, "status", {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          getterCallCount += 1;
+          return "ready";
+        },
+      });
+      return Object.freeze(value);
+    })();
+    const customPrototype = (() => {
+      const value = Object.create({ inheritedMetadata: true }) as Record<string, unknown>;
+      Object.assign(value, bank);
+      return Object.freeze(value);
+    })();
+    const inconsistentSnapshot = Object.freeze({ ...bank.snapshot, gameId: "foreign-public-bank" });
+    const cases: readonly [string, unknown][] = [
+      ["missing required public key", missingStatus],
+      ["extra enumerable string key", makePublicBank({ unknownMetadata: 1 })],
+      ["extra non-enumerable string key", nonEnumerableExtra],
+      ["symbol key", symbolExtra],
+      ["accessor key", accessorStatus],
+      ["inherited custom prototype", customPrototype],
+      ["status and summary status conflict", makePublicBank({}, { status: "degraded" })],
+      ["accepted count exceeds particle count", makePublicBank({}, { acceptedParticleCount: 2 })],
+      ["requested count disagrees with particle count", makePublicBank({}, { requestedParticleCount: 2 })],
+      ["sampling attempts do not cover accepted and duplicate counts", makePublicBank({}, { samplingAttempts: 1, duplicateCount: 1 })],
+      ["public and summary ESS conflict", makePublicBank({ effectiveSampleSize: 0.5 }, { effectiveSampleSize: 1 })],
+      ["zero-weight count exceeds accepted count", makePublicBank({}, { zeroWeightCount: 2 })],
+      ["ready bank has failed summary", makePublicBank({}, { status: "failed", failureReason: "insufficient-particles" })],
+      ["snapshot public identity disagrees with ledger", makePublicBank({ snapshot: inconsistentSnapshot })],
+      ["NaN particle count", makePublicBank({ particleCount: Number.NaN })],
+      ["infinite particle count", makePublicBank({ particleCount: Number.POSITIVE_INFINITY })],
+      ["fractional particle count", makePublicBank({ particleCount: 1.5 })],
+      ["negative particle count", makePublicBank({ particleCount: -1 })],
+      ["unsafe particle count", makePublicBank({ particleCount: Number.MAX_SAFE_INTEGER + 1 })],
+    ];
+
+    for (const [label, candidateBank] of cases) {
+      const input = {
+        ...base,
+        scenarioSourceInput: { ...base.scenarioSourceInput, bank: candidateBank },
+      } as unknown;
+      let result: RolloutContractResult<RolloutRequest> | undefined;
+      expect(() => { result = createRolloutRequest(input); }, label).not.toThrow();
+      expect(result, label).toEqual({ ok: false, failure: { kind: "invalid-request", field: "scenarioSourceInput" } });
+      expect(result, label).not.toHaveProperty("value");
+    }
+    expect(getterCallCount).toBe(0);
+  });
+
+  test("accepts a valid registered bank while preserving its opaque handle identity", () => {
+    const input = makeRequestInput();
+    const originalBank = input.scenarioSourceInput.bank;
+    const result = createRolloutRequest(input);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.scenarioSourceInput.bank).toBe(originalBank);
+    expect(readParticleBankRolloutAccess(result.value.scenarioSourceInput.bank).ok).toBe(true);
+  });
+
+  test("leaves registration enforcement to the bridge for a public-shape-consistent unregistered bank", () => {
+    const base = makeRequestInput();
+    const unregisteredBank = Object.freeze({ ...base.scenarioSourceInput.bank });
+    const request = createRolloutRequest({
+      ...base,
+      scenarioSourceInput: { ...base.scenarioSourceInput, bank: unregisteredBank },
+    } as unknown);
+
+    expect(request.ok).toBe(true);
+    if (!request.ok) return;
+    expect(request.value.scenarioSourceInput.bank).toBe(unregisteredBank);
+    expect(createParticleScenarioSource(request.value.scenarioSourceInput)).toEqual({
+      ok: false,
+      failure: { kind: "fake-or-unknown-particle-bank" },
+    });
+  });
+
   test("returns a deep-isolated immutable projection for a known handle", () => {
     const bank = makeKnownBank();
     const first = readParticleBankRolloutAccess(bank);
