@@ -23,6 +23,8 @@ export type RolloutReplayContextIdentity = string;
 
 export type RolloutMode = "detached" | "offline" | "shadow";
 
+export type RolloutPolicyId = "d2f-lightweight-v1";
+
 export type RolloutAction = Readonly<
   | { type: "pass" }
   | { type: "play"; group: Readonly<CardGroup> }
@@ -123,7 +125,6 @@ export type RolloutReplicateInput = Readonly<{
   replicateIdentity: string;
   random: CrnView;
   validatedBudget: ValidatedRolloutBudget;
-  policy: RolloutPolicy;
 }>;
 
 export type CrnCoordinate = Readonly<{
@@ -141,11 +142,6 @@ export type RolloutPolicyDecisionContext = Readonly<{
   replicateIdentity: string;
   ply: number;
   actingSeat: PublicSeat;
-  random: CrnView;
-}>;
-
-export type RolloutPolicy = Readonly<{
-  chooseAction(observation: SeatLocalObservation, context: RolloutPolicyDecisionContext): RolloutPolicyResult;
 }>;
 
 export type TeamUtility = -3 | -2 | -1 | 1 | 2 | 3;
@@ -160,7 +156,7 @@ export type LeafEvaluationFailure =
 
 export type RolloutPolicyFailure =
   | { kind: "no-legal-action"; actingSeat: PublicSeat }
-  | { kind: "invalid-policy-context"; field: "ply" | "actingSeat" | "random" };
+  | { kind: "invalid-policy-context"; field: "ply" | "actingSeat" };
 
 export type RolloutKernelFailure =
   | { kind: "simulation-failed"; stage: "state-conservation" | "leaf-evaluation" | "replay" }
@@ -242,13 +238,14 @@ export type RolloutRequest = Readonly<{
   limits: RolloutBudgetLimits;
   evidenceRequirements: RolloutEvidenceRequirements;
   riskPolicy: RolloutRiskPolicy;
-  policy: RolloutPolicy;
+  policyId: RolloutPolicyId;
 }>;
 
 export type RolloutResult = Readonly<{
   schemaVersion: "d2f-rollout-result-v2";
   mode: RolloutMode;
   formalExecutionAllowed: false;
+  policyId: RolloutPolicyId;
   rootDigest: string;
   candidateSummaries: readonly CandidateRolloutSummary[];
   ranking: readonly string[];
@@ -263,6 +260,7 @@ export type RolloutExecutionResult = RolloutResultOutcome;
 
 export type D2FShadowEvidence = Readonly<{
   schemaVersion: "d2f-shadow-v2";
+  policyId: RolloutPolicyId;
   baselineActionIdentity: string;
   d2fRecommendedActionIdentity: string | null;
   agreement: "agree" | "disagree" | "unavailable";
@@ -325,6 +323,13 @@ const LEDGER_KEYS = [
 ] as const;
 const SNAPSHOT_KEYS = [
   "gameId", "roundIdentity", "handIdentity", "initialLedgerHash", "lastAppliedEventIndex", "ledgerHash", "perspectiveSeat", "gameRank",
+] as const;
+const REQUEST_KEYS = [
+  "schemaVersion", "mode", "formalExecutionAllowed", "rootIdentity", "scenarioSourceInput", "candidates", "budget", "limits",
+  "evidenceRequirements", "riskPolicy", "policyId",
+] as const;
+const RESULT_KEYS = [
+  "schemaVersion", "mode", "formalExecutionAllowed", "policyId", "rootDigest", "candidateSummaries", "ranking", "aggregateDiagnostics",
 ] as const;
 
 export function canonicalActionIdentity(action: RolloutAction): CanonicalCandidateIdentity {
@@ -465,12 +470,15 @@ export function validateRolloutRiskPolicy(input: unknown): RolloutContractResult
 }
 
 export function createRolloutRequest(input: unknown): RolloutContractResult<RolloutRequest> {
-  if (!isRecord(input) || input.schemaVersion !== "d2f-rollout-request-v2") return invalid("schemaVersion");
+  if (!isRecord(input)) return invalid("request");
+  const requestKeyError = exactEnvelopeKeyError(input, REQUEST_KEYS);
+  if (requestKeyError !== undefined) return invalid(requestKeyError);
+  if (input.policyId !== "d2f-lightweight-v1") return invalid("policyId");
+  if (input.schemaVersion !== "d2f-rollout-request-v2") return invalid("schemaVersion");
   if (!isRolloutMode(input.mode)) return invalid("mode");
   if (input.formalExecutionAllowed !== false) return invalid("formalExecutionAllowed");
   if (!isRootIdentity(input.rootIdentity)) return invalid("rootIdentity");
   if (!Array.isArray(input.candidates) || input.candidates.length === 0) return invalid("candidates");
-  if (!isRolloutPolicy(input.policy)) return invalid("policy");
 
   const sourceInput = cloneScenarioSourceInput(input.scenarioSourceInput);
   if (sourceInput === undefined) return invalid("scenarioSourceInput");
@@ -518,7 +526,6 @@ export function createRolloutRequest(input: unknown): RolloutContractResult<Roll
   const riskPolicy = validateRolloutRiskPolicy(input.riskPolicy);
   if (!riskPolicy.ok) return riskPolicy;
 
-  const policy = Object.freeze({ chooseAction: input.policy.chooseAction.bind(input.policy) }) as RolloutPolicy;
   return {
     ok: true,
     value: deepFreeze({
@@ -532,13 +539,17 @@ export function createRolloutRequest(input: unknown): RolloutContractResult<Roll
       limits: budget.value.limits,
       evidenceRequirements: evidence.value,
       riskPolicy: riskPolicy.value,
-      policy,
+      policyId: "d2f-lightweight-v1",
     }),
   };
 }
 
 export function createRolloutResult(input: unknown): RolloutContractResult<RolloutResult> {
-  if (!isRecord(input) || input.schemaVersion !== "d2f-rollout-result-v2" || !isRolloutMode(input.mode) || input.formalExecutionAllowed !== false || typeof input.rootDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.rootDigest)) return invalid("result");
+  if (!isRecord(input)) return invalid("result");
+  const resultKeyError = exactEnvelopeKeyError(input, RESULT_KEYS);
+  if (resultKeyError !== undefined) return invalid(resultKeyError);
+  if (input.policyId !== "d2f-lightweight-v1") return invalid("policyId");
+  if (input.schemaVersion !== "d2f-rollout-result-v2" || !isRolloutMode(input.mode) || input.formalExecutionAllowed !== false || typeof input.rootDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.rootDigest)) return invalid("result");
   if (!Array.isArray(input.candidateSummaries) || input.candidateSummaries.length === 0 || !Array.isArray(input.ranking) || !isRecord(input.aggregateDiagnostics)) return invalid("result");
 
   const summaries: CandidateRolloutSummary[] = [];
@@ -564,6 +575,7 @@ export function createRolloutResult(input: unknown): RolloutContractResult<Rollo
       schemaVersion: "d2f-rollout-result-v2",
       mode: input.mode,
       formalExecutionAllowed: false,
+      policyId: "d2f-lightweight-v1",
       rootDigest: input.rootDigest,
       candidateSummaries: summaries,
       ranking: [...input.ranking] as string[],
@@ -633,10 +645,6 @@ function isPublicState(value: unknown): value is RolloutPublicState {
   } catch {
     return false;
   }
-}
-
-function isRolloutPolicy(value: unknown): value is RolloutPolicy {
-  return isRecord(value) && typeof value.chooseAction === "function";
 }
 
 function clonePublicHistoryEvents(value: unknown): readonly PublicActionEvent[] | undefined {
@@ -1032,6 +1040,20 @@ function isRecord(value: unknown): value is Record<string, any> {
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const ownKeys = Reflect.ownKeys(value);
   return ownKeys.length === keys.length && ownKeys.every((key) => typeof key === "string" && keys.includes(key)) && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function exactEnvelopeKeyError(value: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== null && prototype !== Object.prototype) return "request";
+  if (prototype === Object.prototype) {
+    for (const inheritedKey of ["policy", "chooseAction", "policyFactory", "callback", "registry"] as const) {
+      if (inheritedKey in value && !Object.prototype.hasOwnProperty.call(value, inheritedKey)) return inheritedKey;
+    }
+  }
+  const ownKeys = Reflect.ownKeys(value);
+  const unexpected = ownKeys.find((key) => typeof key !== "string" || !keys.includes(key));
+  if (unexpected !== undefined) return typeof unexpected === "string" ? unexpected : "request";
+  return keys.find((key) => !Object.prototype.hasOwnProperty.call(value, key));
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {

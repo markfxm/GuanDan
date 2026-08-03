@@ -31,8 +31,8 @@ import type {
   RolloutAction,
   RolloutCandidate,
   RolloutFailure,
-  RolloutPolicy,
   RolloutPublicState,
+  RolloutReplicateInput,
   RolloutRequest,
   RolloutResult,
   RolloutScenarioSourceInput,
@@ -154,15 +154,6 @@ function makeSourceInput(bank?: ParticleBank, openingLeader: PublicSeat = 0): Ro
   };
 }
 
-function makePolicy(): RolloutPolicy {
-  return {
-    chooseAction: () => ({
-      ok: false,
-      failure: { kind: "no-legal-action", actingSeat: 0 },
-    }),
-  };
-}
-
 function makeRequestInput(): RolloutRequest {
   const action = makeAction();
   const scenarioSourceInput = makeSourceInput();
@@ -213,7 +204,7 @@ function makeRequestInput(): RolloutRequest {
       variancePenalty: 0.5,
       downsideRiskPenalty: 0.25,
     },
-    policy: makePolicy(),
+    policyId: "d2f-lightweight-v1",
   };
 }
 
@@ -237,6 +228,7 @@ function makeResultInput(): RolloutResult {
     schemaVersion: "d2f-rollout-result-v2",
     mode: "detached",
     formalExecutionAllowed: false,
+    policyId: "d2f-lightweight-v1",
     rootDigest: "a".repeat(64),
     candidateSummaries: [{
       candidateId,
@@ -331,6 +323,152 @@ describe("D2F ParticleBank bridge", () => {
     if (inputAction.type !== "play" || resultAction.type !== "play") throw new Error("PLAY_ACTION_EXPECTED");
     inputAction.group.cards.pop();
     expect(resultAction.group.cards).toHaveLength(1);
+  });
+
+  test("accepts the fixed policy id without an executable policy field", () => {
+    const legacyFreeInput = makeRequestInput() as unknown as Record<string, unknown>;
+    const result = createRolloutRequest({
+      ...legacyFreeInput,
+      policyId: "d2f-lightweight-v1",
+    } as unknown);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.policyId).toBe("d2f-lightweight-v1");
+    expect(result.value.rootIdentity).toBe(replayRoot(result.value.scenarioSourceInput));
+  });
+
+  test("rejects callback policy injection before executing or retaining the closure", () => {
+    let callbackCallCount = 0;
+    let capturedSecret = "initial-secret";
+    const injected = () => {
+      callbackCallCount += 1;
+      return capturedSecret;
+    };
+    const legacyFreeInput = makeRequestInput() as unknown as Record<string, unknown>;
+    const result = createRolloutRequest({
+      ...legacyFreeInput,
+      policyId: "d2f-lightweight-v1",
+      policy: { chooseAction: injected },
+    } as unknown);
+
+    capturedSecret = "mutated-secret";
+    expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "policy" } });
+    expect(callbackCallCount).toBe(0);
+  });
+
+  test("rejects every caller callback-shaped field with the fixed policy id", () => {
+    let callbackCallCount = 0;
+    const injected = () => {
+      callbackCallCount += 1;
+      return "captured";
+    };
+    const legacyFreeInput = makeRequestInput() as unknown as Record<string, unknown>;
+    const callbackFields: readonly [string, unknown][] = [
+      ["policy", { chooseAction: injected }],
+      ["chooseAction", injected],
+      ["policyFactory", injected],
+      ["callback", injected],
+      ["registry", { injected }],
+    ];
+
+    for (const [field, value] of callbackFields) {
+      const result = createRolloutRequest({
+        ...legacyFreeInput,
+        policyId: "d2f-lightweight-v1",
+        [field]: value,
+      } as unknown);
+      expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field } });
+    }
+    expect(callbackCallCount).toBe(0);
+  });
+
+  test("rejects inherited and symbol-key request injection", () => {
+    let callbackCallCount = 0;
+    const inheritedCallback = () => {
+      callbackCallCount += 1;
+      return "captured";
+    };
+    const base = makeRequestInput() as unknown as Record<string, unknown>;
+    const inherited = Object.assign(
+      Object.create({ policy: { chooseAction: inheritedCallback }, rawScenario: { hidden: true } }),
+      base,
+    );
+    const symbol = Symbol("callback");
+
+    expect(createRolloutRequest(inherited)).toEqual({ ok: false, failure: { kind: "invalid-request", field: "request" } });
+    expect(createRolloutRequest({ ...base, [symbol]: inheritedCallback })).toEqual({
+      ok: false,
+      failure: { kind: "invalid-request", field: "request" },
+    });
+    const { mode: _missingMode, ...missingMode } = base;
+    expect(createRolloutRequest(missingMode)).toEqual({ ok: false, failure: { kind: "invalid-request", field: "mode" } });
+    expect(callbackCallCount).toBe(0);
+  });
+
+  test("rejects every unsupported policy id with a typed failure", () => {
+    const input = makeRequestInput() as unknown as Record<string, unknown>;
+    for (const policyId of ["custom", "", 1, null, undefined]) {
+      expect(createRolloutRequest({ ...input, policyId })).toEqual({
+        ok: false,
+        failure: { kind: "invalid-request", field: "policyId" },
+      });
+    }
+  });
+
+  test("keeps the validated request recursively free of functions", () => {
+    const result = createRolloutRequest(makeRequestInput());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const seen = new WeakSet<object>();
+    const visit = (value: unknown): void => {
+      expect(typeof value).not.toBe("function");
+      if (value === null || typeof value !== "object" || seen.has(value)) return;
+      seen.add(value);
+      for (const child of Object.values(value)) visit(child);
+    };
+    visit(result.value);
+  });
+
+  test("keeps RolloutReplicateInput free of executable policy", () => {
+    const request = makeRequestInput();
+    const budget = validateRolloutBudget({ budget: request.budget, limits: request.limits });
+    expect(budget.ok).toBe(true);
+    if (!budget.ok) return;
+
+    const replicateInput: RolloutReplicateInput = {
+      candidate: request.candidates[0]!,
+      scenario: { scenarioIdentity: "scenario", normalizedWeight: 1, privateState: {} },
+      publicState: request.scenarioSourceInput.publicState,
+      replicateIdentity: "replicate",
+      random: { value: () => 0.5 },
+      validatedBudget: budget.value,
+    };
+    expect("policy" in replicateInput).toBe(false);
+  });
+
+  test("validates and preserves RolloutResult policy provenance without changing rootDigest", () => {
+    const input = makeResultInput();
+    const result = createRolloutResult(input);
+    expect(result).toEqual(expect.objectContaining({ ok: true }));
+    if (!result.ok) return;
+    expect(result.value.policyId).toBe("d2f-lightweight-v1");
+    expect(result.value.rootDigest).toBe(input.rootDigest);
+    expect(result.value).not.toBe(input);
+    expect(Object.isFrozen(result.value)).toBe(true);
+    expect(Object.isFrozen(result.value.candidateSummaries)).toBe(true);
+
+    const { policyId: _missingPolicyId, ...missingPolicyId } = input;
+    expect(createRolloutResult(missingPolicyId)).toEqual({ ok: false, failure: { kind: "invalid-request", field: "policyId" } });
+    expect(createRolloutResult({ ...input, policyId: "custom" })).toEqual({
+      ok: false,
+      failure: { kind: "invalid-request", field: "policyId" },
+    });
+    expect(createRolloutResult({ ...input, rawScenario: { hidden: true } } as unknown)).toEqual({
+      ok: false,
+      failure: { kind: "invalid-request", field: "rawScenario" },
+    });
   });
 
   test("rejects a noncanonical root identity even when it is non-empty", () => {
