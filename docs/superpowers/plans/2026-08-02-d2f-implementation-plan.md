@@ -1,6 +1,26 @@
 # D2F CRN Rollout Implementation Plan
 
-状态：DESIGN CORRECTED；TASK 1 POLICY GREEN PENDING；本轮仅计划纠偏，不创建实现、测试或 benchmark 文件，不开始代码 Task 1。
+状态：
+TASK 1 INDEPENDENT REVIEW BLOCKED
+TASK 1 REVIEW REMEDIATION DESIGN FROZEN
+TASK 1 REVIEW REMEDIATION CODE PENDING
+TASK 2 NOT STARTED
+
+## Task 1 Independent Review Findings — formal adjudication
+
+本轮独立复核不接受既有冻结报告作为证据；以下七项裁决是三份 D2F 文档共同的规范，代码尚未因本轮文档修订而被声明修复。
+
+| Finding | Formal ruling | Frozen remediation |
+| --- | --- | --- |
+| 1. 嵌套 budget/limits callback 逃逸 | **CONFIRMED — TASK 1 BLOCKER** | `RolloutBudget` 与 `RolloutBudgetLimits` 使用 exact own data keys、逐字段复制，拒绝额外 string/symbol/accessor/异常 prototype；不执行、bind、保存或返回 callback。 |
+| 2. 嵌套 symbol/accessor hostile input | **CONFIRMED — TASK 1 BLOCKER** | 所有 caller-controlled envelope 先经 `Reflect.ownKeys`、descriptor、prototype、函数值和数组边界检查，再进行 clone/hash/freeze；所有异常转 typed failure。 |
+| 3. `rootDigest` 可伪造 | **CONFIRMED — TASK 1 BLOCKER** | `createRolloutResult(requestInput, assemblyInput)` 重新验证 request；结果的 mode、formal flag、policy provenance、rootDigest 全部从 validated request 派生。 |
+| 4. `currentLastPlay` public consistency | **CONFIRMED WITH SCOPE LIMIT** | request factory 只验证 public-observable consistency；共享纯 public helper 与 source 共用；private replay 和完整 hidden-hand consistency 留给 `particleScenarioSource`。 |
+| 5. candidate-dependent decision identity | **CONFIRMED — TASK 1 ARCHITECTURE BLOCKER** | 固定名称 `CanonicalCandidateDecisionAssociationIdentity` / `canonicalCandidateDecisionAssociationIdentity`，仅作 candidate-local result/trace association，隔离 CRN。 |
+| 6. wildcard legality | **CONFIRMED — TASK 1 BLOCKER** | `canonicalActionIdentity` 保持 context-free；request factory 在已验证 game rank 下复用 `isHeartRankWild(card, gameRank)` 或等强度 engine helper 做 contextual legality。 |
+| 7. bridge scenario validation | **CONFIRMED AS DEFENSE-IN-DEPTH — TASK 1 IMPORTANT** | bridge 强化 registered handle、metadata、scenario identity、deal/transfer、weight/ESS、safe projection；source 保留 replay/public consistency 二次防线。 |
+
+以下详细条款、Task 1 计划和 Gate 必须与本裁决逐字同义；本状态表示 remediation code pending，不表示实现已完成。
 
 ## 0. 执行纪律与全局 allowlist
 
@@ -163,6 +183,33 @@ type CrnView = Readonly<{ value(semanticKey: string): number }>;
 
 declare function deriveRandomDomain(coordinate: CrnCoordinate): string;
 
+CRN 的冻结随机身份链严格为：
+
+```text
+root
++ scenario
++ replicate
++ ply
++ acting seat
++ random domain
++ semantic key
+-> deterministic keyed value
+```
+
+`candidateId` 不得进入 random domain、tape、key、draw 或任何 keyed value；candidate 顺序、worker 完成顺序、对象地址、Map 插入顺序、`localeCompare` 和绝对数组位置也不得进入 identity。policy 只能调用 `CrnView.value(semanticKey)`，不存在共享 mutable `next()` cursor，keyed value 不能反向暴露 raw seed。相同语义随机事件在所有 candidate 间复用同一 domain/key；candidate-specific 且没有可比较对应物的事件使用明确的 candidate-free `unpaired:<event-kind>` domain/key 规则，无法形成公共语义时返回 typed failure。重复 semantic key 明确复用同一随机值，domain/key collision 必须由测试覆盖并区分有意复用和意外碰撞。
+
+type CanonicalCandidateDecisionAssociationIdentity = string;
+
+declare function canonicalCandidateDecisionAssociationIdentity(
+  input: Readonly<{
+    rootIdentity: string;
+    candidateIdentity: string;
+    ply: number;
+    actingSeat: PublicSeat;
+    semanticKey: string;
+  }>,
+): CanonicalCandidateDecisionAssociationIdentity;
+
 type RolloutPolicyDecisionContext = Readonly<{
   replicateIdentity: string;
   ply: number;
@@ -226,6 +273,17 @@ type RolloutResult = Readonly<{
   ranking: readonly string[];
   aggregateDiagnostics: RolloutAggregateDiagnostics;
 }>;
+
+type RolloutResultAssemblyInput = Readonly<{
+  candidateSummaries: readonly CandidateRolloutSummary[];
+  ranking: readonly string[];
+  aggregateDiagnostics: RolloutAggregateDiagnostics;
+}>;
+
+declare function createRolloutResult(
+  requestInput: unknown,
+  assemblyInput: unknown,
+): RolloutContractResult<RolloutResult>;
 
 type D2FShadowEvidence = Readonly<{
   schemaVersion: "d2f-shadow-v2";
@@ -302,6 +360,10 @@ type RolloutFailure =
   | { kind: "coverage-mismatch"; expectedCoverage: number; actualCoverage: number }
   | { kind: "kernel-failed"; failure: RolloutKernelFailure }
   | { kind: "aggregation-failed"; failure: RolloutAggregationFailure };
+
+type RolloutContractResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; failure: RolloutFailure };
 ~~~
 
 所有 utility/leaf/policy/kernel/aggregation 返回值都是 ok: true 或 ok: false 的 discriminated union；失败 kind 使用 Design Spec 的精确 union，不使用共享的 count?: number。RolloutFailure 必须包含 effective-sample-size-too-low、insufficient-scenarios、insufficient-replicates、coverage-mismatch。候选数组位置和 candidateId 不得进入 CRN 坐标；baselineEvaluatorScore 不得进入 identity、random 或 policy。
@@ -314,6 +376,14 @@ source result、summary、aggregateDiagnostics 和 shadow evidence 的 NaN/Infin
 `candidateId === canonicalActionIdentity(action)`、`scenarioIdentity === canonical
 particleScenarioIdentity(...)`、`replicateIdentity === canonical(replicateOrdinal)`，而
 `rootDigest` 只从同一 pre-action replay context identity 派生。
+
+Task 1 review remediation 的 runtime boundary 固定为递归 plain data。request、candidate、action/group/card、budget、limits、evidence requirements、risk policy、scenario source input、public state、public history event、initial/final ledger、`seenEventHashes`、current trick、revealed transfer、recent action summary、snapshot identity、result assembly input、candidate summary 和 aggregate diagnostics 都必须在 spread、`structuredClone`、getter、canonical hash 或 freeze 前通过 `Reflect.ownKeys`、own data descriptor、允许 prototype、函数值和 array shape 检查。拒绝 getter/setter、symbol、未知 string key、异常 prototype、array expando、symbol/accessor index；dynamic dictionary 只接受 schema 定义的 string keys。Proxy trap 可能在检查时执行，trap 抛错必须转 typed failure，但不得声称检查 Proxy 能阻止 trap 本身执行；所有入口异常必须转 typed failure，不得 throw。
+
+`RolloutBudget` 和 `RolloutBudgetLimits` 必须 exact own keys；validated output 逐字段复制允许字段，不使用保留未知字段的 spread，callback 不执行、bind、保存或返回。`deepFreeze` 只能遍历 `Reflect.ownKeys`，或作用于已经安全逐字段 clone 的 graph，不得以 `Object.values` 作为 hostile-input 安全边界。ParticleBank public handle 是唯一 opaque handle 例外，不遍历 WeakMap internals，但仍检查 public metadata/frozen boundary，private bridge 单独验证 projection。
+
+`canonicalActionIdentity` 仅做 context-free action/card/wildcard canonical encoding；`createRolloutRequest` 在验证 `scenarioSourceInput.gameRank` 后复用 `isHeartRankWild(card, gameRank)` 或现有等强度 engine helper，拒绝普通牌、其他花色同 rank 和 joker wildcard，接受合法红心级牌，并在 contextual legality 后核对 candidateId。request identity 与 `particleScenarioSource` 共用同一不导出的纯 public consistency helper，验证 public history/ledger/current trick 的可证明 last-play seat、stable key、event index、card/group/pattern projection；不读 ParticleBank internals、不执行 private replay，完整 hidden-hand consistency 仍由 source replay 负责。
+
+`createRolloutResult` 必须重新验证 request；`RolloutResultAssemblyInput` 只含 candidateSummaries、ranking 和 aggregateDiagnostics，不能含 rootDigest/rootIdentity/policyId/mode/formalExecutionAllowed/replayContextIdentity。result 的 mode、literal false formal flag、policyId 和 rootDigest 由 validated request 派生，rootDigest 内部只由 validatedRequest.rootIdentity 计算。`rootDigestFromReplayContextIdentity(string)` 不再是可接受任意 64 位 hex 的 public production entry；不得使用 WeakSet/object identity 或 global mutable registry。
 
 ## 2. Task 1 — contracts / private bridge / replay-ready source
 
@@ -331,12 +401,54 @@ tests/ai/rollout/particleScenarioSource.test.ts
 
 禁止修改所有其他 src/ai/particles/**、Room、planning、public barrel、package 和配置。
 
-Task 1 只冻结 contracts 中的 identity 基础契约（`CrnCoordinate`、root/scenario/replicate
-identity 字段和 `candidateId === canonicalActionIdentity(action)` 的边界）、窄 bridge 与
-replay-ready source，并冻结纯数据的 `RolloutPolicyId`/`RolloutRequest.policyId` 输入边界。它不得创建或实现 `identity.ts`/`crn.ts` 的 deterministic stream、Team
-Utility、leaf、executable policy、kernel、aggregation、ranking、shadow observer 或 Room 接入；这些行为分别留给后序 Task。
+Task 1 只实现 contracts 中的 identity 基础契约（`CrnCoordinate`、root/scenario/replicate
+identity 字段、candidate-local association identity 和 `candidateId === canonicalActionIdentity(action)`
+的边界）、递归 hostile-input validation、contextual wildcard legality、共享 public consistency
+helper、result assembly revalidation、一个窄 ParticleBank bridge 和 replay-ready source。bridge
+只能形成 `particleBankRolloutAccess.ts -> particleScenarioSource.ts -> kernel-isolated state ->
+seat-local observation -> policy` 的唯一链；bridge 最低保证包括 registered handle、合法 public
+metadata、非空唯一 particleId、scenario/deal/transfer schema、particleScenarioIdentity、weight
+sum、ESS、逐字段 clone/freeze 和已有 `fake-or-unknown-particle-bank` 或
+`{ kind: "scenario-source-failed"; reason: "private-state-invalid" }` typed failure，source 必须保留 replay/public
+consistency 二次验证。Task 1 不得创建或实现 `identity.ts`/`crn.ts` 的 deterministic stream、Team
+Utility、leaf、executable policy、kernel、aggregation、ranking、shadow observer 或 Room 接入；这些行为分别留给后序 Task。Task 1 不得使用通用 validation framework、registry 或扩大 public barrel。
 
 ### TDD actions
+
+#### Independent review remediation RED matrix
+
+以下十六个 RED 必须分别运行在真实 production entry 上；每个 RED 先记录当前缺失行为，再用同一命令在最小 production 修复后转 GREEN。fixture、import failure、环境缺失和 timeout 都不能充当预期失败原因。
+
+| # | Exact RED test and production entry | Expected missing behavior before the minimal fix |
+| ---: | --- | --- |
+| 1 | `particleBankRolloutBoundary.test.ts` 调用 `createRolloutRequest`，把 callback 放入 `budget` | `validateRolloutBudget` 非 exact-key 或 spread 让 function 进入 success request；目标是 typed `invalid-budget` 且 callback 未执行/bind/保存/返回。 |
+| 2 | `particleBankRolloutBoundary.test.ts` 调用 `createRolloutRequest`，把 symbol key 或 accessor 放入 `limits` | nested symbol/accessor 未被拒绝或 getter 被读取；目标是 typed failure 且无 function 进入 validated request。 |
+| 3 | `particleBankRolloutBoundary.test.ts` 调用 `createRolloutRequest`，把 function 放入 nested ledger `seenEventHashes[symbol]` | nested ledger dynamic dictionary 逃逸 unknown symbol/function；目标是 schema failure，不产生 success root。 |
+| 4 | `particleBankRolloutBoundary.test.ts` 以带计数 getter 的真实 request input 调用 `createRolloutRequest` | getter 在 validation、clone 或 hash 期间被执行；目标是先拒绝 accessor descriptor，getter 计数保持为零并返回 typed failure；Proxy trap 若抛错只转 typed failure。 |
+| 5 | `particleBankRolloutBoundary.test.ts` 通过 `createRolloutRequest` 覆盖 candidate/action/group/card/evidence/risk 的 extra/accessor 输入 | 某个 nested envelope 仍接受未知字段、accessor 或 function；目标是逐层 typed failure。 |
+| 6 | `particleScenarioSource.test.ts` 用真实 `createRolloutResult(requestInput, assemblyInput)` 传入任意 64 位 hex `rootDigest` | caller digest 能直接进入 success；目标是 result factory 忽略/拒绝 assembly digest，并只从 revalidated request 派生。 |
+| 7 | `particleScenarioSource.test.ts` 用真实 result factory 传入携带 root/policy/mode/formal flag 字段的 assembly input | assembly boundary 接受 caller provenance 或可配置 formal flag；目标是 schema failure 或 typed result failure，success 字段仍来自 validated request。 |
+| 8 | `particleScenarioSource.test.ts` 通过 `createRolloutRequest` 提交 last-play seat、stable key、public event、trick index mismatch | request 在 root identity 前未证明 public consistency；目标是 typed public-consistency failure，且不越界验证 hidden hands。 |
+| 9 | `particleBankRolloutBoundary.test.ts` 对真实 symbol/import 图执行 AST gate，检查 `canonicalCandidateDecisionAssociationIdentity` 与 `deriveRandomDomain`/`CrnView` 的隔离 | candidate association identity 可被 random API 导入，或仍暴露通用 `canonicalDecisionIdentity`；目标是 symbol gate failure。 |
+| 10 | `particleBankRolloutBoundary.test.ts` 通过真实 `createRolloutRequest` 把普通牌标为 wildcard | context-free action identity 被误当成 contextual legality，普通牌错误通过；目标是 typed wildcard-legality failure。 |
+| 11 | `particleBankRolloutBoundary.test.ts` 通过真实 `createRolloutRequest` 使用合法当前 game rank 红心级牌 wildcard | request 尚未执行 engine-context legality，或合法 wildcard 被误拒绝；目标是合法输入 success。 |
+| 12 | `particleBankRolloutBoundary.test.ts` 调用真实 `readParticleBankRolloutAccess`，使用已登记但 malformed scenario | bridge success 语义过弱，malformed scenario 被接受；目标是已有 `fake-or-unknown-particle-bank` 或 `{ kind: "scenario-source-failed"; reason: "private-state-invalid" }` typed failure。 |
+| 13 | `particleBankRolloutBoundary.test.ts` 调用真实 bridge，构造 `particleId !== particleScenarioIdentity(bank.snapshot, scenario)` | bridge 未锁定 particle/scenario identity；目标是 typed identity failure。 |
+| 14 | `particleBankRolloutBoundary.test.ts` 调用真实 bridge，构造 weight sum 超 tolerance 或 ESS 超 scenario count | bridge 未验证 conservation/ESS；目标是 typed weight/ESS failure。 |
+| 15 | `particleScenarioSource.test.ts` 通过真实 bridge/source entry 传入 hostile nested accessor | bridge/source 在 schema 检查前执行 caller accessor，或异常 throw 逃逸；目标是 accessor 未执行且 typed failure。 |
+| 16 | `particleBankRolloutBoundary.test.ts` 与 `particleScenarioSource.test.ts` 对 request/result/bridge/source 的 hostile input 统一断言 `RolloutContractResult` failure | 任一入口 throw、返回 partial success 或暴露 raw failure；目标是所有 failure 为 discriminated typed union 且不 throw。 |
+
+固定 RED→GREEN 协议：每个条目先用真实入口和最小 hostile input 记录预期行为缺失；确认失败不是 fixture、import 或环境错误；只完成对应的最小 production 修复后，用完全相同命令转 GREEN；不得先写完全部 production 再补测试。correctness tests 与 benchmark timing 严格分离。
+
+Task 1 remediation 的最小实现顺序、文件和 commit 边界固定如下：
+
+| Implementation slice | Exact production/test paths | RED and missing behavior | Minimal implementation and verification |
+| --- | --- | --- | --- |
+| Contracts/data boundary | `src/ai/rollout/contracts.ts`; `tests/ai/rollout/particleBankRolloutBoundary.test.ts`; `tests/ai/rollout/particleScenarioSource.test.ts` | RED 1–11、16；嵌套未知字段、accessor、symbol/function、伪造 digest、public last-play mismatch 或 wildcard legality 仍可进入 success | 先加入非导出 plain-data/descriptor/prototype/array checks、exact budget/limits field-by-field clone、共享 public consistency helper、engine wildcard legality 和两参数 result factory；使用两份 exact test paths 的 focused Vitest 命令转 GREEN；不创建通用 validator/registry。 |
+| Private bridge projection | `src/ai/particles/particleBankRolloutAccess.ts`; `tests/ai/rollout/particleBankRolloutBoundary.test.ts` | RED 12–14；registered malformed scenario、identity mismatch、weight/ESS 不一致仍可返回 bridge success | 只在唯一 bridge 中读取 private internals，复用 `particleScenarioIdentity`/`validateCanonicalInitialDeal`，逐字段 clone/freeze projection 并返回已有 `fake-or-unknown-particle-bank` 或 `{ kind: "scenario-source-failed"; reason: "private-state-invalid" }` failure；用 bridge focused command 转 GREEN。 |
+| Source defense-in-depth | `src/ai/rollout/particleScenarioSource.ts`; `tests/ai/rollout/particleScenarioSource.test.ts` | RED 15；source/bridge hostile accessor 可执行或 throw 逃逸，source 二次 public/replay validation 缺失 | 保留 source 的 canonical identity、weight、replay 和 public consistency 二次验证，统一捕获异常为 typed failure；用 source focused command 转 GREEN。 |
+
+上述三个 slice 只能作为同一个 Task 1 implementation commit 的连续 RED→GREEN 过程；完成一 slice 后不得实现 Task 2–9 内容。Task 1 最终验证只检查这五个 allowlisted paths、`git diff --check`、focused correctness 和 AST/symbol import/export gate；不运行 benchmark，不修改 production 外的路径。
 
 - [ ] 只读确认 readParticleBankInternals 返回 ParticleRecord、ParticleScenario 和 normalized weight，并记录真实 replayParticleScenario 参数。
 - [ ] 创建测试骨架 describe("D2F ParticleBank bridge")，加入 it("rejects a fake ParticleBank handle before reading records")。
@@ -345,10 +457,9 @@ Utility、leaf、executable policy、kernel、aggregation、ranking、shadow obs
 - [ ] 加入 identity contract assertion：`CrnCoordinate` 的 root/scenario/replicate/ply/seat/domain 字段、canonical candidate identity 和 replay-context identity 的字段存在，但不得提供 `next()`、raw seed 或 candidate-dependent draw API。
 - [ ] 加入 it("builds replay-ready source from bank plus public history/ledger context")，构造包含 bank、publicHistoryEvents、initialLedger、finalLedger、gameRank、perspectiveSeat、ownCurrentHand、publicState 的 RolloutScenarioSourceInput。
 - [ ] 最小实现窄桥接，校验 fake/unknown handle、ledger hash/index、game rank、perspective seat 和己方 hand，再按真实 replay API 构造 RolloutScenario；只返回不可变私有投影。
+- [ ] Bridge RED/GREEN 逐项覆盖 registered handle/public metadata、records 非空、particleId 非空唯一、scenario/deal/hidden transfer schema、particleId 与 `particleScenarioIdentity`、normalizedWeight、weight sum tolerance、ESS 上限和 field-by-field recursive freeze；source 不因 bridge 增强而删除 replay/public consistency 防线。
 - [ ] 加入 it("does not expose raw scenario, four-seat hands, weight detail, or seed in public diagnostics")。
-- [ ] PolicyId remediation RED：在 `tests/ai/rollout/particleBankRolloutBoundary.test.ts` 保留并运行 callback/closure 注入探针；预期旧 `RolloutRequest.policy` 接口会错误接受 callback，失败原因必须是目标 policy 输入边界仍为 executable function，而不是导入或环境错误。
-- [ ] PolicyId remediation 最小实现：将 request 字段替换为 `policyId: RolloutPolicyId`，只接受 `"d2f-lightweight-v1"`，拒绝 `policy`、`chooseAction`、`policyFactory`、`callback` 和未知字段；不执行、bind、clone、freeze 或保存 caller function。
-- [ ] PolicyId remediation GREEN：重复运行同一 focused test，确认合法 literal 成功、任意 policy id/callback/closure/函数递归可达性失败，并保留 typed failure；Task 4 再验证 internal factory。
+- [ ] PolicyId boundary GREEN：重复运行同一 focused test，确认合法 literal `"d2f-lightweight-v1"` 成功，任意 policy id、未知 policy 字段、callback/closure/function 递归可达性失败；不执行、bind、clone、freeze 或保存 caller function，Task 4 只验证 internal factory。
 - [ ] GREEN：重复执行两个 focused commands，分别得到所有测试通过，且 policy/diagnostics 不可接收 privateState。
 - [ ] 回归 npx vitest run tests/ai/particles --exclude "**/.worktrees/**" --reporter=dot；验证不少于 10 files / 136 tests，不能减少既有断言。
 - [ ] 运行 npx tsc --noEmit、仓库既有 build command、git diff --check；审计输入和 ParticleBank 未被修改。
@@ -413,6 +524,7 @@ tests/ai/rollout/crnInvariance.test.ts
 - [ ] 加入 candidate-specific/unpaired event test：有对应事件的 candidates 复用相同 domain/key；无对应物时只能使用不含 candidateId 的 `unpaired:<event-kind>` 规则，无法形成公共语义时返回 typed kernel failure。
 - [ ] 加入 duplicate-key/collision test：同一 coordinate 重复查询同一 semantic key 必须复用同一值；不同事件使用不同 canonical key；domain/key 编码碰撞被拒绝或显式区分。
 - [ ] 加入 canonical-source prohibition test：semantic key/domain 不依赖对象地址、Map 插入顺序、localeCompare、绝对 seat number 或绝对 candidate 数组位置；`CrnView.value` 不能暴露 raw seed/tape/cursor。
+- [ ] 加入 AST/symbol isolation RED/GREEN：只允许 `canonicalCandidateDecisionAssociationIdentity` 用于 candidate-local result/trace association；`deriveRandomDomain`、`CrnCoordinate`、`CrnView.value` 和 keyed-value call chain 不得 import 或接收该 identity，也不得恢复通用 `canonicalDecisionIdentity`。
 - [ ] 最小实现 canonical identity encoding、候选无关 deriveRandomDomain(coordinate) 和无 cursor 的 CrnView.value(semanticKey)；不得使用 Math.random、object enumeration 或 shared mutable RNG。
 - [ ] GREEN：focused CRN tests 全通过；回归 Task 1–2。
 - [ ] 运行 npx tsc --noEmit、build、git diff --check；扫描 candidateId 不在 random domain/tape/key/draw 调用链。
@@ -484,7 +596,7 @@ tests/ai/rollout/ranking.test.ts
 - [ ] 加入 it("computes riskAdjustedUtility with the frozen variance and downside formula")。
 - [ ] 加入 it("orders unrounded risk adjusted utility, expected utility, baseline score, then UTF-16 candidateId")。
 - [ ] 加入 it("does not change ranking when public values are rounded to six digits")。
-- [ ] 加入 numeric/result-boundary tests：非 finite utility/aggregate、非法 count/weight、rootDigest mismatch、summary/ranking candidate set mismatch 都返回 exact typed failure，不产生 public `aggregateDiagnostics`。
+- [ ] 加入 numeric/result-boundary tests：非 finite utility/aggregate、非法 count/weight、任意 caller `rootDigest`、assembly 中 root/policy/mode/formal flag 字段、summary/ranking candidate set mismatch 都通过真实两参数 result factory 返回 exact typed failure，不产生伪造 success 或 public `aggregateDiagnostics`。
 - [ ] 最小实现 pre-candidate evidence validation、complete scenario/replicate coverage check、weighted expected/variance/risk、risk formula 和未舍入排序；只有最后一步才生成 RolloutResult。
 - [ ] GREEN：focused evidence/aggregation/ranking tests 全通过；回归 Task 1–4。
 - [ ] 运行 npx tsc --noEmit、build、git diff --check；审计 RolloutResult 只使用 rootDigest，且 aggregateDiagnostics 字段完全一致。

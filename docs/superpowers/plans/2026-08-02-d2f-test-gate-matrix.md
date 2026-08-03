@@ -1,6 +1,26 @@
 # D2F Test Gate Matrix
 
-状态：DESIGN CORRECTED；TASK 1 POLICY GREEN PENDING；本轮只修改文档，不创建测试、benchmark 或 production 文件。
+状态：
+TASK 1 INDEPENDENT REVIEW BLOCKED
+TASK 1 REVIEW REMEDIATION DESIGN FROZEN
+TASK 1 REVIEW REMEDIATION CODE PENDING
+TASK 2 NOT STARTED
+
+## Task 1 Independent Review Findings — formal adjudication
+
+本轮独立复核不接受既有冻结报告作为证据；以下七项裁决是三份 D2F 文档共同的规范，代码尚未因本轮文档修订而被声明修复。
+
+| Finding | Formal ruling | Frozen remediation |
+| --- | --- | --- |
+| 1. 嵌套 budget/limits callback 逃逸 | **CONFIRMED — TASK 1 BLOCKER** | `RolloutBudget` 与 `RolloutBudgetLimits` 使用 exact own data keys、逐字段复制，拒绝额外 string/symbol/accessor/异常 prototype；不执行、bind、保存或返回 callback。 |
+| 2. 嵌套 symbol/accessor hostile input | **CONFIRMED — TASK 1 BLOCKER** | 所有 caller-controlled envelope 先经 `Reflect.ownKeys`、descriptor、prototype、函数值和数组边界检查，再进行 clone/hash/freeze；所有异常转 typed failure。 |
+| 3. `rootDigest` 可伪造 | **CONFIRMED — TASK 1 BLOCKER** | `createRolloutResult(requestInput, assemblyInput)` 重新验证 request；结果的 mode、formal flag、policy provenance、rootDigest 全部从 validated request 派生。 |
+| 4. `currentLastPlay` public consistency | **CONFIRMED WITH SCOPE LIMIT** | request factory 只验证 public-observable consistency；共享纯 public helper 与 source 共用；private replay 和完整 hidden-hand consistency 留给 `particleScenarioSource`。 |
+| 5. candidate-dependent decision identity | **CONFIRMED — TASK 1 ARCHITECTURE BLOCKER** | 固定名称 `CanonicalCandidateDecisionAssociationIdentity` / `canonicalCandidateDecisionAssociationIdentity`，仅作 candidate-local result/trace association，隔离 CRN。 |
+| 6. wildcard legality | **CONFIRMED — TASK 1 BLOCKER** | `canonicalActionIdentity` 保持 context-free；request factory 在已验证 game rank 下复用 `isHeartRankWild(card, gameRank)` 或等强度 engine helper 做 contextual legality。 |
+| 7. bridge scenario validation | **CONFIRMED AS DEFENSE-IN-DEPTH — TASK 1 IMPORTANT** | bridge 强化 registered handle、metadata、scenario identity、deal/transfer、weight/ESS、safe projection；source 保留 replay/public consistency 二次防线。 |
+
+以下详细条款、Task 1 计划和 Gate 必须与本裁决逐字同义；本状态表示 remediation code pending，不表示实现已完成。
 
 ## 1. Gate policy
 
@@ -152,6 +172,18 @@ type CrnCoordinate = Readonly<{
 
 type CrnView = Readonly<{ value(semanticKey: string): number }>;
 
+type CanonicalCandidateDecisionAssociationIdentity = string;
+
+declare function canonicalCandidateDecisionAssociationIdentity(
+  input: Readonly<{
+    rootIdentity: string;
+    candidateIdentity: string;
+    ply: number;
+    actingSeat: PublicSeat;
+    semanticKey: string;
+  }>,
+): CanonicalCandidateDecisionAssociationIdentity;
+
 declare function deriveRandomDomain(coordinate: CrnCoordinate): string;
 
 type RolloutPolicyDecisionContext = Readonly<{
@@ -238,6 +270,17 @@ type RolloutResult = Readonly<{
   aggregateDiagnostics: RolloutAggregateDiagnostics;
 }>;
 
+type RolloutResultAssemblyInput = Readonly<{
+  candidateSummaries: readonly CandidateRolloutSummary[];
+  ranking: readonly string[];
+  aggregateDiagnostics: RolloutAggregateDiagnostics;
+}>;
+
+declare function createRolloutResult(
+  requestInput: unknown,
+  assemblyInput: unknown,
+): RolloutContractResult<RolloutResult>;
+
 type D2FShadowEvidence = Readonly<{
   schemaVersion: "d2f-shadow-v2";
   policyId: RolloutPolicyId;
@@ -313,6 +356,10 @@ type RolloutFailure =
   | { kind: "coverage-mismatch"; expectedCoverage: number; actualCoverage: number }
   | { kind: "kernel-failed"; failure: RolloutKernelFailure }
   | { kind: "aggregation-failed"; failure: RolloutAggregationFailure };
+
+type RolloutContractResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; failure: RolloutFailure };
 ~~~
 
 Interface gate also checks the runtime numeric domain: measures and scores are finite; counts,
@@ -323,6 +370,45 @@ duplicate identity and missing identity must produce an existing typed failure r
 `candidateId === canonicalActionIdentity(action)`, `scenarioIdentity` is the canonical particle
 scenario identity, `replicateIdentity` is canonical replicate-ordinal encoding, and `rootDigest`
 comes only from the same pre-action replay-context identity.
+
+Interface gate additionally freezes a recursive plain-data boundary. Before any spread,
+`structuredClone`, property getter, canonical hash or freeze, every caller-controlled request,
+candidate, action/group/card, budget, limits, evidence, risk, scenario source input, public state,
+public event, initial/final ledger, `seenEventHashes`, current trick, revealed transfer, recent action
+summary, snapshot identity, result assembly input, candidate summary and aggregate diagnostics must be
+checked with `Reflect.ownKeys`, own data descriptors and an allowed ordinary prototype. Symbols,
+accessors, functions, extra string keys, abnormal prototypes, array expandos and symbol/accessor indices
+fail; dynamic dictionaries accept only schema-defined string keys. `RolloutBudget` and
+`RolloutBudgetLimits` use exact own data keys and field-by-field output copies, never an unknown-field
+preserving spread. Proxy trap errors become typed failures; the gate does not claim that inspecting a
+Proxy prevents the trap from executing. `deepFreeze` uses `Reflect.ownKeys` or only a safe cloned graph,
+never `Object.values` as the hostile-input boundary. The opaque ParticleBank handle is the sole
+exception to traversing caller data: its public metadata/frozen boundary is checked and its private
+projection is checked separately by the bridge.
+
+The result factory gate uses exactly the two-argument `createRolloutResult(requestInput, assemblyInput)`
+signature above. It revalidates request input, accepts no rootDigest/rootIdentity/policyId/mode/
+formalExecutionAllowed/replayContextIdentity in assembly input, derives mode, literal false formal flag,
+policyId and rootDigest from the validated request, and computes rootDigest internally from the validated
+rootIdentity. An arbitrary 64-bit hex supplied by a caller cannot produce success. A raw
+`rootDigestFromReplayContextIdentity(string)` entry is module-private or removed from public production;
+WeakSet/object identity and global mutable registries are forbidden. Schema remains
+`d2f-rollout-result-v2`.
+
+The request identity gate and `particleScenarioSource` share one non-exported pure public-consistency
+helper. Before root identity, it proves the public-observable currentLastPlay/currentLastPlaySeat pair,
+seat versus final-ledger current trick, public last-play stable/semantic key, final public play event
+seat/trick index, and public card/group/pattern projection using existing canonical public-event/ledger
+helpers. It does not read ParticleBank internals or run private replay; source replay remains the final
+hidden-hand semantic boundary. `canonicalActionIdentity` is context-free; request validation reuses
+`isHeartRankWild(card, gameRank)` or an equally strong engine helper after validating gameRank. Ordinary
+cards, other-suit same-rank cards and jokers are invalid wildcards; legal current red-heart rank cards
+pass, and candidateId is checked after contextual legality.
+
+`CanonicalCandidateDecisionAssociationIdentity` is candidate-local result/trace association only. It
+must not be imported by `deriveRandomDomain`, `CrnCoordinate`, `CrnView` or keyed-value code, and the
+generic `canonicalDecisionIdentity` name is not a valid interface. The AST/symbol gate checks both
+association naming and CRN isolation.
 
 ## 1.2 PolicyId ownership and identity gate
 
@@ -361,6 +447,53 @@ The focused RED/GREEN gate must prove all of the following:
 4. The Task 4 policy test proves the fixed factory and seat-local inputs. The AST/symbol test rejects
    public executable-policy exports, `.bind`, dynamic policy registries, Room/HandPlanner/Particle
    internals/source access and `Math.random()`/wall-clock policy semantics.
+
+## 1.3 Task 1 independent review remediation gates
+
+Task 1 的 production/test allowlist 只有：
+
+```text
+src/ai/rollout/contracts.ts
+src/ai/rollout/particleScenarioSource.ts
+src/ai/particles/particleBankRolloutAccess.ts
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+tests/ai/rollout/particleScenarioSource.test.ts
+```
+
+如需 public consistency helper，必须先作为 `contracts.ts` 内不导出的纯函数存在。不得创建通用 validation framework、registry 或新的 public barrel；不得修改 `src/game/room.ts`、`src/ai/aiDecisionEngine.ts`、`src/ai/planning/**`、package/package-lock、配置或 Task 2–9 路径。Task 1 不实现 Team Utility、CRN stream、kernel、aggregation 或 Shadow integration。
+
+| Finding | RED entry and exact proof | GREEN acceptance |
+| --- | --- | --- |
+| 1. budget/limits callback escape | `createRolloutRequest` with callback in budget and symbol/accessor/extra key in limits | exact own data keys；逐字段复制；callback 未执行、bind、保存、返回；typed failure。 |
+| 2. nested hostile input | `createRolloutRequest` with hostile candidate/action/group/card/evidence/risk/ledger/source/public structures and accessor probes | `Reflect.ownKeys`/descriptor/prototype/array checks occur before spread/clone/hash/freeze；所有异常 typed failure、不 throw。 |
+| 3. result digest spoof | two-argument `createRolloutResult` with arbitrary 64-bit hex and provenance fields in assembly | only revalidated request can assemble success；mode/formal flag/policyId/rootDigest derived internally；schema remains v2。 |
+| 4. public currentLastPlay consistency | request with paired-seat, ledger trick, stable-key, event-index or public group/pattern mismatch | shared pure helper rejects only disproven public facts；request does not inspect private replay；source retains complete replay boundary。 |
+| 5. candidate association identity | AST/symbol inspection of real imports and exports | only `canonicalCandidateDecisionAssociationIdentity` exists for local association；no import into random domain/coordinate/view/keyed value；no generic old interface。 |
+| 6. wildcard legality | request with ordinary card and legal current-game-rank red-heart card as wildcard | ordinary/other-suit same-rank/joker rejects; legal red-heart rank passes; engine helper is reused; candidateId checked after contextual legality。 |
+| 7. bridge validation | registered malformed scenario, identity mismatch, weight/ESS mismatch and hostile accessor through real bridge/source | one private bridge only；registered handle/public metadata, records, scenario/deal/transfer, particle identity, weights, ESS and immutable projection all pass; existing `fake-or-unknown-particle-bank` or `{ kind: "scenario-source-failed"; reason: "private-state-invalid" }` typed failure；source double validation remains。 |
+
+### 1.3.1 Required independent RED→GREEN cases
+
+| # | Exact test path and production entry | RED expectation before the minimal fix |
+| ---: | --- | --- |
+| 1 | `particleBankRolloutBoundary.test.ts` → `createRolloutRequest` with `budget.callback` | callback enters success request because budget validator is not exact-key or spread retains it。 |
+| 2 | `particleBankRolloutBoundary.test.ts` → `createRolloutRequest` with `limits[symbol]` or accessor | nested symbol/accessor escapes or getter is read。 |
+| 3 | `particleBankRolloutBoundary.test.ts` → `createRolloutRequest` with `seenEventHashes[symbol] = function` | nested ledger dictionary accepts an untyped function/symbol。 |
+| 4 | `particleBankRolloutBoundary.test.ts` → `createRolloutRequest` with a getter probe | validation/clone/hash executes the getter instead of rejecting the descriptor；GREEN requires zero getter executions and typed failure, with Proxy trap errors only caught as typed failure。 |
+| 5 | `particleBankRolloutBoundary.test.ts` → `createRolloutRequest` with nested candidate/action/card/evidence/risk extra/accessor | one nested envelope accepts unknown or accessor data。 |
+| 6 | `particleScenarioSource.test.ts` → `createRolloutResult(requestInput, assemblyInput)` with arbitrary rootDigest | caller-supplied digest reaches success。 |
+| 7 | `particleScenarioSource.test.ts` → result factory with root/policy/mode/formal fields in assembly | assembly caller controls provenance or formal execution flag。 |
+| 8 | `particleScenarioSource.test.ts` → `createRolloutRequest` with last-play seat/stable-key/public-event mismatch | root identity is generated without proving public consistency。 |
+| 9 | `particleBankRolloutBoundary.test.ts` → AST/symbol gate over real production import graph | candidate association identity is importable by random APIs or generic decision identity remains valid。 |
+| 10 | `particleBankRolloutBoundary.test.ts` → `createRolloutRequest` with ordinary-card wildcard | ordinary card is incorrectly accepted by context-free identity。 |
+| 11 | `particleBankRolloutBoundary.test.ts` → `createRolloutRequest` with legal red-heart game-rank wildcard | contextual engine legality is absent or rejects a legal wildcard。 |
+| 12 | `particleBankRolloutBoundary.test.ts` → `readParticleBankRolloutAccess` with malformed registered scenario | bridge accepts malformed scenario。 |
+| 13 | `particleBankRolloutBoundary.test.ts` → bridge with particleId/scenario identity mismatch | bridge accepts identity mismatch。 |
+| 14 | `particleBankRolloutBoundary.test.ts` → bridge with bad weight sum or ESS | bridge accepts weight/ESS inconsistency。 |
+| 15 | `particleScenarioSource.test.ts` → bridge/source with hostile accessor | accessor runs or throw escapes instead of typed failure。 |
+| 16 | both allowlisted test paths → request/result/bridge/source hostile entries | an entry throws, returns partial success or emits an untyped failure。 |
+
+每个 RED 都必须使用真实 production entry，记录行为缺失并证明原因不是 fixture/import/environment；只完成对应最小 production 改动后，用相同命令转 GREEN；不得先写完所有 production 再补测试。每个 Task 仍是单一可审计 commit；correctness 与 benchmark 严格分离。
 
 ## 2. Exact accepted Particle focused manifest
 
@@ -621,6 +754,17 @@ on both forbidden import and forbidden re-export/barrel exposure of
 `particleBankInternals.ts`. Fake/unknown handles must return `fake-or-unknown-particle-bank`, and the
 bridge result must be immutable or a deep copy.
 
+Bridge GREEN additionally requires a registered WeakMap handle with legal public status/metadata;
+non-empty records; non-empty unique particleId; valid scenario schema, canonical initial deal and hidden
+transfer-assignment structure; `particleId === particleScenarioIdentity(bank.snapshot, scenario)`;
+finite non-negative normalized weights whose sum is within the frozen tolerance of 1; and finite
+non-negative ESS no greater than scenario count. The bridge uses field-by-field clone plus recursive
+freeze, rejects getter/symbol/function/malformed scenarios as existing `fake-or-unknown-particle-bank`
+or `{ kind: "scenario-source-failed"; reason: "private-state-invalid" }` typed failures without
+executing caller accessors, and reuses `particleScenarioIdentity`/`validateCanonicalInitialDeal`.
+The source keeps its second replay/public-consistency validation and cannot remove it because the bridge
+has become stricter.
+
 ## 8. Team Utility, leaf, aggregation and ranking gates
 
 ### Team Utility
@@ -773,6 +917,7 @@ git diff --check
 Required read-only/static scans：
 
 ~~~text
+rg -n "rootDigestFromReplayContextIdentity|canonicalDecisionIdentity|Object\.values|callback|accessor|symbol|wildcard|particleScenarioIdentity|createRolloutResult" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
 rg -n "candidateId.*(random|CRN|tape|draw)|deriveRandomDomain.*candidateId|(random|CRN|tape|draw).*candidateId" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
 rg -n "effectiveSampleSize|minimumAcceptedScenarioCount|minimumCompletedReplicateCount|effective-sample-size-too-low|insufficient-scenarios|insufficient-replicates|coverage-mismatch" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
 rg -n "riskAdjustedUtility|variancePenalty|downsideRiskPenalty|baselineEvaluatorScore|UTF-16" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
