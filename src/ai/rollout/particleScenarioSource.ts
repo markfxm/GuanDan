@@ -23,7 +23,15 @@ const SOURCE_INPUT_KEYS = [
 ] as const;
 
 export function createParticleScenarioSource(input: RolloutScenarioSourceInput): RolloutScenarioSourceResult {
-  if (!isRecord(input)) return scenarioSourceFailure("replay-context-missing");
+  try {
+    return createParticleScenarioSourceUnchecked(input);
+  } catch {
+    return scenarioSourceFailure("replay-context-missing");
+  }
+}
+
+function createParticleScenarioSourceUnchecked(input: RolloutScenarioSourceInput): RolloutScenarioSourceResult {
+  if (!isPlainDataGraph(input) || !isRecord(input) || !hasExactKeys(input, SOURCE_INPUT_KEYS)) return scenarioSourceFailure("replay-context-missing");
   let accessResult: ReturnType<typeof readParticleBankRolloutAccess>;
   try {
     accessResult = readParticleBankRolloutAccess(input.bank);
@@ -100,14 +108,15 @@ export function createParticleScenarioSource(input: RolloutScenarioSourceInput):
 }
 
 function hasReplayEnvelopeShape(input: unknown): input is RolloutScenarioSourceInput {
-  return isRecord(input)
+  return isPlainDataGraph(input)
+    && isRecord(input)
     && hasExactKeys(input, SOURCE_INPUT_KEYS)
     && isRecord(input.bank)
     && isRecord(input.bank.snapshot)
     && isRecord(input.initialLedger)
     && isRecord(input.finalLedger)
-    && Array.isArray(input.publicHistoryEvents)
-    && Array.isArray(input.ownCurrentHand)
+    && isPlainDataArray(input.publicHistoryEvents)
+    && isPlainDataArray(input.ownCurrentHand)
     && isRecord(input.publicState);
 }
 
@@ -228,7 +237,15 @@ function hasMalformedPublicLastPlay(input: unknown): boolean {
 }
 
 function isParticleRecord(value: unknown): value is ParticleBankRolloutRecord {
-  return isRecord(value) && typeof value.particleId === "string" && value.particleId.length > 0 && isRecord(value.scenario);
+  return isPlainDataGraph(value)
+    && isRecord(value)
+    && hasExactKeys(value, ["particleId", "scenario", "normalizedWeight"])
+    && typeof value.particleId === "string"
+    && value.particleId.length > 0
+    && typeof value.normalizedWeight === "number"
+    && Number.isFinite(value.normalizedWeight)
+    && value.normalizedWeight >= 0
+    && isRecord(value.scenario);
 }
 
 function sameArray(left: readonly unknown[], right: readonly unknown[]): boolean {
@@ -240,19 +257,85 @@ function scenarioSourceFailure(reason: "ledger-mismatch" | "replay-context-missi
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return isPlainDataRecord(value);
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const ownKeys = Reflect.ownKeys(value);
-  return ownKeys.length === keys.length && ownKeys.every((key) => typeof key === "string" && keys.includes(key)) && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+  return isPlainDataRecord(value, keys, true);
 }
 
 function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
   if (value === null || typeof value !== "object") return value;
   if (seen.has(value)) return value;
   seen.add(value);
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (isDataDescriptor(descriptor)) deepFreeze(descriptor.value, seen);
+  }
   if (!Object.isFrozen(value)) Object.freeze(value);
-  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child, seen);
   return value;
+}
+
+function getOwnDataProperty(value: unknown, key: string): unknown {
+  if (value === null || typeof value !== "object") throw new TypeError("DATA_PROPERTY_INVALID");
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!isDataDescriptor(descriptor)) throw new TypeError("DATA_PROPERTY_INVALID");
+  return descriptor.value;
+}
+
+function isDataDescriptor(descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor & { value: unknown } {
+  return descriptor !== undefined && Object.prototype.hasOwnProperty.call(descriptor, "value") && descriptor.get === undefined && descriptor.set === undefined;
+}
+
+function isPlainDataRecord(value: unknown, allowedKeys?: readonly string[], exact = false): value is Record<string, unknown> {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    const ownKeys = Reflect.ownKeys(value);
+    const allowed = allowedKeys === undefined ? undefined : new Set(allowedKeys);
+    if (ownKeys.some((key) => typeof key !== "string" || (allowed !== undefined && !allowed.has(key)))) return false;
+    if (exact && allowed !== undefined && (ownKeys.length !== allowed.size || allowedKeys !== undefined && allowedKeys.some((key) => !ownKeys.includes(key)))) return false;
+    return ownKeys.every((key) => isDataDescriptor(Object.getOwnPropertyDescriptor(value, key)));
+  } catch {
+    return false;
+  }
+}
+
+function isPlainDataArray(value: unknown): value is readonly unknown[] {
+  try {
+    if (!Array.isArray(value)) return false;
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    if (!isDataDescriptor(lengthDescriptor) || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0) return false;
+    const length = lengthDescriptor.value;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== length + 1 || !ownKeys.includes("length")) return false;
+    for (let index = 0; index < length; index += 1) {
+      const key = String(index);
+      if (!ownKeys.includes(key) || !isDataDescriptor(Object.getOwnPropertyDescriptor(value, key))) return false;
+    }
+    return ownKeys.every((key) => key === "length" || (typeof key === "string" && /^0$|^[1-9]\d*$/.test(key) && Number(key) < length));
+  } catch {
+    return false;
+  }
+}
+
+function isPlainDataGraph(value: unknown, ancestors = new WeakSet<object>()): boolean {
+  if (value === null || typeof value === "undefined" || typeof value === "boolean" || typeof value === "number" || typeof value === "string") return true;
+  if (typeof value !== "object" || ancestors.has(value)) return false;
+  ancestors.add(value);
+  const shapeValid = Array.isArray(value) ? isPlainDataArray(value) : isPlainDataRecord(value);
+  if (!shapeValid) {
+    ancestors.delete(value);
+    return false;
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (typeof key !== "string" || !isDataDescriptor(descriptor) || !isPlainDataGraph(descriptor.value, ancestors)) {
+      ancestors.delete(value);
+      return false;
+    }
+  }
+  ancestors.delete(value);
+  return true;
 }

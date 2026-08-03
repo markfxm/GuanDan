@@ -13,23 +13,25 @@ import type {
   ParticleSnapshotIdentity,
   PrivateParticleSummary,
 } from "../../../src/ai/particles/contracts";
+import { particleScenarioIdentity } from "../../../src/ai/particles/canonicalDeal";
 import { readParticleBankRolloutAccess } from "../../../src/ai/particles/particleBankRolloutAccess";
 import { createParticleBankHandle } from "../../../src/ai/particles/particleBankInternals";
 import {
   canonicalActionIdentity,
-  canonicalDecisionIdentity,
+  canonicalCandidateDecisionAssociationIdentity,
   canonicalReplicateIdentity,
   canonicalReplayContextIdentity,
   createRolloutRequest,
   createRolloutResult,
-  rootDigestFromReplayContextIdentity,
   validateRolloutBudget,
   validateRolloutEvidenceRequirements,
   validateRolloutRiskPolicy,
 } from "../../../src/ai/rollout/contracts";
+import * as rolloutContracts from "../../../src/ai/rollout/contracts";
 import type {
   RolloutAction,
   RolloutCandidate,
+  RolloutContractResult,
   RolloutFailure,
   RolloutPublicState,
   RolloutReplicateInput,
@@ -38,9 +40,9 @@ import type {
   RolloutScenarioSourceInput,
 } from "../../../src/ai/rollout/contracts";
 
-function makeKnownBank(normalizedWeight = 1, snapshotOverride?: ParticleSnapshotIdentity): ParticleBank {
+function makeScenario(): ParticleScenario {
   const deck = createDeck();
-  const scenario: ParticleScenario = {
+  return {
     schemaVersion: "d2-particle-scenario-v1",
     initialDeal: {
       schemaVersion: "d2-particle-initial-deal-v1",
@@ -53,6 +55,10 @@ function makeKnownBank(normalizedWeight = 1, snapshotOverride?: ParticleSnapshot
     } satisfies CanonicalInitialDeal,
     hiddenTransferAssignments: [],
   };
+}
+
+function makeKnownBank(normalizedWeight = 1, snapshotOverride?: ParticleSnapshotIdentity, scenarioOverride?: ParticleScenario, recordsOverride?: readonly { particleId: string; scenario: ParticleScenario; normalizedWeight: number }[], effectiveSampleSizeOverride?: number): ParticleBank {
+  const scenario = scenarioOverride ?? makeScenario();
   const summary: PrivateParticleSummary = {
     status: "ready",
     requestedParticleCount: 1,
@@ -85,11 +91,11 @@ function makeKnownBank(normalizedWeight = 1, snapshotOverride?: ParticleSnapshot
         likelihoodConfigHash: "2".repeat(64),
       },
       particleCount: 1,
-      effectiveSampleSize: 1,
+      effectiveSampleSize: effectiveSampleSizeOverride ?? 1,
       status: "ready",
       summary,
     },
-    { records: [{ particleId: "bridge-particle-0", scenario, normalizedWeight }] },
+    { records: recordsOverride ?? [{ particleId: particleScenarioIdentity(snapshot, scenario), scenario, normalizedWeight }] },
   );
 }
 
@@ -257,6 +263,18 @@ function makeResultInput(): RolloutResult {
   };
 }
 
+function makeResultAssemblyInput(input: RolloutResult = makeResultInput()): {
+  candidateSummaries: readonly RolloutResult["candidateSummaries"][number][];
+  ranking: readonly string[];
+  aggregateDiagnostics: RolloutResult["aggregateDiagnostics"];
+} {
+  return {
+    candidateSummaries: input.candidateSummaries,
+    ranking: input.ranking,
+    aggregateDiagnostics: input.aggregateDiagnostics,
+  };
+}
+
 describe("D2F ParticleBank bridge", () => {
   test("rejects a fake ParticleBank handle before reading records", () => {
     const result = readParticleBankRolloutAccess({} as ParticleBank);
@@ -270,6 +288,31 @@ describe("D2F ParticleBank bridge", () => {
   test("rejects a known handle with a non-finite or negative private weight", () => {
     for (const normalizedWeight of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
       expect(readParticleBankRolloutAccess(makeKnownBank(normalizedWeight))).toEqual({
+        ok: false,
+        failure: { kind: "fake-or-unknown-particle-bank" },
+      });
+    }
+  });
+
+  test("rejects malformed registered scenarios and inconsistent particle projections", () => {
+    const snapshot = makeKnownBank().snapshot;
+    const validScenario = makeScenario();
+    const validId = particleScenarioIdentity(snapshot, validScenario);
+    const cases: readonly ParticleBank[] = [
+      makeKnownBank(1, snapshot, { ...validScenario, schemaVersion: "wrong-scenario" } as unknown as ParticleScenario, [{ particleId: "malformed-schema", scenario: { ...validScenario, schemaVersion: "wrong-scenario" } as unknown as ParticleScenario, normalizedWeight: 1 }]),
+      makeKnownBank(1, snapshot, { ...validScenario, initialDeal: { ...validScenario.initialDeal, schemaVersion: "wrong-deal" } } as unknown as ParticleScenario, [{ particleId: "malformed-deal", scenario: { ...validScenario, initialDeal: { ...validScenario.initialDeal, schemaVersion: "wrong-deal" } } as unknown as ParticleScenario, normalizedWeight: 1 }]),
+      makeKnownBank(1, snapshot, { ...validScenario, hiddenTransferAssignments: [{}] } as unknown as ParticleScenario, [{ particleId: "malformed-transfer", scenario: { ...validScenario, hiddenTransferAssignments: [{}] } as unknown as ParticleScenario, normalizedWeight: 1 }]),
+      makeKnownBank(1, snapshot, validScenario, [
+        { particleId: validId, scenario: validScenario, normalizedWeight: 0.5 },
+        { particleId: validId, scenario: validScenario, normalizedWeight: 0.5 },
+      ]),
+      makeKnownBank(1, snapshot, validScenario, [{ particleId: "not-the-canonical-id", scenario: validScenario, normalizedWeight: 1 }]),
+      makeKnownBank(0.5, snapshot, validScenario, [{ particleId: validId, scenario: validScenario, normalizedWeight: 0.5 }]),
+      makeKnownBank(1, snapshot, validScenario, [{ particleId: validId, scenario: validScenario, normalizedWeight: 1 }], 2),
+    ];
+
+    for (const bank of cases) {
+      expect(readParticleBankRolloutAccess(bank)).toEqual({
         ok: false,
         failure: { kind: "fake-or-unknown-particle-bank" },
       });
@@ -336,6 +379,150 @@ describe("D2F ParticleBank bridge", () => {
     if (!result.ok) return;
     expect(result.value.policyId).toBe("d2f-lightweight-v1");
     expect(result.value.rootIdentity).toBe(replayRoot(result.value.scenarioSourceInput));
+  });
+
+  test("rejects a callback hidden in budget instead of retaining executable caller data", () => {
+    let callbackCallCount = 0;
+    const injectedClosure = () => {
+      callbackCallCount += 1;
+      return "captured";
+    };
+    const input = makeRequestInput() as unknown as Record<string, unknown>;
+    const result = createRolloutRequest({
+      ...input,
+      budget: { ...(input.budget as object), callback: injectedClosure },
+    } as unknown);
+
+    expect(result).toEqual({ ok: false, failure: { kind: "invalid-budget", field: "budget" } });
+    expect(callbackCallCount).toBe(0);
+    if (result.ok) expect((result.value.budget as unknown as Record<string, unknown>).callback).toBeUndefined();
+  });
+
+  test.each([
+    ["extra string key", (limits: RolloutRequest["limits"], callback: () => string) => ({ ...limits, callback })],
+    ["symbol key", (limits: RolloutRequest["limits"], callback: () => string) => {
+      const value = { ...limits } as Record<PropertyKey, unknown>;
+      Object.defineProperty(value, Symbol("limits"), { enumerable: true, value: callback });
+      return value;
+    }],
+    ["accessor", (limits: RolloutRequest["limits"], callback: () => string) => {
+      const value = { ...limits } as Record<string, unknown>;
+      Object.defineProperty(value, "maxWorkUnits", { enumerable: true, configurable: true, get: callback });
+      return value;
+    }],
+    ["non-plain prototype", (limits: RolloutRequest["limits"], _callback: () => string) => Object.assign(Object.create({ inheritedLimit: 1 }), limits)],
+    ["inherited field", (limits: RolloutRequest["limits"], _callback: () => string) => Object.assign(Object.create({ inheritedLimit: 1 }), { ...limits })],
+  ] as const)("rejects hostile limits %s before copying or executing it", (_name, buildLimits) => {
+    let callbackCallCount = 0;
+    const callback = () => {
+      callbackCallCount += 1;
+      return "captured";
+    };
+    const input = makeRequestInput();
+    const result = createRolloutRequest({ ...input, limits: buildLimits(input.limits, callback) } as unknown);
+    expect(result).toEqual({ ok: false, failure: { kind: "invalid-budget", field: "budget" } });
+    expect(callbackCallCount).toBe(0);
+  });
+
+  test.each([
+    ["candidate extra callback", (input: RolloutRequest, callback: () => string) => ({
+      ...input,
+      candidates: [{ ...input.candidates[0]!, callback }],
+    }), "candidates"],
+    ["action accessor", (input: RolloutRequest, callback: () => string) => {
+      const action = { ...input.candidates[0]!.action } as Record<string, unknown>;
+      Object.defineProperty(action, "type", { enumerable: true, configurable: true, get: callback });
+      return { ...input, candidates: [{ ...input.candidates[0]!, action }] };
+    }, "candidates"],
+    ["group accessor", (input: RolloutRequest, callback: () => string) => {
+      const baseAction = input.candidates[0]!.action;
+      if (baseAction.type !== "play") throw new Error("PLAY_ACTION_EXPECTED");
+      const group = { ...baseAction.group } as Record<string, unknown>;
+      Object.defineProperty(group, "cards", { enumerable: true, configurable: true, get: callback });
+      return {
+        ...input,
+        candidates: [{ ...input.candidates[0]!, action: { ...baseAction, group } }],
+      };
+    }, "candidates"],
+    ["card accessor", (input: RolloutRequest, callback: () => string) => {
+      const baseAction = input.candidates[0]!.action;
+      if (baseAction.type !== "play") throw new Error("PLAY_ACTION_EXPECTED");
+      const card = { ...baseAction.group.cards[0]! } as Record<string, unknown>;
+      Object.defineProperty(card, "id", { enumerable: true, configurable: true, get: callback });
+      const group = { ...baseAction.group, cards: [card] };
+      return { ...input, candidates: [{ ...input.candidates[0]!, action: { ...baseAction, group } }] };
+    }, "candidates"],
+    ["scenario source accessor", (input: RolloutRequest, callback: () => string) => {
+      const source = { ...input.scenarioSourceInput };
+      Object.defineProperty(source, "publicState", { enumerable: true, configurable: true, get: callback });
+      return { ...input, scenarioSourceInput: source };
+    }, "scenarioSourceInput"],
+  ] as const)("rejects %s without executing a nested accessor or retaining a callback", (_name, buildInput, field) => {
+    let callbackCallCount = 0;
+    const callback = () => {
+      callbackCallCount += 1;
+      return "captured";
+    };
+    const result = createRolloutRequest(buildInput(makeRequestInput(), callback));
+
+    expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field } });
+    expect(callbackCallCount).toBe(0);
+  });
+
+  test("rejects hostile nested dictionaries and arrays without executing probes", () => {
+    const cases: readonly [(input: RolloutRequest, callback: () => string) => unknown, string][] = [
+      [(input, callback) => {
+        const evidence = { ...input.evidenceRequirements } as Record<PropertyKey, unknown>;
+        Object.defineProperty(evidence, Symbol("evidence"), { enumerable: true, value: callback });
+        return { ...input, evidenceRequirements: evidence };
+      }, "evidenceRequirements"],
+      [(input, callback) => {
+        const risk = { ...input.riskPolicy } as Record<string, unknown>;
+        Object.defineProperty(risk, "variancePenalty", { enumerable: true, configurable: true, get: callback });
+        return { ...input, riskPolicy: risk };
+      }, "riskPolicy"],
+      [(input, callback) => {
+        const state = { ...input.scenarioSourceInput.publicState } as Record<PropertyKey, unknown>;
+        Object.defineProperty(state, Symbol("state"), { enumerable: true, value: callback });
+        return { ...input, scenarioSourceInput: { ...input.scenarioSourceInput, publicState: state } };
+      }, "scenarioSourceInput"],
+      [(input, callback) => {
+        const ledger = { ...input.scenarioSourceInput.initialLedger, seenEventHashes: { [Symbol("event")]: callback } };
+        return {
+          ...input,
+          scenarioSourceInput: {
+            ...input.scenarioSourceInput,
+            initialLedger: ledger,
+            finalLedger: ledger,
+          },
+        };
+      }, "scenarioSourceInput"],
+      [(input, callback) => {
+        const hand = [...input.scenarioSourceInput.ownCurrentHand] as unknown as Record<PropertyKey, unknown>;
+        Object.defineProperty(hand, "extra", { enumerable: true, value: callback });
+        return { ...input, scenarioSourceInput: { ...input.scenarioSourceInput, ownCurrentHand: hand } };
+      }, "scenarioSourceInput"],
+      [(input, callback) => {
+        const events = [] as unknown as Record<PropertyKey, unknown>;
+        Object.defineProperty(events, "0", { enumerable: true, configurable: true, get: callback });
+        Object.defineProperty(events, "length", { value: 1, writable: true, enumerable: false, configurable: false });
+        return { ...input, scenarioSourceInput: { ...input.scenarioSourceInput, publicHistoryEvents: events } };
+      }, "scenarioSourceInput"],
+    ];
+
+    for (const [buildInput, field] of cases) {
+      let callbackCallCount = 0;
+      const callback = () => {
+        callbackCallCount += 1;
+        return "captured";
+      };
+      expect(() => createRolloutRequest(buildInput(makeRequestInput(), callback))).not.toThrow();
+      const result = createRolloutRequest(buildInput(makeRequestInput(), callback));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.failure.kind).toMatch(/invalid/);
+      expect(field.length).toBeGreaterThan(0);
+      expect(callbackCallCount).toBe(0);
+    }
   });
 
   test("rejects callback policy injection before executing or retaining the closure", () => {
@@ -448,24 +635,87 @@ describe("D2F ParticleBank bridge", () => {
     expect("policy" in replicateInput).toBe(false);
   });
 
+  test("requires a revalidated request for result provenance and rejects assembly root fields", () => {
+    const request = makeRequestInput();
+    const resultInput = makeResultInput();
+    const assembly = {
+      candidateSummaries: resultInput.candidateSummaries,
+      ranking: resultInput.ranking,
+      aggregateDiagnostics: resultInput.aggregateDiagnostics,
+    };
+    const factory = createRolloutResult as unknown as (requestInput: unknown, assemblyInput: unknown) => unknown;
+    const result = factory(request, assembly) as RolloutContractResult<RolloutResult>;
+
+    expect(result).toEqual(expect.objectContaining({ ok: true }));
+    if (result.ok) {
+      expect(result.value.mode).toBe(request.mode);
+      expect(result.value.formalExecutionAllowed).toBe(false);
+      expect(result.value.policyId).toBe(request.policyId);
+      expect(result.value.rootDigest).not.toBe("f".repeat(64));
+      expect(result.value.schemaVersion).toBe("d2f-rollout-result-v2");
+    }
+
+    for (const field of ["rootDigest", "rootIdentity", "policyId", "mode", "formalExecutionAllowed", "replayContextIdentity"] as const) {
+      expect(factory(request, { ...assembly, [field]: "f".repeat(64) })).toEqual({
+        ok: false,
+        failure: { kind: "invalid-request", field: "assemblyInput" },
+      });
+    }
+    expect(factory(request, {
+      ...assembly,
+      aggregateDiagnostics: { ...assembly.aggregateDiagnostics, telemetry: () => "must-not-escape" },
+    })).toEqual({ ok: false, failure: { kind: "invalid-request", field: "assemblyInput" } });
+  });
+
+  test("does not expose an arbitrary raw replay-context digest helper", () => {
+    expect("rootDigestFromReplayContextIdentity" in rolloutContracts).toBe(false);
+  });
+
+  test("exposes only the candidate-local decision association identity", () => {
+    const association = (rolloutContracts as Record<string, unknown>).canonicalCandidateDecisionAssociationIdentity;
+    expect(typeof association).toBe("function");
+    expect("canonicalDecisionIdentity" in rolloutContracts).toBe(false);
+    if (typeof association !== "function") return;
+    const rootIdentity = "a".repeat(64);
+    const firstCandidate = canonicalActionIdentity(makeAction());
+    const secondCandidate = canonicalActionIdentity(makeAction(1));
+    const first = association({ rootIdentity, candidateIdentity: firstCandidate, ply: 0, actingSeat: 0, semanticKey: "policy-action" });
+    const second = association({ rootIdentity, candidateIdentity: secondCandidate, ply: 0, actingSeat: 0, semanticKey: "policy-action" });
+    expect(first).toMatch(/^[a-f0-9]{64}$/);
+    expect(second).not.toBe(first);
+  });
+
   test("validates and preserves RolloutResult policy provenance without changing rootDigest", () => {
+    const request = makeRequestInput();
     const input = makeResultInput();
-    const result = createRolloutResult(input);
+    const result = createRolloutResult(request, makeResultAssemblyInput(input));
     expect(result).toEqual(expect.objectContaining({ ok: true }));
     if (!result.ok) return;
     expect(result.value.policyId).toBe("d2f-lightweight-v1");
-    expect(result.value.rootDigest).toBe(input.rootDigest);
+    expect(result.value.rootDigest).not.toBe(input.rootDigest);
     expect(result.value).not.toBe(input);
     expect(Object.isFrozen(result.value)).toBe(true);
     expect(Object.isFrozen(result.value.candidateSummaries)).toBe(true);
+    const repeated = createRolloutResult(request, makeResultAssemblyInput(input));
+    expect(repeated.ok).toBe(true);
+    if (repeated.ok) expect(repeated.value.rootDigest).toBe(result.value.rootDigest);
+    const changedSource = makeSourceInput(undefined, 1);
+    const changedRequest = {
+      ...request,
+      rootIdentity: replayRoot(changedSource),
+      scenarioSourceInput: changedSource,
+    };
+    const changed = createRolloutResult(changedRequest, makeResultAssemblyInput(input));
+    expect(changed.ok).toBe(true);
+    if (changed.ok) expect(changed.value.rootDigest).not.toBe(result.value.rootDigest);
 
-    const { policyId: _missingPolicyId, ...missingPolicyId } = input;
-    expect(createRolloutResult(missingPolicyId)).toEqual({ ok: false, failure: { kind: "invalid-request", field: "policyId" } });
-    expect(createRolloutResult({ ...input, policyId: "custom" })).toEqual({
+    const { policyId: _missingPolicyId, ...missingPolicyId } = request;
+    expect(createRolloutResult(missingPolicyId, makeResultAssemblyInput(input))).toEqual({ ok: false, failure: { kind: "invalid-request", field: "policyId" } });
+    expect(createRolloutResult({ ...request, policyId: "custom" }, makeResultAssemblyInput(input))).toEqual({
       ok: false,
       failure: { kind: "invalid-request", field: "policyId" },
     });
-    expect(createRolloutResult({ ...input, rawScenario: { hidden: true } } as unknown)).toEqual({
+    expect(createRolloutResult({ ...request, rawScenario: { hidden: true } } as unknown, makeResultAssemblyInput(input))).toEqual({
       ok: false,
       failure: { kind: "invalid-request", field: "rawScenario" },
     });
@@ -600,7 +850,7 @@ describe("D2F ParticleBank bridge", () => {
     } as unknown);
     expect(invalid).toEqual({ ok: false, failure: { kind: "invalid-request", field: "formalExecutionAllowed" } });
 
-    const result = createRolloutResult(makeResultInput());
+    const result = createRolloutResult(makeRequestInput(), makeResultAssemblyInput());
     expect(result.ok).toBe(true);
     const failure: { ok: false; failure: RolloutFailure } = {
       ok: false,
@@ -627,7 +877,7 @@ describe("D2F ParticleBank bridge", () => {
     expect(canonicalReplicateIdentity(7)).toBe(canonicalReplicateIdentity(7));
     expect(canonicalReplicateIdentity(7)).not.toBe(canonicalReplicateIdentity(8));
 
-    const decision = canonicalDecisionIdentity({
+    const decision = canonicalCandidateDecisionAssociationIdentity({
       rootIdentity: "root",
       candidateIdentity: canonicalActionIdentity(action),
       ply: 0,
@@ -649,7 +899,6 @@ describe("D2F ParticleBank bridge", () => {
       particleBankSnapshot: sourceInput.bank.snapshot,
     });
     expect(context).toMatch(/^[a-f0-9]{64}$/);
-    expect(rootDigestFromReplayContextIdentity(context)).toMatch(/^[a-f0-9]{64}$/);
     expect(() => canonicalReplayContextIdentity({
       publicHistoryEvents: [{ eventIndex: -1, publicPayloadHash: "a".repeat(64) } as any],
       initialLedger: sourceInput.initialLedger,
@@ -712,7 +961,7 @@ describe("D2F ParticleBank bridge", () => {
     expect(canonicalActionIdentity({ type: "play", group: bomb })).not.toBe(canonicalActionIdentity({ type: "play", group: single }));
   });
 
-  test("accepts a legal wildcard subset repeated in the CardGroup wildcard projection", () => {
+  test("rejects a non-wild ordinary card in the CardGroup wildcard projection", () => {
     const input = makeRequestInput();
     const baseAction = input.candidates[0]!.action;
     if (baseAction.type !== "play") throw new Error("PLAY_ACTION_EXPECTED");
@@ -725,7 +974,51 @@ describe("D2F ParticleBank bridge", () => {
       candidates: [{ ...input.candidates[0]!, candidateId: canonicalActionIdentity(action), action }],
     });
 
+    expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "candidates" } });
+  });
+
+  test("accepts only a legal current-game-rank red-heart wildcard", () => {
+    const input = makeRequestInput();
+    const baseAction = input.candidates[0]!.action;
+    if (baseAction.type !== "play") throw new Error("PLAY_ACTION_EXPECTED");
+    const legalWildcard = createDeck().find((card) => card.kind === "suited" && card.suit === "hearts" && card.rank === input.scenarioSourceInput.gameRank);
+    if (legalWildcard === undefined) throw new Error("LEGAL_WILDCARD_FIXTURE_MISSING");
+    const action: RolloutAction = {
+      type: "play",
+      group: { ...baseAction.group, cards: [legalWildcard], wildcards: [legalWildcard] },
+    };
+    const result = createRolloutRequest({
+      ...input,
+      candidates: [{ ...input.candidates[0]!, candidateId: canonicalActionIdentity(action), action }],
+    });
+
     expect(result.ok).toBe(true);
+  });
+
+  test("rejects every non-contextual wildcard projection", () => {
+    const input = makeRequestInput();
+    const baseAction = input.candidates[0]!.action;
+    if (baseAction.type !== "play") throw new Error("PLAY_ACTION_EXPECTED");
+    const deck = createDeck();
+    const legalWildcard = deck.find((card) => card.kind === "suited" && card.suit === "hearts" && card.rank === input.scenarioSourceInput.gameRank);
+    const otherSuitSameRank = deck.find((card) => card.kind === "suited" && card.suit !== "hearts" && card.rank === input.scenarioSourceInput.gameRank);
+    const wrongHeartRank = deck.find((card) => card.kind === "suited" && card.suit === "hearts" && card.rank !== input.scenarioSourceInput.gameRank);
+    const joker = deck.find((card) => card.kind === "joker");
+    if (legalWildcard === undefined || otherSuitSameRank === undefined || wrongHeartRank === undefined || joker === undefined) throw new Error("WILDCARD_FIXTURE_MISSING");
+    const cases: readonly [string, RolloutAction][] = [
+      ["other-suit same-rank", { type: "play", group: { ...baseAction.group, cards: [otherSuitSameRank], wildcards: [otherSuitSameRank] } }],
+      ["wrong heart rank", { type: "play", group: { ...baseAction.group, cards: [wrongHeartRank], wildcards: [wrongHeartRank] } }],
+      ["joker", { type: "play", group: { ...baseAction.group, cards: [joker], wildcards: [joker] } }],
+      ["wildcard outside cards", { type: "play", group: { ...baseAction.group, cards: [baseAction.group.cards[0]!], wildcards: [legalWildcard] } }],
+      ["duplicate wildcard", { type: "play", group: { ...baseAction.group, cards: [legalWildcard], wildcards: [legalWildcard, legalWildcard] } }],
+    ];
+    for (const [_label, action] of cases) {
+      const result = createRolloutRequest({
+        ...input,
+        candidates: [{ ...input.candidates[0]!, candidateId: canonicalActionIdentity(baseAction), action }],
+      });
+      expect(result.ok).toBe(false);
+    }
   });
 
   test("rejects aggregate replicate counts that ignore candidate multiplicity", () => {
@@ -739,7 +1032,7 @@ describe("D2F ParticleBank bridge", () => {
         completedReplicateCount: 2,
       },
     ].sort((left, right) => left.candidateId < right.candidateId ? -1 : left.candidateId > right.candidateId ? 1 : 0);
-    const result = createRolloutResult({
+    const result = createRolloutResult(makeRequestInput(), makeResultAssemblyInput({
       ...first,
       candidateSummaries: summaries,
       ranking: summaries.map((summary) => summary.candidateId),
@@ -749,7 +1042,7 @@ describe("D2F ParticleBank bridge", () => {
         expectedCompletedReplicateCount: 2,
         candidateCount: 2,
       },
-    });
+    }));
 
     expect(result.ok).toBe(false);
   });
@@ -761,7 +1054,7 @@ describe("D2F ParticleBank bridge", () => {
       { ...first.candidateSummaries[0]!, acceptedScenarioCount: 2, completedReplicateCount: 2, expectedReplicateCount: 2 },
       { ...first.candidateSummaries[0]!, candidateId: secondCandidateId, acceptedScenarioCount: 2, completedReplicateCount: 2, expectedReplicateCount: 2 },
     ].sort((left, right) => left.candidateId < right.candidateId ? -1 : left.candidateId > right.candidateId ? 1 : 0);
-    const result = createRolloutResult({
+    const result = createRolloutResult(makeRequestInput(), makeResultAssemblyInput({
       ...first,
       candidateSummaries: summaries,
       ranking: summaries.map((summary) => summary.candidateId),
@@ -773,21 +1066,21 @@ describe("D2F ParticleBank bridge", () => {
         candidateCount: 2,
         workUnitCount: 2,
       },
-    });
+    }));
 
     expect(result.ok).toBe(true);
   });
 
   test("rejects overflowing candidate coverage products", () => {
     const input = makeResultInput();
-    const result = createRolloutResult({
+    const result = createRolloutResult(makeRequestInput(), makeResultAssemblyInput({
       ...input,
       candidateSummaries: [{
         ...input.candidateSummaries[0]!,
         acceptedScenarioCount: Number.MAX_SAFE_INTEGER,
         replicateCountPerScenario: 2,
       }],
-    });
+    }));
 
     expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "candidateSummaries" } });
   });
@@ -821,14 +1114,14 @@ describe("D2F ParticleBank bridge", () => {
   });
 
   test("rejects private or unknown fields in public result diagnostics", () => {
-    const result = createRolloutResult({
+    const result = createRolloutResult(makeRequestInput(), makeResultAssemblyInput({
       ...makeResultInput(),
       aggregateDiagnostics: {
         ...makeResultInput().aggregateDiagnostics,
         rawScenario: { hiddenTransferAssignments: ["private"] },
         particleSeed: "secret",
       },
-    } as any);
+    } as any));
 
     expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "aggregateDiagnostics" } });
   });
@@ -895,10 +1188,10 @@ describe("D2F ParticleBank bridge", () => {
     });
 
     for (const field of ["riskAdjustedUtility", "expectedUtility", "variance", "risk", "baselineEvaluatorScore"] as const) {
-      expect(createRolloutResult({
+      expect(createRolloutResult(makeRequestInput(), makeResultAssemblyInput({
         ...makeResultInput(),
         candidateSummaries: [{ ...makeResultInput().candidateSummaries[0]!, [field]: Number.NaN }],
-      })).toEqual({ ok: false, failure: { kind: "invalid-request", field: "candidateSummaries" } });
+      }))).toEqual({ ok: false, failure: { kind: "invalid-request", field: "candidateSummaries" } });
     }
   });
 
@@ -932,8 +1225,20 @@ describe("D2F ParticleBank bridge", () => {
     const bridgeModule = checker.getSymbolAtLocation(bridgeFile);
     if (contractsFile === undefined || bridgeModule === undefined) throw new Error("CONTRACT_OR_BRIDGE_MODULE_SYMBOL_MISSING");
     const contractsModule = checker.getSymbolAtLocation(contractsFile);
-    const sourceFilePath = sourcePath(sourceFile);
+    if (contractsModule === undefined) throw new Error("CONTRACT_MODULE_SYMBOL_MISSING");
     const resolveSymbol = (symbol: ts.Symbol): ts.Symbol => symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+    const contractsExports = checker.getExportsOfModule(contractsModule);
+    const associationSymbols = new Set(contractsExports
+      .filter((symbol) => symbol.name === "CanonicalCandidateDecisionAssociationIdentity" || symbol.name === "canonicalCandidateDecisionAssociationIdentity")
+      .map(resolveSymbol));
+    expect(associationSymbols.size).toBe(2);
+    const crnCoordinateExport = contractsExports.find((symbol) => symbol.name === "CrnCoordinate");
+    if (crnCoordinateExport === undefined) throw new Error("CRN_COORDINATE_SYMBOL_MISSING");
+    const crnCoordinateSymbol: ts.Symbol = crnCoordinateExport;
+    const crnMembers = checker.getDeclaredTypeOfSymbol(resolveSymbol(crnCoordinateSymbol)).getProperties().map((symbol) => symbol.name);
+    expect(crnMembers).toEqual(["rootIdentity", "scenarioIdentity", "replicateIdentity", "ply", "actingSeat", "randomDomain"]);
+    expect(crnMembers).not.toContain("candidateIdentity");
+    const sourceFilePath = sourcePath(sourceFile);
     const privateSymbols = new Set(checker.getExportsOfModule(privateModule).map(resolveSymbol));
     const bridgeSymbols = new Set(checker.getExportsOfModule(bridgeModule).map(resolveSymbol));
     const contractSymbols = new Set(checker.getExportsOfModule(contractsModule!).map(resolveSymbol));
@@ -943,6 +1248,7 @@ describe("D2F ParticleBank bridge", () => {
     const forbiddenPrivateConsumers: string[] = [];
     const privateSourceConsumers: string[] = [];
     const bridgeCallers: string[] = [];
+    const associationConsumers: string[] = [];
     let forbiddenReexport = false;
     let forbiddenBridgeReexport = false;
     let forbiddenSourceReexport = false;
@@ -965,6 +1271,7 @@ describe("D2F ParticleBank bridge", () => {
             const localSymbol = checker.getSymbolAtLocation(element.name);
             if (localSymbol === undefined) continue;
             const resolved = resolveSymbol(localSymbol);
+            if (associationSymbols.has(resolved)) associationConsumers.push(sourcePath(file));
             if (resolved.name === "readParticleBankInternals" && privateSymbols.has(resolved)) directReadImporters.push(sourcePath(file));
             const target = declarationFile(resolved);
             if (target !== undefined && normalize(target).endsWith("/src/ai/rollout/particleScenarioSource.ts") && sourcePath(file) !== sourceFilePath) privateSourceConsumers.push(sourcePath(file));
@@ -980,6 +1287,7 @@ describe("D2F ParticleBank bridge", () => {
           if (propertySymbol !== undefined) {
             const resolved = resolveSymbol(propertySymbol);
             const consumerPath = sourcePath(file);
+            if (associationSymbols.has(resolved)) associationConsumers.push(consumerPath);
             if (resolved.name === "readParticleBankInternals" && privateSymbols.has(resolved)) directReadImporters.push(consumerPath);
             if (bridgeSymbols.has(resolved)) {
               bridgeImporters.push(consumerPath);
@@ -991,6 +1299,7 @@ describe("D2F ParticleBank bridge", () => {
         if (ts.isIdentifier(node)) {
           const identifierSymbol = checker.getSymbolAtLocation(node);
           if (identifierSymbol !== undefined) recordPrivateContractUse(file, identifierSymbol);
+          if (identifierSymbol !== undefined && associationSymbols.has(resolveSymbol(identifierSymbol))) associationConsumers.push(sourcePath(file));
         }
         if (ts.isExportDeclaration(node) && node.moduleSpecifier !== undefined) {
           const moduleSymbol = checker.getSymbolAtLocation(node.moduleSpecifier);
@@ -1026,5 +1335,6 @@ describe("D2F ParticleBank bridge", () => {
     expect(forbiddenSourceReexport).toBe(false);
     expect(localeCompareUse).toBe(false);
     expect(bridgeCallers).toContain("readParticleBankRolloutAccess");
+    expect([...new Set(associationConsumers)]).toEqual([sourcePath(contractsFile)]);
   });
 });

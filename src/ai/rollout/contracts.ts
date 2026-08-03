@@ -1,7 +1,7 @@
 import type { Card, GameRank } from "../../engine/cards";
-import { RANKS, SUITS } from "../../engine/cards";
+import { isHeartRankWild, RANKS, SUITS } from "../../engine/cards";
 import type { CardGroup, GroupPurpose, GroupType } from "../../engine/groups";
-import { assertFinalizedPublicActionEvent, type PublicActionEvent, type PublicSeat } from "../../game/publicEvent";
+import { assertFinalizedPublicActionEvent, playPublicStableKey, type PublicActionEvent, type PublicSeat } from "../../game/publicEvent";
 import { canonicalPublicLedgerHash, type HardPublicLedger } from "../../game/publicLedger";
 import { sha256Bytes, verifyPublicActionEventHash } from "../../game/publicEventHash";
 import type {
@@ -14,7 +14,7 @@ import { particleScenarioIdentity } from "../particles/canonicalDeal";
 export type CanonicalCandidateIdentity = string;
 export type CanonicalScenarioIdentity = string;
 export type CanonicalReplicateIdentity = string;
-export type CanonicalDecisionIdentity = string;
+export type CanonicalCandidateDecisionAssociationIdentity = string;
 export type CanonicalRandomDomain = string;
 export type CanonicalSemanticKey = string;
 export type RootIdentity = string;
@@ -170,7 +170,7 @@ export type RolloutAggregationFailure =
 
 export type RolloutFailure =
   | { kind: "invalid-request"; field: string }
-  | { kind: "invalid-budget"; field: "replicateCountPerScenario" | "maxPliesPerReplicate" | "maxPolicyActionEvaluationsPerPly" | "maxWorkUnits" }
+  | { kind: "invalid-budget"; field: "budget" | "limits" | "replicateCountPerScenario" | "maxPliesPerReplicate" | "maxPolicyActionEvaluationsPerPly" | "maxWorkUnits" }
   | { kind: "invalid-risk-policy"; field: "variancePenalty" | "downsideRiskPenalty" }
   | { kind: "invalid-evidence-requirements"; field: "minimumEffectiveSampleSize" | "minimumAcceptedScenarioCount" | "minimumCompletedReplicateCount" }
   | { kind: "fake-or-unknown-particle-bank" }
@@ -252,6 +252,12 @@ export type RolloutResult = Readonly<{
   aggregateDiagnostics: RolloutAggregateDiagnostics;
 }>;
 
+export type RolloutResultAssemblyInput = Readonly<{
+  candidateSummaries: readonly CandidateRolloutSummary[];
+  ranking: readonly string[];
+  aggregateDiagnostics: RolloutAggregateDiagnostics;
+}>;
+
 export type RolloutResultOutcome =
   | Readonly<{ ok: true; result: RolloutResult }>
   | Readonly<{ ok: false; failure: RolloutFailure }>;
@@ -328,8 +334,8 @@ const REQUEST_KEYS = [
   "schemaVersion", "mode", "formalExecutionAllowed", "rootIdentity", "scenarioSourceInput", "candidates", "budget", "limits",
   "evidenceRequirements", "riskPolicy", "policyId",
 ] as const;
-const RESULT_KEYS = [
-  "schemaVersion", "mode", "formalExecutionAllowed", "policyId", "rootDigest", "candidateSummaries", "ranking", "aggregateDiagnostics",
+const ASSEMBLY_KEYS = [
+  "candidateSummaries", "ranking", "aggregateDiagnostics",
 ] as const;
 
 export function canonicalActionIdentity(action: RolloutAction): CanonicalCandidateIdentity {
@@ -365,13 +371,16 @@ export function canonicalReplicateIdentity(replicateOrdinal: number): CanonicalR
   return sha256Bytes(writer.finish());
 }
 
-export function canonicalDecisionIdentity(input: Readonly<{
+export function canonicalCandidateDecisionAssociationIdentity(input: Readonly<{
   rootIdentity: string;
   candidateIdentity: string;
   ply: number;
   actingSeat: PublicSeat;
   semanticKey: string;
-}>): CanonicalDecisionIdentity {
+}>): CanonicalCandidateDecisionAssociationIdentity {
+  if (!isPlainDataGraph(input) || !hasExactOwnDataKeys(input, ["rootIdentity", "candidateIdentity", "ply", "actingSeat", "semanticKey"])) {
+    throw new RangeError("DECISION_IDENTITY_INVALID");
+  }
   if (!isNonEmptyString(input.rootIdentity) || !isNonEmptyString(input.candidateIdentity) || !isNonNegativeSafeInteger(input.ply) || !isSeat(input.actingSeat) || !isNonEmptyString(input.semanticKey)) {
     throw new RangeError("DECISION_IDENTITY_INVALID");
   }
@@ -407,8 +416,7 @@ export function canonicalReplayContextIdentity(input: RolloutReplayContextInput)
   return sha256Bytes(writer.finish());
 }
 
-export function rootDigestFromReplayContextIdentity(identity: RolloutReplayContextIdentity): RootDigest {
-  if (!/^[a-f0-9]{64}$/.test(identity)) throw new TypeError("ROOT_IDENTITY_INVALID");
+function rootDigestFromValidatedRootIdentity(identity: RootIdentity): RootDigest {
   const writer = new CanonicalWriter();
   writer.writeString("d2f-root-digest-v1");
   writer.writeString(identity);
@@ -419,66 +427,134 @@ export function validateRolloutBudget(input: Readonly<{
   budget: RolloutBudget;
   limits: RolloutBudgetLimits;
 }>): RolloutContractResult<ValidatedRolloutBudget> {
-  if (!isRecord(input) || !isRecord(input.budget) || !isRecord(input.limits)) return invalidBudget("maxWorkUnits");
+  let budgetInput: unknown;
+  let limitsInput: unknown;
+  try {
+    if (!isPlainDataRecord(input, ["budget", "limits"])) return invalidBudget("budget");
+    budgetInput = getOwnDataProperty(input, "budget");
+    limitsInput = getOwnDataProperty(input, "limits");
+    if (!hasExactOwnDataKeys(budgetInput, [
+      "replicateCountPerScenario", "maxPliesPerReplicate", "maxPolicyActionEvaluationsPerPly", "maxWorkUnits",
+    ]) || !hasExactOwnDataKeys(limitsInput, [
+      "maxReplicateCountPerScenario", "maxPliesPerReplicate", "maxPolicyActionEvaluationsPerPly", "maxWorkUnits",
+    ])) return invalidBudget("budget");
+  } catch {
+    return invalidBudget("budget");
+  }
   const budgetFields: readonly (keyof RolloutBudget)[] = [
     "replicateCountPerScenario", "maxPliesPerReplicate", "maxPolicyActionEvaluationsPerPly", "maxWorkUnits",
   ];
   const limitFields: readonly (keyof RolloutBudgetLimits)[] = [
     "maxReplicateCountPerScenario", "maxPliesPerReplicate", "maxPolicyActionEvaluationsPerPly", "maxWorkUnits",
   ];
+  let budgetValues: RolloutBudget;
+  let limitValues: RolloutBudgetLimits;
+  try {
+    budgetValues = {
+      replicateCountPerScenario: getOwnDataProperty(budgetInput, "replicateCountPerScenario") as number,
+      maxPliesPerReplicate: getOwnDataProperty(budgetInput, "maxPliesPerReplicate") as number,
+      maxPolicyActionEvaluationsPerPly: getOwnDataProperty(budgetInput, "maxPolicyActionEvaluationsPerPly") as number,
+      maxWorkUnits: getOwnDataProperty(budgetInput, "maxWorkUnits") as number,
+    };
+    limitValues = {
+      maxReplicateCountPerScenario: getOwnDataProperty(limitsInput, "maxReplicateCountPerScenario") as number,
+      maxPliesPerReplicate: getOwnDataProperty(limitsInput, "maxPliesPerReplicate") as number,
+      maxPolicyActionEvaluationsPerPly: getOwnDataProperty(limitsInput, "maxPolicyActionEvaluationsPerPly") as number,
+      maxWorkUnits: getOwnDataProperty(limitsInput, "maxWorkUnits") as number,
+    };
+  } catch {
+    return invalidBudget("budget");
+  }
   for (const field of budgetFields) {
-    if (!isPositiveSafeInteger(input.budget[field])) return invalidBudget(field);
+    if (!isPositiveSafeInteger(budgetValues[field])) return invalidBudget(field);
   }
   for (const field of limitFields) {
-    if (!isPositiveSafeInteger(input.limits[field])) return invalidBudget(field === "maxReplicateCountPerScenario" ? "replicateCountPerScenario" : field);
+    if (!isPositiveSafeInteger(limitValues[field])) return invalidBudget(field === "maxReplicateCountPerScenario" ? "replicateCountPerScenario" : field);
   }
-  if (input.budget.replicateCountPerScenario > input.limits.maxReplicateCountPerScenario) return invalidBudget("replicateCountPerScenario");
-  if (input.budget.maxPliesPerReplicate > input.limits.maxPliesPerReplicate) return invalidBudget("maxPliesPerReplicate");
-  if (input.budget.maxPolicyActionEvaluationsPerPly > input.limits.maxPolicyActionEvaluationsPerPly) return invalidBudget("maxPolicyActionEvaluationsPerPly");
-  if (input.budget.maxWorkUnits > input.limits.maxWorkUnits) return invalidBudget("maxWorkUnits");
+  if (budgetValues.replicateCountPerScenario > limitValues.maxReplicateCountPerScenario) return invalidBudget("replicateCountPerScenario");
+  if (budgetValues.maxPliesPerReplicate > limitValues.maxPliesPerReplicate) return invalidBudget("maxPliesPerReplicate");
+  if (budgetValues.maxPolicyActionEvaluationsPerPly > limitValues.maxPolicyActionEvaluationsPerPly) return invalidBudget("maxPolicyActionEvaluationsPerPly");
+  if (budgetValues.maxWorkUnits > limitValues.maxWorkUnits) return invalidBudget("maxWorkUnits");
 
   const product = safeProduct([
-    input.budget.replicateCountPerScenario,
-    input.budget.maxPliesPerReplicate,
-    input.budget.maxPolicyActionEvaluationsPerPly,
+    budgetValues.replicateCountPerScenario,
+    budgetValues.maxPliesPerReplicate,
+    budgetValues.maxPolicyActionEvaluationsPerPly,
   ]);
   if (product === undefined) return invalidBudget("maxWorkUnits");
   return {
     ok: true,
     value: deepFreeze({
-      budget: { ...input.budget },
-      limits: { ...input.limits },
-      maximumWorkUnits: Math.min(input.budget.maxWorkUnits, product),
+      budget: budgetValues,
+      limits: limitValues,
+      maximumWorkUnits: Math.min(budgetValues.maxWorkUnits, product),
       validated: true,
     }),
   };
 }
 
 export function validateRolloutEvidenceRequirements(input: unknown): RolloutContractResult<RolloutEvidenceRequirements> {
-  if (!isRecord(input) || !hasExactKeys(input, ["schemaVersion", "minimumEffectiveSampleSize", "minimumAcceptedScenarioCount", "minimumCompletedReplicateCount", "requireCompleteCoverage"]) || input.schemaVersion !== "d2f-rollout-evidence-requirements-v1" || input.requireCompleteCoverage !== true) return invalidEvidence("minimumEffectiveSampleSize");
-  if (!isPositiveSafeInteger(input.minimumEffectiveSampleSize)) return invalidEvidence("minimumEffectiveSampleSize");
-  if (!isPositiveSafeInteger(input.minimumAcceptedScenarioCount)) return invalidEvidence("minimumAcceptedScenarioCount");
-  if (!isPositiveSafeInteger(input.minimumCompletedReplicateCount)) return invalidEvidence("minimumCompletedReplicateCount");
-  return { ok: true, value: deepFreeze({ ...input } as RolloutEvidenceRequirements) };
+  try {
+    if (!isPlainDataGraph(input) || !hasExactOwnDataKeys(input, ["schemaVersion", "minimumEffectiveSampleSize", "minimumAcceptedScenarioCount", "minimumCompletedReplicateCount", "requireCompleteCoverage"])) return invalidEvidence("minimumEffectiveSampleSize");
+    const schemaVersion = getOwnDataProperty(input, "schemaVersion");
+    const minimumEffectiveSampleSize = getOwnDataProperty(input, "minimumEffectiveSampleSize");
+    const minimumAcceptedScenarioCount = getOwnDataProperty(input, "minimumAcceptedScenarioCount");
+    const minimumCompletedReplicateCount = getOwnDataProperty(input, "minimumCompletedReplicateCount");
+    const requireCompleteCoverage = getOwnDataProperty(input, "requireCompleteCoverage");
+    if (schemaVersion !== "d2f-rollout-evidence-requirements-v1" || requireCompleteCoverage !== true) return invalidEvidence("minimumEffectiveSampleSize");
+    if (!isPositiveSafeInteger(minimumEffectiveSampleSize)) return invalidEvidence("minimumEffectiveSampleSize");
+    if (!isPositiveSafeInteger(minimumAcceptedScenarioCount)) return invalidEvidence("minimumAcceptedScenarioCount");
+    if (!isPositiveSafeInteger(minimumCompletedReplicateCount)) return invalidEvidence("minimumCompletedReplicateCount");
+    const value: RolloutEvidenceRequirements = {
+      schemaVersion: "d2f-rollout-evidence-requirements-v1",
+      minimumEffectiveSampleSize,
+      minimumAcceptedScenarioCount,
+      minimumCompletedReplicateCount,
+      requireCompleteCoverage: true,
+    };
+    return { ok: true, value: deepFreeze(value) };
+  } catch {
+    return invalidEvidence("minimumEffectiveSampleSize");
+  }
 }
 
 export function validateRolloutRiskPolicy(input: unknown): RolloutContractResult<RolloutRiskPolicy> {
-  if (!isRecord(input) || !hasExactKeys(input, ["schemaVersion", "variancePenalty", "downsideRiskPenalty"]) || input.schemaVersion !== "d2f-rollout-risk-policy-v1") return invalidRisk("variancePenalty");
-  if (typeof input.variancePenalty !== "number" || !Number.isFinite(input.variancePenalty) || input.variancePenalty < 0) return invalidRisk("variancePenalty");
-  if (typeof input.downsideRiskPenalty !== "number" || !Number.isFinite(input.downsideRiskPenalty) || input.downsideRiskPenalty < 0) return invalidRisk("downsideRiskPenalty");
-  return { ok: true, value: deepFreeze({ ...input } as RolloutRiskPolicy) };
+  try {
+    if (!isPlainDataGraph(input) || !hasExactOwnDataKeys(input, ["schemaVersion", "variancePenalty", "downsideRiskPenalty"])) return invalidRisk("variancePenalty");
+    const schemaVersion = getOwnDataProperty(input, "schemaVersion");
+    const variancePenalty = getOwnDataProperty(input, "variancePenalty");
+    const downsideRiskPenalty = getOwnDataProperty(input, "downsideRiskPenalty");
+    if (schemaVersion !== "d2f-rollout-risk-policy-v1") return invalidRisk("variancePenalty");
+    if (typeof variancePenalty !== "number" || !Number.isFinite(variancePenalty) || variancePenalty < 0) return invalidRisk("variancePenalty");
+    if (typeof downsideRiskPenalty !== "number" || !Number.isFinite(downsideRiskPenalty) || downsideRiskPenalty < 0) return invalidRisk("downsideRiskPenalty");
+    return { ok: true, value: deepFreeze({ schemaVersion, variancePenalty, downsideRiskPenalty }) };
+  } catch {
+    return invalidRisk("variancePenalty");
+  }
 }
 
 export function createRolloutRequest(input: unknown): RolloutContractResult<RolloutRequest> {
-  if (!isRecord(input)) return invalid("request");
-  const requestKeyError = exactEnvelopeKeyError(input, REQUEST_KEYS);
-  if (requestKeyError !== undefined) return invalid(requestKeyError);
+  try {
+    const envelopeFailure = requestEnvelopeFailure(input);
+    if (envelopeFailure === "budget") return invalidBudget("budget");
+    if (envelopeFailure === "limits") return invalidBudget("limits");
+    if (envelopeFailure === "evidenceRequirements") return invalidEvidence("minimumEffectiveSampleSize");
+    if (envelopeFailure === "riskPolicy") return invalidRisk("variancePenalty");
+    if (envelopeFailure !== undefined) return invalid(envelopeFailure);
+    return createRolloutRequestUnchecked(input);
+  } catch {
+    return invalid("request");
+  }
+}
+
+function createRolloutRequestUnchecked(input: unknown): RolloutContractResult<RolloutRequest> {
+  if (!isPlainDataRecord(input) || !hasExactOwnDataKeys(input, REQUEST_KEYS)) return invalid("request");
   if (input.policyId !== "d2f-lightweight-v1") return invalid("policyId");
   if (input.schemaVersion !== "d2f-rollout-request-v2") return invalid("schemaVersion");
   if (!isRolloutMode(input.mode)) return invalid("mode");
   if (input.formalExecutionAllowed !== false) return invalid("formalExecutionAllowed");
   if (!isRootIdentity(input.rootIdentity)) return invalid("rootIdentity");
-  if (!Array.isArray(input.candidates) || input.candidates.length === 0) return invalid("candidates");
+  if (!isPlainDataArray(input.candidates) || input.candidates.length === 0) return invalid("candidates");
 
   const sourceInput = cloneScenarioSourceInput(input.scenarioSourceInput);
   if (sourceInput === undefined) return invalid("scenarioSourceInput");
@@ -503,17 +579,29 @@ export function createRolloutRequest(input: unknown): RolloutContractResult<Roll
   const candidates: RolloutCandidate[] = [];
   const candidateIds = new Set<string>();
   for (const candidate of input.candidates) {
-    if (!isRecord(candidate) || !isNonEmptyString(candidate.candidateId) || typeof candidate.baselineEvaluatorScore !== "number" || !Number.isFinite(candidate.baselineEvaluatorScore)) return invalid("candidates");
+    if (!hasExactOwnDataKeys(candidate, ["candidateId", "action", "baselineEvaluatorScore"])) return invalid("candidates");
+    let candidateId: unknown;
+    let baselineEvaluatorScore: unknown;
+    let actionInput: unknown;
+    try {
+      candidateId = getOwnDataProperty(candidate, "candidateId");
+      baselineEvaluatorScore = getOwnDataProperty(candidate, "baselineEvaluatorScore");
+      actionInput = getOwnDataProperty(candidate, "action");
+    } catch {
+      return invalid("candidates");
+    }
+    if (!isNonEmptyString(candidateId) || typeof baselineEvaluatorScore !== "number" || !Number.isFinite(baselineEvaluatorScore) || !isPlainDataGraph(actionInput)) return invalid("candidates");
     let action: RolloutAction;
     try {
-      action = deepFreeze(structuredClone(candidate.action));
+      action = deepFreeze(structuredClone(actionInput) as RolloutAction);
       const canonical = canonicalActionIdentity(action);
-      if (candidate.candidateId !== canonical || candidateIds.has(canonical)) return invalid("candidates");
+      if (!isContextuallyLegalWildcardProjection(action, sourceInput.gameRank)) return invalid("candidates");
+      if (candidateId !== canonical || candidateIds.has(canonical)) return invalid("candidates");
       candidateIds.add(canonical);
     } catch {
       return invalid("candidates");
     }
-    candidates.push(deepFreeze({ candidateId: candidate.candidateId, action, baselineEvaluatorScore: candidate.baselineEvaluatorScore }));
+    candidates.push(deepFreeze({ candidateId, action, baselineEvaluatorScore }));
   }
 
   const budget = validateRolloutBudget({ budget: input.budget as RolloutBudget, limits: input.limits as RolloutBudgetLimits });
@@ -544,25 +632,78 @@ export function createRolloutRequest(input: unknown): RolloutContractResult<Roll
   };
 }
 
-export function createRolloutResult(input: unknown): RolloutContractResult<RolloutResult> {
-  if (!isRecord(input)) return invalid("result");
-  const resultKeyError = exactEnvelopeKeyError(input, RESULT_KEYS);
-  if (resultKeyError !== undefined) return invalid(resultKeyError);
-  if (input.policyId !== "d2f-lightweight-v1") return invalid("policyId");
-  if (input.schemaVersion !== "d2f-rollout-result-v2" || !isRolloutMode(input.mode) || input.formalExecutionAllowed !== false || typeof input.rootDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.rootDigest)) return invalid("result");
-  if (!Array.isArray(input.candidateSummaries) || input.candidateSummaries.length === 0 || !Array.isArray(input.ranking) || !isRecord(input.aggregateDiagnostics)) return invalid("result");
+function requestEnvelopeFailure(input: unknown): string | undefined {
+  if (!isPlainDataRecord(input)) return "request";
+  const ownKeys = Reflect.ownKeys(input);
+  const unexpected = ownKeys.find((key) => typeof key !== "string" || !REQUEST_KEYS.includes(key as (typeof REQUEST_KEYS)[number]));
+  if (unexpected !== undefined) {
+    return typeof unexpected === "string" ? unexpected : "request";
+  }
+  const missing = REQUEST_KEYS.find((key) => !ownKeys.includes(key));
+  if (missing !== undefined) return missing;
+  const nestedFields: readonly (readonly [string, string])[] = [
+    ["scenarioSourceInput", "scenarioSourceInput"],
+    ["candidates", "candidates"],
+    ["budget", "budget"],
+    ["limits", "budget"],
+    ["evidenceRequirements", "evidenceRequirements"],
+    ["riskPolicy", "riskPolicy"],
+  ];
+  for (const [key, failureField] of nestedFields) {
+    const value = getOwnDataProperty(input, key);
+    if (!isPlainDataGraph(value)) return failureField;
+  }
+  return undefined;
+}
+
+export function createRolloutResult(requestInput: unknown, assemblyInput: unknown): RolloutContractResult<RolloutResult> {
+  try {
+    return createRolloutResultUnchecked(requestInput, assemblyInput);
+  } catch {
+    return invalid("assemblyInput");
+  }
+}
+
+function createRolloutResultUnchecked(requestInput: unknown, assemblyInput: unknown): RolloutContractResult<RolloutResult> {
+  let requestResult: RolloutContractResult<RolloutRequest>;
+  try {
+    requestResult = createRolloutRequest(requestInput);
+  } catch {
+    return invalid("requestInput");
+  }
+  if (!requestResult.ok) return requestResult;
+  if (!isPlainDataGraph(assemblyInput) || !hasExactOwnDataKeys(assemblyInput, ASSEMBLY_KEYS)) return invalid("assemblyInput");
+
+  let candidateSummariesInput: unknown;
+  let rankingInput: unknown;
+  let aggregateDiagnosticsInput: unknown;
+  try {
+    candidateSummariesInput = getOwnDataProperty(assemblyInput, "candidateSummaries");
+    rankingInput = getOwnDataProperty(assemblyInput, "ranking");
+    aggregateDiagnosticsInput = getOwnDataProperty(assemblyInput, "aggregateDiagnostics");
+  } catch {
+    return invalid("assemblyInput");
+  }
+  if (!isPlainDataArray(candidateSummariesInput) || candidateSummariesInput.length === 0 || !isPlainDataArray(rankingInput) || !isPlainDataGraph(aggregateDiagnosticsInput)) return invalid("assemblyInput");
 
   const summaries: CandidateRolloutSummary[] = [];
   const ids = new Set<string>();
-  for (const summary of input.candidateSummaries) {
+  for (let index = 0; index < candidateSummariesInput.length; index += 1) {
+    const summary = getOwnDataProperty(candidateSummariesInput, String(index));
     if (!isCandidateSummary(summary) || ids.has(summary.candidateId)) return invalid("candidateSummaries");
     if (summaries.length > 0 && compareCodeUnits(summaries[summaries.length - 1]!.candidateId, summary.candidateId) > 0) return invalid("candidateSummaries");
     ids.add(summary.candidateId);
     summaries.push(deepFreeze(structuredClone(summary)));
   }
-  if (input.ranking.length !== summaries.length || input.ranking.some((id) => typeof id !== "string" || !ids.has(id)) || new Set(input.ranking).size !== input.ranking.length) return invalid("ranking");
-  if (!isAggregateDiagnostics(input.aggregateDiagnostics, summaries.length)) return invalid("aggregateDiagnostics");
-  const aggregate = input.aggregateDiagnostics as RolloutAggregateDiagnostics;
+  if (rankingInput.length !== summaries.length) return invalid("ranking");
+  const ranking: string[] = [];
+  for (let index = 0; index < rankingInput.length; index += 1) {
+    const id = getOwnDataProperty(rankingInput, String(index));
+    if (typeof id !== "string" || !ids.has(id) || ranking.includes(id)) return invalid("ranking");
+    ranking.push(id);
+  }
+  if (!isAggregateDiagnostics(aggregateDiagnosticsInput, summaries.length)) return invalid("aggregateDiagnostics");
+  const aggregate = aggregateDiagnosticsInput as RolloutAggregateDiagnostics;
   if (summaries.some((summary) => summary.acceptedScenarioCount !== aggregate.acceptedScenarioCount || summary.replicateCountPerScenario !== aggregate.replicateCountPerScenario)) return invalid("aggregateDiagnostics");
   const summaryCompleted = safeSum(summaries.map((summary) => summary.completedReplicateCount));
   const summaryExpected = safeSum(summaries.map((summary) => summary.expectedReplicateCount));
@@ -573,13 +714,13 @@ export function createRolloutResult(input: unknown): RolloutContractResult<Rollo
     ok: true,
     value: deepFreeze({
       schemaVersion: "d2f-rollout-result-v2",
-      mode: input.mode,
+      mode: requestResult.value.mode,
       formalExecutionAllowed: false,
-      policyId: "d2f-lightweight-v1",
-      rootDigest: input.rootDigest,
+      policyId: requestResult.value.policyId,
+      rootDigest: rootDigestFromValidatedRootIdentity(requestResult.value.rootIdentity),
       candidateSummaries: summaries,
-      ranking: [...input.ranking] as string[],
-      aggregateDiagnostics: structuredClone(input.aggregateDiagnostics) as RolloutAggregateDiagnostics,
+      ranking,
+      aggregateDiagnostics: structuredClone(aggregateDiagnosticsInput) as RolloutAggregateDiagnostics,
     }),
   };
 }
@@ -610,7 +751,7 @@ function isAggregateDiagnostics(value: unknown, candidateCount: number): value i
 }
 
 function cloneScenarioSourceInput(value: unknown): RolloutScenarioSourceInput | undefined {
-  if (!isRecord(value) || !hasExactKeys(value, SOURCE_INPUT_KEYS) || !isRecord(value.bank) || !isDeeplyFrozen(value.bank) || !isParticleSnapshotIdentity(value.bank.snapshot)) return undefined;
+  if (!isPlainDataGraph(value) || !isRecord(value) || !hasExactKeys(value, SOURCE_INPUT_KEYS) || !isRecord(value.bank) || !isDeeplyFrozen(value.bank) || !isParticleSnapshotIdentity(value.bank.snapshot)) return undefined;
   if (!RANKS.includes(value.gameRank as GameRank) || !isSeat(value.perspectiveSeat)) return undefined;
   const publicHistoryEvents = clonePublicHistoryEvents(value.publicHistoryEvents);
   const initialLedger = cloneHardPublicLedger(value.initialLedger);
@@ -631,8 +772,8 @@ function cloneScenarioSourceInput(value: unknown): RolloutScenarioSourceInput | 
 }
 
 function isPublicState(value: unknown): value is RolloutPublicState {
-  if (!isRecord(value) || !hasExactKeys(value, PUBLIC_STATE_KEYS) || !RANKS.includes(value.gameRank as GameRank) || !isSeat(value.actingSeat) || !isSeat(value.perspectiveSeat) || !isSeat(value.partnerSeat) || value.partnerSeat !== partnerSeat(value.perspectiveSeat) || !isRecord(value.handCounts) || !hasExactKeys(value.handCounts, ["0", "1", "2", "3"]) || !Array.isArray(value.finishOrder) || !Array.isArray(value.publicPlayedCardIds)) return false;
-  if (!SEATS.every((seat) => isNonNegativeSafeInteger(value.handCounts[seat]))) return false;
+  if (!isPlainDataGraph(value) || !isRecord(value) || !hasExactKeys(value, PUBLIC_STATE_KEYS) || !RANKS.includes(value.gameRank as GameRank) || !isSeat(value.actingSeat) || !isSeat(value.perspectiveSeat) || !isSeat(value.partnerSeat) || value.partnerSeat !== partnerSeat(value.perspectiveSeat) || !isRecord(value.handCounts) || !hasExactKeys(value.handCounts, ["0", "1", "2", "3"]) || !isPlainDataArray(value.finishOrder) || !isPlainDataArray(value.publicPlayedCardIds)) return false;
+  if (!SEATS.every((seat) => isNonNegativeSafeInteger(value.handCounts[String(seat)]))) return false;
   if (!value.finishOrder.every(isSeat) || new Set(value.finishOrder).size !== value.finishOrder.length) return false;
   if (!value.publicPlayedCardIds.every((id) => isCardIdentifier(id)) || new Set(value.publicPlayedCardIds).size !== value.publicPlayedCardIds.length) return false;
   const hasLastPlay = value.currentLastPlay !== null;
@@ -648,10 +789,12 @@ function isPublicState(value: unknown): value is RolloutPublicState {
 }
 
 function clonePublicHistoryEvents(value: unknown): readonly PublicActionEvent[] | undefined {
-  if (!Array.isArray(value)) return undefined;
+  if (!isPlainDataArray(value)) return undefined;
   const events: PublicActionEvent[] = [];
   try {
-    for (const event of value) {
+    for (let index = 0; index < value.length; index += 1) {
+      const event = getOwnDataProperty(value, String(index));
+      if (!isPlainDataGraph(event)) return undefined;
       assertFinalizedPublicActionEvent(event);
       verifyPublicActionEventHash(event);
       if (!isPublicEventSemanticShape(event)) throw new TypeError("EVENT_SCHEMA_INVALID");
@@ -664,11 +807,13 @@ function clonePublicHistoryEvents(value: unknown): readonly PublicActionEvent[] 
 }
 
 function cloneCardArray(value: unknown): readonly Card[] | undefined {
-  if (!Array.isArray(value)) return undefined;
+  if (!isPlainDataArray(value)) return undefined;
   const cards: Card[] = [];
   const ids = new Set<string>();
   try {
-    for (const card of value) {
+    for (let index = 0; index < value.length; index += 1) {
+      const card = getOwnDataProperty(value, String(index));
+      if (!isPlainDataGraph(card)) return undefined;
       assertRolloutCard(card);
       if (ids.has(card.id)) return undefined;
       ids.add(card.id);
@@ -687,6 +832,7 @@ function cloneCard(card: Card): Card {
 }
 
 function cloneCardGroup(value: unknown): CardGroup | undefined {
+  if (!isPlainDataGraph(value)) return undefined;
   try {
     assertCardGroup(value);
   } catch {
@@ -725,13 +871,38 @@ function clonePublicState(value: unknown): RolloutPublicState | undefined {
 function cloneHardPublicLedger(value: unknown): HardPublicLedger | undefined {
   if (!isHardPublicLedger(value)) return undefined;
   const ledger = value as HardPublicLedger;
-  const currentTrick: HardPublicLedger["currentTrick"] = {
+  const currentTrick: {
+    trickIndex: number;
+    leadSeat: PublicSeat;
+    passSeats: readonly PublicSeat[];
+    lastPlaySeat?: PublicSeat;
+    lastPlayStableKey?: string;
+  } = {
     trickIndex: ledger.currentTrick.trickIndex,
     leadSeat: ledger.currentTrick.leadSeat,
     passSeats: [...ledger.currentTrick.passSeats],
-    ...(ledger.currentTrick.lastPlaySeat === undefined ? {} : { lastPlaySeat: ledger.currentTrick.lastPlaySeat }),
-    ...(ledger.currentTrick.lastPlayStableKey === undefined ? {} : { lastPlayStableKey: ledger.currentTrick.lastPlayStableKey }),
   };
+  if (ledger.currentTrick.lastPlaySeat !== undefined) currentTrick.lastPlaySeat = ledger.currentTrick.lastPlaySeat;
+  if (ledger.currentTrick.lastPlayStableKey !== undefined) currentTrick.lastPlayStableKey = ledger.currentTrick.lastPlayStableKey;
+  const seenEventHashes: Record<string, string> = {};
+  for (const key of Object.keys(ledger.seenEventHashes)) seenEventHashes[key] = ledger.seenEventHashes[Number(key)]!;
+  const revealedTransferEvents = ledger.revealedTransferEvents.map((event) => {
+    const clone: { eventIndex: number; kind: "tribute" | "return"; fromSeat: PublicSeat; toSeat: PublicSeat; cardId?: string } = {
+      eventIndex: event.eventIndex,
+      kind: event.kind,
+      fromSeat: event.fromSeat,
+      toSeat: event.toSeat,
+    };
+    if (event.cardId !== undefined) clone.cardId = event.cardId;
+    return clone;
+  });
+  const recentActionSummaries = ledger.recentActionSummaries.map((summary) => ({
+    eventIndex: summary.eventIndex,
+    kind: summary.kind,
+    seat: summary.seat,
+    trickIndex: summary.trickIndex,
+    publicStableKey: summary.publicStableKey,
+  }));
   return deepFreeze({
     schemaVersion: ledger.schemaVersion,
     gameId: ledger.gameId,
@@ -739,25 +910,20 @@ function cloneHardPublicLedger(value: unknown): HardPublicLedger | undefined {
     handIdentity: ledger.handIdentity,
     nextEventIndex: ledger.nextEventIndex,
     lastAppliedEventIndex: ledger.lastAppliedEventIndex,
-    seenEventHashes: { ...ledger.seenEventHashes },
+    seenEventHashes,
     playedCardIds: [...ledger.playedCardIds],
-    revealedTransferEvents: ledger.revealedTransferEvents.map((event) => ({
-      eventIndex: event.eventIndex,
-      kind: event.kind,
-      ...(event.cardId === undefined ? {} : { cardId: event.cardId }),
-      fromSeat: event.fromSeat,
-      toSeat: event.toSeat,
-    })),
+    revealedTransferEvents,
     handCounts: { 0: ledger.handCounts[0], 1: ledger.handCounts[1], 2: ledger.handCounts[2], 3: ledger.handCounts[3] },
     currentTrick,
     finishOrder: [...ledger.finishOrder],
     publicTributeEvents: [...ledger.publicTributeEvents],
-    recentActionSummaries: ledger.recentActionSummaries.map((summary) => ({ ...summary })),
+    recentActionSummaries,
   });
 }
 
 function isParticleSnapshotIdentity(value: unknown): value is ParticleSnapshotIdentity {
-  return isRecord(value)
+  return isPlainDataGraph(value)
+    && isRecord(value)
     && hasExactKeys(value, SNAPSHOT_KEYS)
     && isNonEmptyString(value.gameId)
     && isNonEmptyString(value.roundIdentity)
@@ -843,18 +1009,52 @@ function partnerSeat(seat: PublicSeat): PublicSeat {
 }
 
 function assertReplayContextInput(input: RolloutReplayContextInput): void {
-  if (!isRecord(input) || !Array.isArray(input.publicHistoryEvents) || !isHardPublicLedger(input.initialLedger) || !isHardPublicLedger(input.finalLedger) || !RANKS.includes(input.gameRank) || !isSeat(input.perspectiveSeat) || !isSeat(input.actingSeat) || !Array.isArray(input.ownCurrentHand) || !isPublicState(input.publicState) || !isParticleSnapshotIdentity(input.particleBankSnapshot)) throw new TypeError("REPLAY_CONTEXT_INVALID");
+  if (!isPlainDataGraph(input) || !isRecord(input) || !isPlainDataArray(input.publicHistoryEvents) || !isHardPublicLedger(input.initialLedger) || !isHardPublicLedger(input.finalLedger) || !RANKS.includes(input.gameRank) || !isSeat(input.perspectiveSeat) || !isSeat(input.actingSeat) || !isPlainDataArray(input.ownCurrentHand) || !isPublicState(input.publicState) || !isParticleSnapshotIdentity(input.particleBankSnapshot)) throw new TypeError("REPLAY_CONTEXT_INVALID");
   const events = clonePublicHistoryEvents(input.publicHistoryEvents);
+  const initialLedger = cloneHardPublicLedger(input.initialLedger);
+  const finalLedger = cloneHardPublicLedger(input.finalLedger);
   const ownCurrentHand = cloneCardArray(input.ownCurrentHand);
-  if (events === undefined) throw new TypeError("REPLAY_CONTEXT_INVALID");
-  if (ownCurrentHand === undefined) throw new TypeError("REPLAY_HAND_INVALID");
-  if (input.publicState.gameRank !== input.gameRank || input.publicState.perspectiveSeat !== input.perspectiveSeat || input.publicState.actingSeat !== input.actingSeat || input.publicState.partnerSeat !== partnerSeat(input.perspectiveSeat)) throw new TypeError("REPLAY_CONTEXT_INVALID");
-  if (!SEATS.every((seat) => input.publicState.handCounts[seat] === input.finalLedger.handCounts[seat])
-    || input.publicState.publicPlayedCardIds.length !== input.finalLedger.playedCardIds.length
-    || !input.publicState.publicPlayedCardIds.every((id, index) => id === input.finalLedger.playedCardIds[index])
-    || input.publicState.finishOrder.length !== input.finalLedger.finishOrder.length
-    || !input.publicState.finishOrder.every((seat, index) => seat === input.finalLedger.finishOrder[index])) throw new TypeError("REPLAY_CONTEXT_INVALID");
-  if (!matchesLedgerIdentity(input.initialLedger, input.finalLedger, input.particleBankSnapshot, input.gameRank, input.perspectiveSeat) || !matchesHistoryShape(events, input.initialLedger, input.finalLedger) || deriveActingSeat(events, input.finalLedger) !== input.actingSeat) throw new TypeError("REPLAY_CONTEXT_INVALID");
+  const publicState = clonePublicState(input.publicState);
+  if (events === undefined || initialLedger === undefined || finalLedger === undefined || ownCurrentHand === undefined || publicState === undefined) throw new TypeError("REPLAY_CONTEXT_INVALID");
+  if (publicState.gameRank !== input.gameRank || publicState.perspectiveSeat !== input.perspectiveSeat || publicState.actingSeat !== input.actingSeat || publicState.partnerSeat !== partnerSeat(input.perspectiveSeat)) throw new TypeError("REPLAY_CONTEXT_INVALID");
+  if (!SEATS.every((seat) => publicState.handCounts[seat] === finalLedger.handCounts[seat])
+    || publicState.publicPlayedCardIds.length !== finalLedger.playedCardIds.length
+    || !publicState.publicPlayedCardIds.every((id, index) => id === finalLedger.playedCardIds[index])
+    || publicState.finishOrder.length !== finalLedger.finishOrder.length
+    || !publicState.finishOrder.every((seat, index) => seat === finalLedger.finishOrder[index])) throw new TypeError("REPLAY_CONTEXT_INVALID");
+  if (!validatePublicConsistency(events, finalLedger, publicState)
+    || !matchesLedgerIdentity(initialLedger, finalLedger, input.particleBankSnapshot, input.gameRank, input.perspectiveSeat)
+    || !matchesHistoryShape(events, initialLedger, finalLedger)
+    || deriveActingSeat(events, finalLedger) !== input.actingSeat) throw new TypeError("REPLAY_CONTEXT_INVALID");
+}
+
+function validatePublicConsistency(
+  events: readonly PublicActionEvent[],
+  finalLedger: HardPublicLedger,
+  publicState: RolloutPublicState,
+): boolean {
+  const ledgerSeat = finalLedger.currentTrick.lastPlaySeat;
+  const ledgerStableKey = finalLedger.currentTrick.lastPlayStableKey;
+  const stateHasLastPlay = publicState.currentLastPlay !== null;
+  if (stateHasLastPlay !== (publicState.currentLastPlaySeat !== null)) return false;
+  if (stateHasLastPlay !== (ledgerSeat !== undefined && ledgerStableKey !== undefined)) return false;
+  if (stateHasLastPlay && (publicState.currentLastPlaySeat !== ledgerSeat || ledgerStableKey === undefined)) return false;
+
+  let lastPlayIndex = -1;
+  let lastTrickClearIndex = -1;
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]!;
+    if (event.kind === "play") lastPlayIndex = index;
+    if (event.kind === "trick-clear") lastTrickClearIndex = index;
+  }
+  if (lastPlayIndex <= lastTrickClearIndex) return !stateHasLastPlay;
+  const lastPlay = events[lastPlayIndex]!;
+  if (lastPlay.kind !== "play" || ledgerSeat !== lastPlay.seat || ledgerStableKey !== lastPlay.publicStableKey || finalLedger.currentTrick.trickIndex !== lastPlay.trickIndex) return false;
+  if (!stateHasLastPlay || publicState.currentLastPlay === null) return false;
+  const group = publicState.currentLastPlay as CardGroup;
+  if (group.type !== lastPlay.groupType || group.type !== lastPlay.patternType || playPublicStableKey(group.cards.map((card) => card.id)) !== lastPlay.publicStableKey) return false;
+  if (group.cards.length !== lastPlay.publicCardIds.length || new Set(group.cards.map((card) => card.id)).size !== group.cards.length || !lastPlay.publicCardIds.every((id) => group.cards.some((card) => card.id === id))) return false;
+  return lastPlay.usedWildcardCount === undefined || group.wildcards.length === lastPlay.usedWildcardCount;
 }
 
 function matchesLedgerIdentity(initialLedger: HardPublicLedger, finalLedger: HardPublicLedger, snapshot: ParticleSnapshotIdentity, gameRank: GameRank, perspectiveSeat: PublicSeat): boolean {
@@ -973,7 +1173,7 @@ function writeParticleSnapshot(writer: CanonicalWriter, snapshot: ParticleSnapsh
 }
 
 function assertRolloutAction(action: RolloutAction): void {
-  if (!isRecord(action) || (action.type !== "pass" && action.type !== "play")) throw new TypeError("ACTION_INVALID");
+  if (!isPlainDataGraph(action) || !isRecord(action) || (action.type !== "pass" && action.type !== "play")) throw new TypeError("ACTION_INVALID");
   if (action.type === "pass") {
     if (!hasExactKeys(action, ["type"])) throw new TypeError("ACTION_INVALID");
     return;
@@ -994,8 +1194,19 @@ function assertRolloutAction(action: RolloutAction): void {
   }
 }
 
+function isContextuallyLegalWildcardProjection(action: RolloutAction, gameRank: GameRank): boolean {
+  if (action.type === "pass") return true;
+  const cardIds = new Set(action.group.cards.map((card) => card.id));
+  const wildcardIds = new Set<string>();
+  for (const wildcard of action.group.wildcards) {
+    if (!cardIds.has(wildcard.id) || wildcardIds.has(wildcard.id) || !isHeartRankWild(wildcard, gameRank)) return false;
+    wildcardIds.add(wildcard.id);
+  }
+  return true;
+}
+
 function assertRolloutCard(card: unknown): asserts card is Card {
-  if (!isRecord(card) || !isNonEmptyString(card.id) || typeof card.kind !== "string") throw new TypeError("ACTION_CARD_INVALID");
+  if (!isPlainDataGraph(card) || !isRecord(card) || !isNonEmptyString(card.id) || typeof card.kind !== "string") throw new TypeError("ACTION_CARD_INVALID");
   if (card.kind === "suited") {
     if (!hasExactKeys(card, ["id", "kind", "rank", "suit", "copy"]) || !RANKS.includes(card.rank as GameRank) || !SUITS.includes(card.suit as (typeof SUITS)[number]) || (card.copy !== 1 && card.copy !== 2)) throw new TypeError("ACTION_CARD_INVALID");
     if (card.id !== `${CARD_SUIT_CODES[card.suit]}${card.rank}-${card.copy}`) throw new TypeError("ACTION_CARD_INVALID");
@@ -1033,32 +1244,90 @@ function isSeat(value: unknown): value is PublicSeat {
   return value === 0 || value === 1 || value === 2 || value === 3;
 }
 
+function getOwnDataProperty(value: unknown, key: string): unknown {
+  if (value === null || typeof value !== "object") throw new TypeError("DATA_PROPERTY_INVALID");
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!isDataDescriptor(descriptor)) throw new TypeError("DATA_PROPERTY_INVALID");
+  return descriptor.value;
+}
+
+function isDataDescriptor(descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor & { value: unknown } {
+  return descriptor !== undefined && Object.prototype.hasOwnProperty.call(descriptor, "value") && descriptor.get === undefined && descriptor.set === undefined;
+}
+
+function isPlainDataRecord(value: unknown, allowedKeys?: readonly string[], exact = false): value is Record<string, unknown> {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    const ownKeys = Reflect.ownKeys(value);
+    const allowed = allowedKeys === undefined ? undefined : new Set(allowedKeys);
+    if (ownKeys.some((key) => typeof key !== "string" || (allowed !== undefined && !allowed.has(key)))) return false;
+    if (exact && allowed !== undefined && (ownKeys.length !== allowed.size || allowedKeys !== undefined && allowedKeys.some((key) => !ownKeys.includes(key)))) return false;
+    return ownKeys.every((key) => isDataDescriptor(Object.getOwnPropertyDescriptor(value, key)));
+  } catch {
+    return false;
+  }
+}
+
+function hasExactOwnDataKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return isPlainDataRecord(value, keys, true);
+}
+
+function isPlainDataArray(value: unknown): value is readonly unknown[] {
+  try {
+    if (!Array.isArray(value)) return false;
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    if (!isDataDescriptor(lengthDescriptor) || !isNonNegativeSafeInteger(lengthDescriptor.value)) return false;
+    const length = lengthDescriptor.value;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== length + 1 || !ownKeys.includes("length")) return false;
+    for (let index = 0; index < length; index += 1) {
+      const key = String(index);
+      if (!ownKeys.includes(key) || !isDataDescriptor(Object.getOwnPropertyDescriptor(value, key))) return false;
+    }
+    return ownKeys.every((key) => key === "length" || (typeof key === "string" && /^0$|^[1-9]\d*$/.test(key) && Number(key) < length));
+  } catch {
+    return false;
+  }
+}
+
+function isPlainDataGraph(value: unknown, ancestors = new WeakSet<object>()): boolean {
+  if (value === null || typeof value === "undefined" || typeof value === "boolean" || typeof value === "number" || typeof value === "string") return true;
+  if (typeof value !== "object") return false;
+  if (ancestors.has(value)) return false;
+  ancestors.add(value);
+  const shapeValid = Array.isArray(value) ? isPlainDataArray(value) : isPlainDataRecord(value);
+  if (!shapeValid) {
+    ancestors.delete(value);
+    return false;
+  }
+  let valid = true;
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") {
+      valid = false;
+      break;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!isDataDescriptor(descriptor) || !isPlainDataGraph(descriptor.value, ancestors)) {
+      valid = false;
+      break;
+    }
+  }
+  ancestors.delete(value);
+  return valid;
+}
+
 function isRecord(value: unknown): value is Record<string, any> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return isPlainDataRecord(value);
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const ownKeys = Reflect.ownKeys(value);
-  return ownKeys.length === keys.length && ownKeys.every((key) => typeof key === "string" && keys.includes(key)) && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
-}
-
-function exactEnvelopeKeyError(value: Record<string, unknown>, keys: readonly string[]): string | undefined {
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== null && prototype !== Object.prototype) return "request";
-  if (prototype === Object.prototype) {
-    for (const inheritedKey of ["policy", "chooseAction", "policyFactory", "callback", "registry"] as const) {
-      if (inheritedKey in value && !Object.prototype.hasOwnProperty.call(value, inheritedKey)) return inheritedKey;
-    }
-  }
-  const ownKeys = Reflect.ownKeys(value);
-  const unexpected = ownKeys.find((key) => typeof key !== "string" || !keys.includes(key));
-  if (unexpected !== undefined) return typeof unexpected === "string" ? unexpected : "request";
-  return keys.find((key) => !Object.prototype.hasOwnProperty.call(value, key));
+  return hasExactOwnDataKeys(value, keys);
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const allowed = new Set(keys);
-  return Reflect.ownKeys(value).every((key) => typeof key === "string" && allowed.has(key));
+  return isPlainDataRecord(value, keys, false);
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -1110,8 +1379,11 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
   if (value === null || typeof value !== "object") return value;
   if (seen.has(value)) return value;
   seen.add(value);
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (isDataDescriptor(descriptor)) deepFreeze(descriptor.value, seen);
+  }
   if (!Object.isFrozen(value)) Object.freeze(value);
-  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child, seen);
   return value;
 }
 
@@ -1121,7 +1393,10 @@ function isDeeplyFrozen(value: unknown, seen = new WeakSet<object>()): boolean {
   if (seen.has(value)) return true;
   if (!Object.isFrozen(value)) return false;
   seen.add(value);
-  return Object.values(value as Record<string, unknown>).every((child) => isDeeplyFrozen(child, seen));
+  return Reflect.ownKeys(value).every((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return isDataDescriptor(descriptor) && isDeeplyFrozen(descriptor.value, seen);
+  });
 }
 
 class CanonicalWriter {

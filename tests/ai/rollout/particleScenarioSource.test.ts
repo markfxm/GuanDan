@@ -8,7 +8,7 @@ import { createParticleBankHandle } from "../../../src/ai/particles/particleBank
 import { particleScenarioIdentity } from "../../../src/ai/particles/canonicalDeal";
 import type { CanonicalInitialDeal, ParticleBank, ParticleScenario } from "../../../src/ai/particles/contracts";
 import { createParticleScenarioSource } from "../../../src/ai/rollout/particleScenarioSource";
-import { canonicalReplayContextIdentity } from "../../../src/ai/rollout/contracts";
+import { canonicalActionIdentity, canonicalReplayContextIdentity, createRolloutRequest } from "../../../src/ai/rollout/contracts";
 import type { RolloutScenarioSourceInput } from "../../../src/ai/rollout/contracts";
 
 function makePlayEvent(identity: ReturnType<typeof buildPublicGameIdentity>, cardId: string): PublicActionEvent {
@@ -157,7 +157,76 @@ function makeEmptyHistoryFixture(): ReturnType<typeof makeFixture> {
   };
 }
 
+function makeRequestForSourceInput(input: RolloutScenarioSourceInput, rootIdentityOverride?: string): unknown {
+  const action = { type: "pass" } as const;
+  const rootIdentity = rootIdentityOverride ?? canonicalReplayContextIdentity({
+    publicHistoryEvents: input.publicHistoryEvents,
+    initialLedger: input.initialLedger,
+    finalLedger: input.finalLedger,
+    gameRank: input.gameRank,
+    perspectiveSeat: input.perspectiveSeat,
+    ownCurrentHand: input.ownCurrentHand,
+    actingSeat: input.publicState.actingSeat,
+    publicState: input.publicState,
+    particleBankSnapshot: input.bank.snapshot,
+  });
+  return {
+    schemaVersion: "d2f-rollout-request-v2",
+    mode: "detached",
+    formalExecutionAllowed: false,
+    rootIdentity,
+    scenarioSourceInput: input,
+    candidates: [{ candidateId: canonicalActionIdentity(action), action, baselineEvaluatorScore: 0 }],
+    budget: { replicateCountPerScenario: 1, maxPliesPerReplicate: 1, maxPolicyActionEvaluationsPerPly: 1, maxWorkUnits: 1 },
+    limits: { maxReplicateCountPerScenario: 1, maxPliesPerReplicate: 1, maxPolicyActionEvaluationsPerPly: 1, maxWorkUnits: 1 },
+    evidenceRequirements: {
+      schemaVersion: "d2f-rollout-evidence-requirements-v1",
+      minimumEffectiveSampleSize: 1,
+      minimumAcceptedScenarioCount: 1,
+      minimumCompletedReplicateCount: 1,
+      requireCompleteCoverage: true,
+    },
+    riskPolicy: { schemaVersion: "d2f-rollout-risk-policy-v1", variancePenalty: 0, downsideRiskPenalty: 0 },
+    policyId: "d2f-lightweight-v1",
+  };
+}
+
 describe("particleScenarioSource", () => {
+  test("rejects public last-play projections disproven by public ledger/history before root identity", () => {
+    const fixture = makeFixture();
+    const validRootIdentity = canonicalReplayContextIdentity({
+      publicHistoryEvents: fixture.input.publicHistoryEvents,
+      initialLedger: fixture.input.initialLedger,
+      finalLedger: fixture.input.finalLedger,
+      gameRank: fixture.input.gameRank,
+      perspectiveSeat: fixture.input.perspectiveSeat,
+      ownCurrentHand: fixture.input.ownCurrentHand,
+      actingSeat: fixture.input.publicState.actingSeat,
+      publicState: fixture.input.publicState,
+      particleBankSnapshot: fixture.input.bank.snapshot,
+    });
+    const cases = [
+      {
+        ...fixture.input,
+        publicState: { ...fixture.input.publicState, currentLastPlaySeat: 1 },
+      },
+      {
+        ...fixture.input,
+        publicState: { ...fixture.input.publicState, currentLastPlay: null, currentLastPlaySeat: null },
+      },
+      {
+        ...fixture.input,
+        publicState: { ...fixture.input.publicState, currentLastPlay: { ...fixture.input.publicState.currentLastPlay!, type: "wrong-pattern" } },
+      },
+    ] as RolloutScenarioSourceInput[];
+
+    for (const input of cases) {
+      const result = createRolloutRequest(makeRequestForSourceInput(input, validRootIdentity));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.failure.kind).toBe("invalid-request");
+    }
+  });
+
   test("changes replay identity when a finalized event hash changes", () => {
     const fixture = makeFixture();
     const identity = (input: RolloutScenarioSourceInput): string => canonicalReplayContextIdentity({
@@ -340,7 +409,7 @@ describe("particleScenarioSource", () => {
       publicState: { ...fixture.input.publicState, currentLastPlaySeat: 1 },
     });
 
-    expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "private-state-invalid" } });
+    expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "replay-context-missing" } });
   });
 
   test("rejects a public last-play group mismatch against replay state", () => {
@@ -361,7 +430,7 @@ describe("particleScenarioSource", () => {
     );
     const result = createParticleScenarioSource({ ...fixture.input, bank: mismatchedBank });
 
-    expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "private-state-invalid" } });
+    expect(result).toEqual({ ok: false, failure: { kind: "fake-or-unknown-particle-bank" } });
   });
 
   test("returns recursively frozen, caller-isolated output with stable repeated reads", () => {
@@ -390,6 +459,27 @@ describe("particleScenarioSource", () => {
     mutableInput.ownCurrentHand.pop();
     mutableInput.publicState.handCounts[0] = 1;
     expect(JSON.stringify(first)).not.toContain('"handCounts":{"0":1');
+  });
+
+  test("rejects a source-envelope accessor without executing it or returning partial state", () => {
+    const fixture = makeFixture();
+    let callbackCallCount = 0;
+    const hostile = { ...fixture.input } as Record<string, unknown>;
+    Object.defineProperty(hostile, "publicState", {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        callbackCallCount += 1;
+        return fixture.input.publicState;
+      },
+    });
+
+    expect(() => createParticleScenarioSource(hostile as unknown as RolloutScenarioSourceInput)).not.toThrow();
+    expect(createParticleScenarioSource(hostile as unknown as RolloutScenarioSourceInput)).toEqual({
+      ok: false,
+      failure: { kind: "scenario-source-failed", reason: "replay-context-missing" },
+    });
+    expect(callbackCallCount).toBe(0);
   });
 
   test("keeps the raw source envelope private and requires an explicit diagnostic projection", () => {
