@@ -40,6 +40,11 @@ import { sampleConstrainedParticleScenarios } from "../../../src/ai/particles/co
 import { evaluateActionSupportLikelihood } from "../../../src/ai/particles/actionSupportLikelihood";
 import { aggregateLogWeights, normalizeLogWeights } from "../../../src/ai/particles/logWeightNormalization";
 import { calculateEffectiveSampleSize } from "../../../src/ai/particles/effectiveSampleSize";
+import {
+  canonicalActionIdentity,
+  canonicalReplayContextIdentity,
+  createRolloutRequest,
+} from "../../../src/ai/rollout/contracts";
 import type {
   CanonicalInitialDeal,
   ParticleActionObservation,
@@ -1135,10 +1140,158 @@ describe("immutable particle bank builder core", () => {
     expect(internalsModule.readParticleBankInternals).toBeDefined();
   });
 
+  test("uses degraded status when real builder ESS is below the threshold", () => {
+    const fixture = makeFixture();
+    const threshold = 3;
+    const bank = successfulBank(makeBuildInput(fixture, {
+      particleCount: 3,
+      likelihoodConfig: { ...fixture.likelihoodConfig, degradedEssThreshold: threshold },
+    }));
+    const internals = internalsModule.readParticleBankInternals(bank);
+    expect(internals).toBeDefined();
+    const helper = calculateEffectiveSampleSize({
+      normalizedWeights: (internals?.records ?? []).map((record) => record.normalizedWeight),
+      tolerance: fixture.likelihoodConfig.essTolerance,
+      degradedEssThreshold: threshold,
+    });
+    expect(helper.ess).toBeLessThan(threshold);
+    expect(helper.status).toBe("degraded");
+    expect(bank.status).toBe("degraded");
+    expect(bank.summary.status).toBe("degraded");
+    expect(bank.effectiveSampleSize).toBe(helper.ess);
+  });
+
+  test("uses ready status when real builder ESS equals the threshold", () => {
+    const fixture = makeFixture();
+    const threshold = 1;
+    const bank = successfulBank(makeBuildInput(fixture, {
+      particleCount: 1,
+      likelihoodConfig: { ...fixture.likelihoodConfig, degradedEssThreshold: threshold },
+    }));
+    const internals = internalsModule.readParticleBankInternals(bank);
+    expect(internals).toBeDefined();
+    const helper = calculateEffectiveSampleSize({
+      normalizedWeights: (internals?.records ?? []).map((record) => record.normalizedWeight),
+      tolerance: fixture.likelihoodConfig.essTolerance,
+      degradedEssThreshold: threshold,
+    });
+    expect(helper.ess).toBe(threshold);
+    expect(helper.status).toBe("ready");
+    expect(bank.status).toBe("ready");
+    expect(bank.summary.status).toBe("ready");
+    expect(bank.effectiveSampleSize).toBe(helper.ess);
+  });
+
+  test("uses ready status when real builder ESS is above the threshold", () => {
+    const fixture = makeFixture();
+    const threshold = 1;
+    const bank = successfulBank(makeBuildInput(fixture, {
+      likelihoodConfig: { ...fixture.likelihoodConfig, degradedEssThreshold: threshold },
+    }));
+    const internals = internalsModule.readParticleBankInternals(bank);
+    expect(internals).toBeDefined();
+    const helper = calculateEffectiveSampleSize({
+      normalizedWeights: (internals?.records ?? []).map((record) => record.normalizedWeight),
+      tolerance: fixture.likelihoodConfig.essTolerance,
+      degradedEssThreshold: threshold,
+    });
+    expect(helper.ess).toBeGreaterThan(threshold);
+    expect(helper.status).toBe("ready");
+    expect(bank.status).toBe("ready");
+    expect(bank.summary.status).toBe("ready");
+    expect(bank.effectiveSampleSize).toBe(helper.ess);
+  });
+
+  test("passes a real equality-threshold bank through the rollout request boundary", () => {
+    const fixture = makeFixture();
+    const bank = successfulBank(makeBuildInput(fixture, {
+      particleCount: 1,
+      likelihoodConfig: { ...fixture.likelihoodConfig, degradedEssThreshold: 1 },
+    }));
+    const currentLastPlay = detectGroups([fixture.laterPlayCard], fixture.gameRank).find((group) => group.type === "single");
+    if (currentLastPlay === undefined) throw new Error("CURRENT_LAST_PLAY_FIXTURE_MISSING");
+    const publicState = {
+      gameRank: fixture.gameRank,
+      actingSeat: 1 as const,
+      perspectiveSeat: 0 as const,
+      partnerSeat: 2 as const,
+      handCounts: { ...fixture.finalLedger.handCounts },
+      finishOrder: [...fixture.finalLedger.finishOrder],
+      publicPlayedCardIds: [...fixture.finalLedger.playedCardIds],
+      currentLastPlay,
+      currentLastPlaySeat: 1 as const,
+    };
+    const scenarioSourceInput = {
+      bank,
+      publicHistoryEvents: fixture.publicHistoryEvents,
+      initialLedger: fixture.initialLedger,
+      finalLedger: fixture.finalLedger,
+      gameRank: fixture.gameRank,
+      perspectiveSeat: 0 as const,
+      ownCurrentHand: fixture.ownCurrentHand,
+      publicState,
+    };
+    const action = { type: "pass" } as const;
+    const rootIdentity = canonicalReplayContextIdentity({
+      publicHistoryEvents: scenarioSourceInput.publicHistoryEvents,
+      initialLedger: scenarioSourceInput.initialLedger,
+      finalLedger: scenarioSourceInput.finalLedger,
+      gameRank: scenarioSourceInput.gameRank,
+      perspectiveSeat: scenarioSourceInput.perspectiveSeat,
+      ownCurrentHand: scenarioSourceInput.ownCurrentHand,
+      actingSeat: scenarioSourceInput.publicState.actingSeat,
+      publicState: scenarioSourceInput.publicState,
+      particleBankSnapshot: scenarioSourceInput.bank.snapshot,
+    });
+    const result = createRolloutRequest({
+      schemaVersion: "d2f-rollout-request-v2",
+      mode: "detached",
+      formalExecutionAllowed: false,
+      rootIdentity,
+      scenarioSourceInput,
+      candidates: [{
+        candidateId: canonicalActionIdentity(action),
+        action,
+        baselineEvaluatorScore: 0,
+      }],
+      budget: {
+        replicateCountPerScenario: 1,
+        maxPliesPerReplicate: 3,
+        maxPolicyActionEvaluationsPerPly: 4,
+        maxWorkUnits: 12,
+      },
+      limits: {
+        maxReplicateCountPerScenario: 2,
+        maxPliesPerReplicate: 6,
+        maxPolicyActionEvaluationsPerPly: 8,
+        maxWorkUnits: 96,
+      },
+      evidenceRequirements: {
+        schemaVersion: "d2f-rollout-evidence-requirements-v1",
+        minimumEffectiveSampleSize: 1,
+        minimumAcceptedScenarioCount: 1,
+        minimumCompletedReplicateCount: 1,
+        requireCompleteCoverage: true,
+      },
+      riskPolicy: {
+        schemaVersion: "d2f-rollout-risk-policy-v1",
+        variancePenalty: 0,
+        downsideRiskPenalty: 0,
+      },
+      policyId: "d2f-lightweight-v1",
+    });
+    expect(bank.effectiveSampleSize).toBe(1);
+    expect(bank.status).toBe("ready");
+    expect(bank.summary.status).toBe("ready");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.scenarioSourceInput.bank).toBe(bank);
+  });
+
   test("returns degraded success for low ESS without resampling", () => {
     const fixture = makeFixture();
     const bank = successfulBank(makeBuildInput(fixture, {
-      likelihoodConfig: { ...fixture.likelihoodConfig, degradedEssThreshold: 2 },
+      particleCount: 3,
+      likelihoodConfig: { ...fixture.likelihoodConfig, degradedEssThreshold: 3 },
     }));
     expect(bank.status).toBe("degraded");
     expect(bank.effectiveSampleSize).toBeGreaterThanOrEqual(1);

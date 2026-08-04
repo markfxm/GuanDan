@@ -441,20 +441,20 @@ function makeResultInput(): RolloutResult {
       risk: 0,
       baselineEvaluatorScore: 1,
       acceptedScenarioCount: 1,
-      replicateCountPerScenario: 1,
-      expectedReplicateCount: 1,
-      completedReplicateCount: 1,
-      workUnitCount: 1,
+      replicateCountPerScenario: 2,
+      expectedReplicateCount: 2,
+      completedReplicateCount: 2,
+      workUnitCount: 2,
     }],
     ranking: [candidateId],
     aggregateDiagnostics: {
       effectiveSampleSize: 1,
       acceptedScenarioCount: 1,
-      replicateCountPerScenario: 1,
-      completedReplicateCount: 1,
-      expectedCompletedReplicateCount: 1,
+      replicateCountPerScenario: 2,
+      completedReplicateCount: 2,
+      expectedCompletedReplicateCount: 2,
       candidateCount: 1,
-      workUnitCount: 1,
+      workUnitCount: 2,
       coverage: "complete",
     },
   };
@@ -860,6 +860,30 @@ describe("D2F ParticleBank bridge", () => {
       return Object.freeze(value);
     })();
     const inconsistentSnapshot = Object.freeze({ ...bank.snapshot, gameId: "foreign-public-bank" });
+    const acceptedCountMismatchesConfig = makeKnownBank(
+      1,
+      bank.snapshot,
+      undefined,
+      undefined,
+      1,
+      {
+        particleCount: 2,
+        summary: {
+          requestedParticleCount: 2,
+          acceptedParticleCount: 1,
+          samplingAttempts: 1,
+          effectiveSampleSize: 1,
+        },
+      },
+    );
+    const attemptsExceedConfig = makeKnownBank(
+      1,
+      bank.snapshot,
+      undefined,
+      undefined,
+      1,
+      { summary: { samplingAttempts: 2 } },
+    );
     const cases: readonly [string, unknown][] = [
       ["missing required public key", missingStatus],
       ["extra enumerable string key", makePublicBank({ unknownMetadata: 1 })],
@@ -870,9 +894,13 @@ describe("D2F ParticleBank bridge", () => {
       ["status and summary status conflict", makePublicBank({}, { status: "degraded" })],
       ["accepted count exceeds particle count", makePublicBank({}, { acceptedParticleCount: 2 })],
       ["requested count disagrees with particle count", makePublicBank({}, { requestedParticleCount: 2 })],
+      ["accepted count disagrees with requested and config count", acceptedCountMismatchesConfig],
+      ["sampling attempts exceed configured maximum", attemptsExceedConfig],
       ["sampling attempts do not cover accepted and duplicate counts", makePublicBank({}, { samplingAttempts: 1, duplicateCount: 1 })],
       ["public and summary ESS conflict", makePublicBank({ effectiveSampleSize: 0.5 }, { effectiveSampleSize: 1 })],
       ["zero-weight count exceeds accepted count", makePublicBank({}, { zeroWeightCount: 2 })],
+      ["negative zero duplicate count", makePublicBank({}, { duplicateCount: -0 })],
+      ["negative zero zero-weight count", makePublicBank({}, { zeroWeightCount: -0 })],
       ["ready bank has failed summary", makePublicBank({}, { status: "failed", failureReason: "insufficient-particles" })],
       ["snapshot public identity disagrees with ledger", makePublicBank({ snapshot: inconsistentSnapshot })],
       ["NaN particle count", makePublicBank({ particleCount: Number.NaN })],
@@ -893,6 +921,71 @@ describe("D2F ParticleBank bridge", () => {
       expect(result, label).not.toHaveProperty("value");
     }
     expect(getterCallCount).toBe(0);
+  });
+
+  test("rejects every invalid public ParticleBank numeric metadata category", () => {
+    const base = makeRequestInput();
+    const bank = base.scenarioSourceInput.bank;
+    const invalidValues = [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      1.5,
+      -1,
+      -0,
+      Number.MAX_SAFE_INTEGER + 1,
+    ];
+    const makeBank = (overrides: Readonly<Record<string, unknown>>): unknown => Object.freeze({
+      ...bank,
+      ...overrides,
+    });
+    for (const field of ["particleCount", "maxSamplingAttempts", "maxIndexDraws"] as const) {
+      for (const value of invalidValues) {
+        const config = Object.freeze({ ...bank.config, [field]: value });
+        const candidateBank = makeBank({ config });
+        const result = createRolloutRequest({
+          ...base,
+          scenarioSourceInput: { ...base.scenarioSourceInput, bank: candidateBank },
+        } as unknown);
+        expect(result, `config.${field}=${String(value)}`).toEqual({
+          ok: false,
+          failure: { kind: "invalid-request", field: "scenarioSourceInput" },
+        });
+      }
+    }
+    for (const field of [
+      "requestedParticleCount",
+      "acceptedParticleCount",
+      "samplingAttempts",
+      "duplicateCount",
+      "zeroWeightCount",
+    ] as const) {
+      for (const value of invalidValues) {
+        const summary = Object.freeze({ ...bank.summary, [field]: value });
+        const candidateBank = makeBank({ summary });
+        const result = createRolloutRequest({
+          ...base,
+          scenarioSourceInput: { ...base.scenarioSourceInput, bank: candidateBank },
+        } as unknown);
+        expect(result, `summary.${field}=${String(value)}`).toEqual({
+          ok: false,
+          failure: { kind: "invalid-request", field: "scenarioSourceInput" },
+        });
+      }
+    }
+    for (const value of invalidValues) {
+      const summary = Object.freeze({ ...bank.summary, effectiveSampleSize: value });
+      const candidateBank = makeBank({ effectiveSampleSize: value, summary });
+      const result = createRolloutRequest({
+        ...base,
+        scenarioSourceInput: { ...base.scenarioSourceInput, bank: candidateBank },
+      } as unknown);
+      expect(result, `ESS=${String(value)}`).toEqual({
+        ok: false,
+        failure: { kind: "invalid-request", field: "scenarioSourceInput" },
+      });
+    }
+    expect(createRolloutRequest(base).ok).toBe(true);
   });
 
   test("accepts a valid registered bank while preserving its opaque handle identity", () => {
@@ -1239,6 +1332,203 @@ describe("D2F ParticleBank bridge", () => {
     expect("policy" in replicateInput).toBe(false);
   });
 
+  test("binds result baseline, budget, scenario and ESS provenance to the validated request", () => {
+    const singleRequest = makeRequestInput();
+    const firstCandidate = singleRequest.candidates[0]!;
+    const secondAction = makeAction(1);
+    const secondCandidate: RolloutCandidate = {
+      ...firstCandidate,
+      candidateId: canonicalActionIdentity(secondAction),
+      action: secondAction,
+      baselineEvaluatorScore: 2,
+    };
+    const multiScenarioBank = makeKnownBank(
+      0.5,
+      singleRequest.scenarioSourceInput.bank.snapshot,
+      undefined,
+      undefined,
+      2,
+      {
+        particleCount: 2,
+        summary: {
+          requestedParticleCount: 2,
+          acceptedParticleCount: 2,
+          samplingAttempts: 2,
+          duplicateCount: 0,
+          zeroWeightCount: 0,
+          effectiveSampleSize: 2,
+        },
+      },
+    );
+    const request: RolloutRequest = {
+      ...singleRequest,
+      scenarioSourceInput: { ...singleRequest.scenarioSourceInput, bank: multiScenarioBank },
+      candidates: [firstCandidate, secondCandidate],
+    };
+    const repeatCount = request.budget.replicateCountPerScenario;
+    const acceptedScenarioCount = request.scenarioSourceInput.bank.summary.acceptedParticleCount;
+    const expectedLocalCoverage = acceptedScenarioCount * repeatCount;
+    const summaries = request.candidates.map((candidate) => ({
+      candidateId: candidate.candidateId,
+      riskAdjustedUtility: 1,
+      expectedUtility: 1,
+      variance: 0,
+      risk: 0,
+      baselineEvaluatorScore: candidate.baselineEvaluatorScore,
+      acceptedScenarioCount,
+      replicateCountPerScenario: repeatCount,
+      expectedReplicateCount: expectedLocalCoverage,
+      completedReplicateCount: expectedLocalCoverage,
+      workUnitCount: expectedLocalCoverage,
+    })).sort((left, right) => left.candidateId < right.candidateId ? -1 : left.candidateId > right.candidateId ? 1 : 0);
+    const validAssembly = {
+      candidateSummaries: summaries,
+      ranking: [secondCandidate.candidateId, firstCandidate.candidateId],
+      aggregateDiagnostics: {
+        effectiveSampleSize: 2,
+        acceptedScenarioCount,
+        replicateCountPerScenario: repeatCount,
+        completedReplicateCount: expectedLocalCoverage * request.candidates.length,
+        expectedCompletedReplicateCount: expectedLocalCoverage * request.candidates.length,
+        candidateCount: request.candidates.length,
+        workUnitCount: expectedLocalCoverage * request.candidates.length,
+        coverage: "complete" as const,
+      },
+    };
+    const valid = createRolloutResult(request, validAssembly);
+    expect(valid.ok).toBe(true);
+
+    const expectInvalid = (assembly: unknown, label: string): void => {
+      let result: RolloutContractResult<RolloutResult> | undefined;
+      expect(() => { result = createRolloutResult(request, assembly); }, label).not.toThrow();
+      expect(result, label).toEqual({ ok: false, failure: { kind: "invalid-request", field: expect.any(String) } });
+      expect(result, label).not.toHaveProperty("value");
+    };
+
+    expectInvalid({
+      ...validAssembly,
+      candidateSummaries: summaries.map((summary) => summary.candidateId === firstCandidate.candidateId
+        ? { ...summary, baselineEvaluatorScore: 1.5 }
+        : summary),
+    }, "baseline mutation");
+    expectInvalid({
+      ...validAssembly,
+      candidateSummaries: summaries.map((summary) => summary.candidateId === firstCandidate.candidateId
+        ? { ...summary, baselineEvaluatorScore: secondCandidate.baselineEvaluatorScore }
+        : { ...summary, baselineEvaluatorScore: firstCandidate.baselineEvaluatorScore }),
+    }, "candidate A uses candidate B baseline");
+    expectInvalid({
+      ...validAssembly,
+      candidateSummaries: summaries.map((summary) => ({
+        ...summary,
+        replicateCountPerScenario: repeatCount + 1,
+        expectedReplicateCount: acceptedScenarioCount * (repeatCount + 1),
+        completedReplicateCount: acceptedScenarioCount * (repeatCount + 1),
+        workUnitCount: acceptedScenarioCount * (repeatCount + 1),
+      })),
+      aggregateDiagnostics: {
+        ...validAssembly.aggregateDiagnostics,
+        replicateCountPerScenario: repeatCount + 1,
+        completedReplicateCount: acceptedScenarioCount * (repeatCount + 1) * request.candidates.length,
+        expectedCompletedReplicateCount: acceptedScenarioCount * (repeatCount + 1) * request.candidates.length,
+        workUnitCount: acceptedScenarioCount * (repeatCount + 1) * request.candidates.length,
+      },
+    }, "summary and aggregate repeat differ from request budget");
+    expectInvalid({
+      ...validAssembly,
+      candidateSummaries: summaries.map((summary) => ({
+        ...summary,
+        acceptedScenarioCount: 1,
+        expectedReplicateCount: repeatCount,
+        completedReplicateCount: repeatCount,
+        workUnitCount: repeatCount,
+      })),
+      aggregateDiagnostics: {
+        ...validAssembly.aggregateDiagnostics,
+        acceptedScenarioCount: 1,
+        completedReplicateCount: repeatCount * request.candidates.length,
+        expectedCompletedReplicateCount: repeatCount * request.candidates.length,
+        workUnitCount: repeatCount * request.candidates.length,
+      },
+    }, "accepted scenario count differs from validated bank");
+    expectInvalid({
+      ...validAssembly,
+      aggregateDiagnostics: { ...validAssembly.aggregateDiagnostics, effectiveSampleSize: 1 },
+    }, "aggregate ESS differs from validated bank");
+    expect(createRolloutResult(request, {
+      ...validAssembly,
+      aggregateDiagnostics: { ...validAssembly.aggregateDiagnostics, effectiveSampleSize: 2 + 0.5e-9 },
+    }).ok).toBe(true);
+    expectInvalid({
+      ...validAssembly,
+      aggregateDiagnostics: { ...validAssembly.aggregateDiagnostics, effectiveSampleSize: 2 + 2e-9 },
+    }, "aggregate ESS exceeds public tolerance");
+    for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expectInvalid({
+        ...validAssembly,
+        aggregateDiagnostics: { ...validAssembly.aggregateDiagnostics, effectiveSampleSize: value },
+      }, `non-finite aggregate ESS ${String(value)}`);
+    }
+    expectInvalid({
+      ...validAssembly,
+      candidateSummaries: summaries.map((summary) => ({ ...summary, expectedReplicateCount: 1 })),
+    }, "assembly-declared scenario repeat product");
+
+    for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expectInvalid({
+        ...validAssembly,
+        candidateSummaries: summaries.map((summary) => ({ ...summary, baselineEvaluatorScore: value })),
+      }, `non-finite baseline ${String(value)}`);
+    }
+
+    const zeroBase = makeRequestInput();
+    const negativeZeroRequest: RolloutRequest = {
+      ...zeroBase,
+      candidates: [{ ...zeroBase.candidates[0]!, baselineEvaluatorScore: -0 }],
+    };
+    const zeroSummary = {
+      ...makeResultInput().candidateSummaries[0]!,
+      baselineEvaluatorScore: -0,
+      replicateCountPerScenario: negativeZeroRequest.budget.replicateCountPerScenario,
+      expectedReplicateCount: negativeZeroRequest.scenarioSourceInput.bank.summary.acceptedParticleCount * negativeZeroRequest.budget.replicateCountPerScenario,
+      completedReplicateCount: negativeZeroRequest.scenarioSourceInput.bank.summary.acceptedParticleCount * negativeZeroRequest.budget.replicateCountPerScenario,
+      workUnitCount: negativeZeroRequest.scenarioSourceInput.bank.summary.acceptedParticleCount * negativeZeroRequest.budget.replicateCountPerScenario,
+    };
+    const zeroAggregate = {
+      ...makeResultInput().aggregateDiagnostics,
+      effectiveSampleSize: negativeZeroRequest.scenarioSourceInput.bank.effectiveSampleSize,
+      replicateCountPerScenario: negativeZeroRequest.budget.replicateCountPerScenario,
+      completedReplicateCount: zeroSummary.completedReplicateCount,
+      expectedCompletedReplicateCount: zeroSummary.expectedReplicateCount,
+      workUnitCount: zeroSummary.workUnitCount,
+    };
+    const negativeZeroAssembly = {
+      candidateSummaries: [zeroSummary],
+      ranking: [negativeZeroRequest.candidates[0]!.candidateId],
+      aggregateDiagnostics: zeroAggregate,
+    };
+    expect(createRolloutResult(negativeZeroRequest, negativeZeroAssembly).ok).toBe(true);
+    expectInvalid({
+      ...negativeZeroAssembly,
+      candidateSummaries: [{ ...zeroSummary, baselineEvaluatorScore: +0 }],
+    }, "baseline -0 versus +0");
+
+    for (const [field, value] of [
+      ["minimumEffectiveSampleSize", 3],
+      ["minimumAcceptedScenarioCount", 3],
+      ["minimumCompletedReplicateCount", 9],
+    ] as const) {
+      const evidenceRequest = {
+        ...request,
+        evidenceRequirements: { ...request.evidenceRequirements, [field]: value },
+      } as RolloutRequest;
+      let result: RolloutContractResult<RolloutResult> | undefined;
+      expect(() => { result = createRolloutResult(evidenceRequest, validAssembly); }, field).not.toThrow();
+      expect(result, field).toEqual({ ok: false, failure: { kind: "invalid-request", field: expect.any(String) } });
+      expect(result, field).not.toHaveProperty("value");
+    }
+  });
+
   test("requires a revalidated request for result provenance and rejects assembly root fields", () => {
     const request = makeRequestInput();
     const resultInput = makeResultInput();
@@ -1339,10 +1629,10 @@ describe("D2F ParticleBank bridge", () => {
       ranking: [secondCandidate.candidateId, firstCandidate.candidateId],
       aggregateDiagnostics: {
         ...makeResultInput().aggregateDiagnostics,
-        completedReplicateCount: 2,
-        expectedCompletedReplicateCount: 2,
+        completedReplicateCount: 4,
+        expectedCompletedReplicateCount: 4,
         candidateCount: 2,
-        workUnitCount: 2,
+        workUnitCount: 4,
       },
     };
     const valid = createRolloutResult(request, validAssembly);
@@ -1787,12 +2077,32 @@ describe("D2F ParticleBank bridge", () => {
 
   test("keeps candidate replicate counts local while aggregate counts sum candidates", () => {
     const first = makeResultInput();
-    const request = makeRequestInput();
+    const baseRequest = makeRequestInput();
+    const multiScenarioBank = makeKnownBank(
+      0.5,
+      baseRequest.scenarioSourceInput.bank.snapshot,
+      undefined,
+      undefined,
+      2,
+      {
+        particleCount: 2,
+        summary: {
+          requestedParticleCount: 2,
+          acceptedParticleCount: 2,
+          samplingAttempts: 2,
+          effectiveSampleSize: 2,
+        },
+      },
+    );
+    const request = {
+      ...baseRequest,
+      scenarioSourceInput: { ...baseRequest.scenarioSourceInput, bank: multiScenarioBank },
+    };
     const secondCandidateId = canonicalActionIdentity(makeAction(1));
     const secondCandidate = { ...request.candidates[0]!, candidateId: secondCandidateId, action: makeAction(1) };
     const summaries = [
-      { ...first.candidateSummaries[0]!, acceptedScenarioCount: 2, completedReplicateCount: 2, expectedReplicateCount: 2 },
-      { ...first.candidateSummaries[0]!, candidateId: secondCandidateId, acceptedScenarioCount: 2, completedReplicateCount: 2, expectedReplicateCount: 2 },
+      { ...first.candidateSummaries[0]!, acceptedScenarioCount: 2, completedReplicateCount: 4, expectedReplicateCount: 4, workUnitCount: 4 },
+      { ...first.candidateSummaries[0]!, candidateId: secondCandidateId, acceptedScenarioCount: 2, completedReplicateCount: 4, expectedReplicateCount: 4, workUnitCount: 4 },
     ].sort((left, right) => left.candidateId < right.candidateId ? -1 : left.candidateId > right.candidateId ? 1 : 0);
     const result = createRolloutResult({
       ...request,
@@ -1803,11 +2113,12 @@ describe("D2F ParticleBank bridge", () => {
       ranking: summaries.map((summary) => summary.candidateId),
       aggregateDiagnostics: {
         ...first.aggregateDiagnostics,
+        effectiveSampleSize: 2,
         acceptedScenarioCount: 2,
-        completedReplicateCount: 4,
-        expectedCompletedReplicateCount: 4,
+        completedReplicateCount: 8,
+        expectedCompletedReplicateCount: 8,
         candidateCount: 2,
-        workUnitCount: 2,
+        workUnitCount: 8,
       },
     }));
 

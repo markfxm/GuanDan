@@ -696,11 +696,24 @@ function createRolloutResultUnchecked(requestInput: unknown, assemblyInput: unkn
   }
   if (!isPlainDataArray(candidateSummariesInput) || candidateSummariesInput.length === 0 || !isPlainDataArray(rankingInput) || !isPlainDataGraph(aggregateDiagnosticsInput)) return invalid("assemblyInput");
 
+  const requestCandidatesById = new Map(requestResult.value.candidates.map((candidate) => [candidate.candidateId, candidate] as const));
+  const validatedAcceptedScenarioCount = requestResult.value.scenarioSourceInput.bank.summary.acceptedParticleCount;
+  const validatedReplicateCountPerScenario = requestResult.value.budget.replicateCountPerScenario;
+  const validatedEffectiveSampleSize = requestResult.value.scenarioSourceInput.bank.effectiveSampleSize;
+  const expectedLocalCoverage = safeProduct([validatedAcceptedScenarioCount, validatedReplicateCountPerScenario]);
+  if (expectedLocalCoverage === undefined) return invalid("candidateSummaries");
+
   const summaries: CandidateRolloutSummary[] = [];
   const ids = new Set<string>();
   for (let index = 0; index < candidateSummariesInput.length; index += 1) {
     const summary = getOwnDataProperty(candidateSummariesInput, String(index));
     if (!isCandidateSummary(summary) || ids.has(summary.candidateId)) return invalid("candidateSummaries");
+    const requestCandidate = requestCandidatesById.get(summary.candidateId);
+    if (requestCandidate === undefined
+      || !Object.is(summary.baselineEvaluatorScore, requestCandidate.baselineEvaluatorScore)
+      || summary.acceptedScenarioCount !== validatedAcceptedScenarioCount
+      || summary.replicateCountPerScenario !== validatedReplicateCountPerScenario
+      || summary.expectedReplicateCount !== expectedLocalCoverage) return invalid("candidateSummaries");
     if (summaries.length > 0 && compareCodeUnits(summaries[summaries.length - 1]!.candidateId, summary.candidateId) > 0) return invalid("candidateSummaries");
     ids.add(summary.candidateId);
     summaries.push(deepFreeze(structuredClone(summary)));
@@ -714,14 +727,25 @@ function createRolloutResultUnchecked(requestInput: unknown, assemblyInput: unkn
     if (typeof id !== "string" || !requestCandidateIds.has(id) || !ids.has(id) || ranking.includes(id)) return invalid("ranking");
     ranking.push(id);
   }
-  if (!isAggregateDiagnostics(aggregateDiagnosticsInput, summaries.length)) return invalid("aggregateDiagnostics");
+  if (!isAggregateDiagnostics(aggregateDiagnosticsInput, requestCandidateIds.size)) return invalid("aggregateDiagnostics");
   const aggregate = aggregateDiagnosticsInput as RolloutAggregateDiagnostics;
-  if (summaries.some((summary) => summary.acceptedScenarioCount !== aggregate.acceptedScenarioCount || summary.replicateCountPerScenario !== aggregate.replicateCountPerScenario)) return invalid("aggregateDiagnostics");
+  const expectedAggregateCoverage = safeProduct([requestCandidateIds.size, expectedLocalCoverage]);
+  if (expectedAggregateCoverage === undefined
+    || aggregate.acceptedScenarioCount !== validatedAcceptedScenarioCount
+    || aggregate.replicateCountPerScenario !== validatedReplicateCountPerScenario
+    || Math.abs(aggregate.effectiveSampleSize - validatedEffectiveSampleSize) > PARTICLE_BANK_METADATA_TOLERANCE
+    || aggregate.expectedCompletedReplicateCount !== expectedAggregateCoverage
+    || summaries.some((summary) => summary.acceptedScenarioCount !== aggregate.acceptedScenarioCount || summary.replicateCountPerScenario !== aggregate.replicateCountPerScenario)) return invalid("aggregateDiagnostics");
   const summaryCompleted = safeSum(summaries.map((summary) => summary.completedReplicateCount));
   const summaryExpected = safeSum(summaries.map((summary) => summary.expectedReplicateCount));
   const summaryWork = safeSum(summaries.map((summary) => summary.workUnitCount));
   if (summaryCompleted === undefined || summaryExpected === undefined || summaryWork === undefined) return invalid("candidateSummaries");
   if (aggregate.completedReplicateCount !== summaryCompleted || aggregate.expectedCompletedReplicateCount !== summaryExpected || aggregate.workUnitCount !== summaryWork) return invalid("aggregateDiagnostics");
+  const evidenceRequirements = requestResult.value.evidenceRequirements;
+  if (aggregate.effectiveSampleSize < evidenceRequirements.minimumEffectiveSampleSize
+    || aggregate.acceptedScenarioCount < evidenceRequirements.minimumAcceptedScenarioCount
+    || aggregate.completedReplicateCount < evidenceRequirements.minimumCompletedReplicateCount
+    || (evidenceRequirements.requireCompleteCoverage && aggregate.completedReplicateCount !== aggregate.expectedCompletedReplicateCount)) return invalid("aggregateDiagnostics");
   return {
     ok: true,
     value: deepFreeze({
@@ -742,7 +766,7 @@ function isCandidateSummary(value: unknown): value is CandidateRolloutSummary {
   for (const field of ["riskAdjustedUtility", "expectedUtility", "baselineEvaluatorScore"] as const) if (typeof value[field] !== "number" || !Number.isFinite(value[field])) return false;
   for (const field of ["variance", "risk"] as const) if (typeof value[field] !== "number" || !Number.isFinite(value[field]) || value[field] < 0) return false;
   for (const field of ["acceptedScenarioCount", "replicateCountPerScenario", "expectedReplicateCount", "completedReplicateCount", "workUnitCount"] as const) {
-    if (!isNonNegativeSafeInteger(value[field])) return false;
+    if (!isPublicNonNegativeSafeInteger(value[field])) return false;
   }
   if (value.acceptedScenarioCount < 1 || value.replicateCountPerScenario < 1) return false;
   const total = safeProduct([value.acceptedScenarioCount, value.replicateCountPerScenario]);
@@ -752,7 +776,7 @@ function isCandidateSummary(value: unknown): value is CandidateRolloutSummary {
 function isAggregateDiagnostics(value: unknown, candidateCount: number): value is RolloutAggregateDiagnostics {
   if (!isRecord(value) || !hasExactKeys(value, ["effectiveSampleSize", "acceptedScenarioCount", "replicateCountPerScenario", "completedReplicateCount", "expectedCompletedReplicateCount", "candidateCount", "workUnitCount", "coverage"]) || value.coverage !== "complete" || value.candidateCount !== candidateCount) return false;
   if (typeof value.effectiveSampleSize !== "number" || !Number.isFinite(value.effectiveSampleSize) || value.effectiveSampleSize < 0) return false;
-  for (const field of ["acceptedScenarioCount", "replicateCountPerScenario", "completedReplicateCount", "expectedCompletedReplicateCount", "candidateCount", "workUnitCount"] as const) if (!isNonNegativeSafeInteger(value[field])) return false;
+  for (const field of ["acceptedScenarioCount", "replicateCountPerScenario", "completedReplicateCount", "expectedCompletedReplicateCount", "candidateCount", "workUnitCount"] as const) if (!isPublicNonNegativeSafeInteger(value[field])) return false;
   if (value.acceptedScenarioCount < 1 || value.replicateCountPerScenario < 1 || !isPositiveSafeInteger(candidateCount)) return false;
   const total = safeProduct([value.acceptedScenarioCount, value.replicateCountPerScenario]);
   const expected = total === undefined ? undefined : safeProduct([candidateCount, total]);
@@ -972,7 +996,13 @@ function isValidPublicParticleBank(value: unknown): value is ParticleBank {
       || !Number.isFinite(effectiveSampleSize)
       || !isParticleSnapshotIdentity(snapshot)
       || !isValidPublicParticleBankConfig(config, particleCount)) return false;
-    return isValidPublicParticleBankSummary(summary, particleCount, effectiveSampleSize, status);
+    return isValidPublicParticleBankSummary(
+      summary,
+      particleCount,
+      getOwnDataProperty(config, "maxSamplingAttempts"),
+      effectiveSampleSize,
+      status,
+    );
   } catch {
     return false;
   }
@@ -990,7 +1020,13 @@ function isValidPublicParticleBankConfig(value: unknown, particleCount: number):
     && isDigest(getOwnDataProperty(config, "likelihoodConfigHash"));
 }
 
-function isValidPublicParticleBankSummary(value: unknown, particleCount: number, effectiveSampleSize: unknown, bankStatus: unknown): boolean {
+function isValidPublicParticleBankSummary(
+  value: unknown,
+  particleCount: number,
+  maxSamplingAttempts: unknown,
+  effectiveSampleSize: unknown,
+  bankStatus: unknown,
+): boolean {
   if (!isPlainDataRecord(value, PARTICLE_BANK_SUMMARY_KEYS, false)) return false;
   const summary = value as Record<string, unknown>;
   const status = getOwnDataProperty(summary, "status");
@@ -1000,7 +1036,7 @@ function isValidPublicParticleBankSummary(value: unknown, particleCount: number,
   const duplicateCount = getOwnDataProperty(summary, "duplicateCount");
   const zeroWeightCount = getOwnDataProperty(summary, "zeroWeightCount");
   const summaryEffectiveSampleSize = getOwnDataProperty(summary, "effectiveSampleSize");
-  const requiredSamplingAttempts = isNonNegativeSafeInteger(acceptedParticleCount) && isNonNegativeSafeInteger(duplicateCount)
+  const requiredSamplingAttempts = isPublicNonNegativeSafeInteger(acceptedParticleCount) && isPublicNonNegativeSafeInteger(duplicateCount)
     ? safeSum([acceptedParticleCount, duplicateCount])
     : undefined;
   return (status === "ready" || status === "degraded")
@@ -1008,11 +1044,14 @@ function isValidPublicParticleBankSummary(value: unknown, particleCount: number,
     && requestedParticleCount === particleCount
     && isPositiveSafeInteger(requestedParticleCount)
     && isPositiveSafeInteger(acceptedParticleCount)
-    && acceptedParticleCount <= particleCount
-    && isNonNegativeSafeInteger(samplingAttempts)
-    && isNonNegativeSafeInteger(duplicateCount)
-    && isNonNegativeSafeInteger(zeroWeightCount)
+    && acceptedParticleCount === requestedParticleCount
+    && acceptedParticleCount === particleCount
+    && isPublicNonNegativeSafeInteger(samplingAttempts)
+    && isPublicNonNegativeSafeInteger(duplicateCount)
+    && isPublicNonNegativeSafeInteger(zeroWeightCount)
     && zeroWeightCount <= acceptedParticleCount
+    && isPositiveSafeInteger(maxSamplingAttempts)
+    && samplingAttempts <= maxSamplingAttempts
     && requiredSamplingAttempts !== undefined
     && samplingAttempts >= requiredSamplingAttempts
     && typeof effectiveSampleSize === "number"
@@ -1499,6 +1538,10 @@ function isPositiveSafeInteger(value: unknown): value is number {
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPublicNonNegativeSafeInteger(value: unknown): value is number {
+  return isNonNegativeSafeInteger(value) && !Object.is(value, -0);
 }
 
 function safeProduct(values: readonly number[]): number | undefined {
