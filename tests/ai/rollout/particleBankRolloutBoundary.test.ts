@@ -923,6 +923,185 @@ describe("D2F ParticleBank bridge", () => {
     expect(getterCallCount).toBe(0);
   });
 
+  test("keeps request and direct bridge public metadata rejection in agreement", () => {
+    const baseRequest = makeRequestInput();
+    const baseBank = baseRequest.scenarioSourceInput.bank;
+    const scenario = makeScenario();
+    const makeRegisteredVariant = (input: Readonly<{
+      particleCount?: number;
+      config?: Partial<ParticleBank["config"]>;
+      summary?: Partial<PrivateParticleSummary>;
+      effectiveSampleSize?: number;
+    }>): ParticleBank => {
+      const particleCount = input.particleCount ?? baseBank.particleCount;
+      const effectiveSampleSize = input.effectiveSampleSize ?? baseBank.effectiveSampleSize;
+      const view: ParticleBank = {
+        ...baseBank,
+        particleCount,
+        config: Object.freeze({ ...baseBank.config, particleCount, ...input.config }),
+        effectiveSampleSize,
+        summary: Object.freeze({ ...baseBank.summary, requestedParticleCount: particleCount, effectiveSampleSize, ...input.summary }),
+      };
+      return createParticleBankHandle(view, {
+        records: [{ particleId: particleScenarioIdentity(view.snapshot, scenario), scenario, normalizedWeight: 1 }],
+      });
+    };
+
+    const cases: readonly [string, ParticleBank][] = [
+      ["accepted count below requested count", makeRegisteredVariant({ summary: { requestedParticleCount: 2, acceptedParticleCount: 1 } })],
+      ["accepted count below config count", makeRegisteredVariant({ particleCount: 2, summary: { acceptedParticleCount: 1 } })],
+      ["sampling attempts above config maximum", makeRegisteredVariant({ config: { maxSamplingAttempts: 1 }, summary: { samplingAttempts: 2 } })],
+      ["duplicate count negative zero", makeRegisteredVariant({ summary: { duplicateCount: -0 } })],
+      ["zero weight count negative zero", makeRegisteredVariant({ summary: { zeroWeightCount: -0 } })],
+      ["ESS just below strict lower bound", makeRegisteredVariant({ effectiveSampleSize: 0.9999999995 })],
+      ["ESS just above strict upper bound", makeRegisteredVariant({ effectiveSampleSize: baseBank.summary.acceptedParticleCount + 0.0000000005 })],
+    ];
+
+    for (const [label, bank] of cases) {
+      const requestInput = {
+        ...baseRequest,
+        scenarioSourceInput: { ...baseRequest.scenarioSourceInput, bank },
+      } as unknown;
+      let requestResult: RolloutContractResult<RolloutRequest> | undefined;
+      let bridgeResult: ReturnType<typeof readParticleBankRolloutAccess> | undefined;
+      expect(() => { requestResult = createRolloutRequest(requestInput); }, label).not.toThrow();
+      expect(() => { bridgeResult = readParticleBankRolloutAccess(bank); }, label).not.toThrow();
+      expect(requestResult, label).toEqual({ ok: false, failure: { kind: "invalid-request", field: "scenarioSourceInput" } });
+      expect(bridgeResult, label).toEqual({ ok: false, failure: { kind: "fake-or-unknown-particle-bank" } });
+      expect(requestResult, label).not.toHaveProperty("value");
+      expect(bridgeResult, label).not.toHaveProperty("access");
+      expect(JSON.stringify(requestResult), label).not.toMatch(/records|scenarios|hands|assignments|normalizedWeight|seed/);
+      expect(JSON.stringify(bridgeResult), label).not.toMatch(/records|scenarios|hands|assignments|normalizedWeight|seed/);
+    }
+  });
+
+  test("rejects negative zero across request replay and bridge integer boundaries", () => {
+    const baseRequest = makeRequestInput();
+    const baseSource = baseRequest.scenarioSourceInput;
+    const baseBank = baseSource.bank;
+    const scenario = makeScenario();
+    const replayContext = {
+      publicHistoryEvents: baseSource.publicHistoryEvents,
+      initialLedger: baseSource.initialLedger,
+      finalLedger: baseSource.finalLedger,
+      gameRank: baseSource.gameRank,
+      perspectiveSeat: baseSource.perspectiveSeat,
+      ownCurrentHand: baseSource.ownCurrentHand,
+      actingSeat: baseSource.publicState.actingSeat,
+      publicState: baseSource.publicState,
+      particleBankSnapshot: baseSource.bank.snapshot,
+    };
+    const rootCases: readonly [string, unknown][] = [
+      ["root perspective seat", { ...replayContext, perspectiveSeat: -0 as PublicSeat }],
+      ["root acting seat", { ...replayContext, actingSeat: -0 as PublicSeat }],
+      ["root snapshot event index", {
+        ...replayContext,
+        particleBankSnapshot: { ...baseSource.bank.snapshot, lastAppliedEventIndex: -0 },
+      }],
+      ["replay event index", {
+        ...replayContext,
+        publicHistoryEvents: [{ ...baseSource.publicHistoryEvents[0]!, eventIndex: -0 }],
+      }],
+    ];
+    for (const [label, input] of rootCases) {
+      expect(() => canonicalReplayContextIdentity(input as Parameters<typeof canonicalReplayContextIdentity>[0]), label).toThrow("REPLAY_CONTEXT_INVALID");
+    }
+    const withSource = (sourceInput: RolloutScenarioSourceInput): unknown => ({
+      ...baseRequest,
+      rootIdentity: replayRoot(sourceInput),
+      scenarioSourceInput: sourceInput,
+    });
+    const withLedger = (mutate: (ledger: HardPublicLedger) => HardPublicLedger): RolloutScenarioSourceInput => {
+      const initialLedger = mutate(baseSource.initialLedger);
+      const finalLedger = mutate(baseSource.finalLedger);
+      const snapshot = {
+        ...baseBank.snapshot,
+        initialLedgerHash: canonicalPublicLedgerHash(initialLedger),
+        lastAppliedEventIndex: finalLedger.lastAppliedEventIndex,
+        ledgerHash: canonicalPublicLedgerHash(finalLedger),
+      };
+      return {
+        ...baseSource,
+        bank: makeKnownBank(1, snapshot),
+        initialLedger,
+        finalLedger,
+      };
+    };
+    const requestCases: readonly [string, unknown][] = [
+      ["snapshot perspectiveSeat", {
+        ...baseRequest,
+        scenarioSourceInput: {
+          ...baseSource,
+          bank: makeKnownBank(1, { ...baseBank.snapshot, perspectiveSeat: -0 as PublicSeat }),
+        },
+      }],
+      ["source perspectiveSeat and actingSeat", {
+        ...baseRequest,
+        scenarioSourceInput: {
+          ...baseSource,
+          bank: makeKnownBank(1, { ...baseBank.snapshot, perspectiveSeat: -0 as PublicSeat }),
+          perspectiveSeat: -0 as PublicSeat,
+          publicState: { ...baseSource.publicState, perspectiveSeat: -0 as PublicSeat, actingSeat: -0 as PublicSeat },
+        },
+      }],
+      ["public hand count", {
+        ...baseRequest,
+        scenarioSourceInput: {
+          ...baseSource,
+          publicState: { ...baseSource.publicState, handCounts: { ...baseSource.publicState.handCounts, 0: -0 } },
+        },
+      }],
+      ["ledger current trick index", {
+        ...baseRequest,
+        scenarioSourceInput: withLedger((ledger) => ({
+          ...ledger,
+          currentTrick: { ...ledger.currentTrick, trickIndex: -0 },
+        })),
+      }],
+    ];
+
+    for (const [label, input] of requestCases) {
+      let result: RolloutContractResult<RolloutRequest> | undefined;
+      expect(() => { result = createRolloutRequest(input); }, label).not.toThrow();
+      expect(result, label).toEqual({ ok: false, failure: { kind: "invalid-request", field: "scenarioSourceInput" } });
+      expect(result, label).not.toHaveProperty("value");
+    }
+
+    const bridgeCases: readonly [string, ParticleBank][] = [
+      ["bridge duplicate count", makeKnownBank(1, baseBank.snapshot, undefined, undefined, undefined, { summary: { duplicateCount: -0 } })],
+      ["bridge zero weight count", makeKnownBank(1, baseBank.snapshot, undefined, undefined, undefined, { summary: { zeroWeightCount: -0 } })],
+      ["bridge snapshot lastAppliedEventIndex", makeKnownBank(1, { ...baseBank.snapshot, lastAppliedEventIndex: -0 })],
+      ["bridge private assignment event index", (() => {
+        const negativeZeroScenario = {
+          ...scenario,
+          hiddenTransferAssignments: [{ eventIndex: -0, eventKind: "tribute", fromSeat: 0, toSeat: 1, cardId: "C2-1" }],
+        } as ParticleScenario;
+        return makeKnownBank(1, baseBank.snapshot, negativeZeroScenario, [{
+          particleId: particleScenarioIdentity(baseBank.snapshot, negativeZeroScenario),
+          scenario: negativeZeroScenario,
+          normalizedWeight: 1,
+        }]);
+      })()],
+      ["bridge private assignment seat", (() => {
+        const negativeZeroScenario = {
+          ...scenario,
+          hiddenTransferAssignments: [{ eventIndex: 0, eventKind: "tribute", fromSeat: -0, toSeat: 1, cardId: "C2-1" }],
+        } as ParticleScenario;
+        return makeKnownBank(1, baseBank.snapshot, negativeZeroScenario, [{
+          particleId: particleScenarioIdentity(baseBank.snapshot, negativeZeroScenario),
+          scenario: negativeZeroScenario,
+          normalizedWeight: 1,
+        }]);
+      })()],
+    ];
+    for (const [label, bank] of bridgeCases) {
+      let result: ReturnType<typeof readParticleBankRolloutAccess> | undefined;
+      expect(() => { result = readParticleBankRolloutAccess(bank); }, label).not.toThrow();
+      expect(result, label).toEqual({ ok: false, failure: { kind: "fake-or-unknown-particle-bank" } });
+      expect(result, label).not.toHaveProperty("access");
+    }
+  });
+
   test("rejects every invalid public ParticleBank numeric metadata category", () => {
     const base = makeRequestInput();
     const bank = base.scenarioSourceInput.bank;
@@ -2125,6 +2304,69 @@ describe("D2F ParticleBank bridge", () => {
     expect(result.ok).toBe(true);
   });
 
+  test("binds work units to the validated per-candidate budget and checked aggregate sum", () => {
+    const request = makeRequestInput();
+    const base = makeResultInput();
+    const summary = base.candidateSummaries[0]!;
+    const cases: readonly [string, number, number, boolean][] = [
+      ["legal below maximum", 1, 1, true],
+      ["legal at maximum", 24, 24, true],
+      ["summary over per-candidate maximum", 25, 25, false],
+      ["summary at safe-integer maximum", Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, false],
+      ["aggregate differs from checked summary sum", 2, 1, false],
+    ];
+
+    for (const [label, summaryWorkUnitCount, aggregateWorkUnitCount, expectedSuccess] of cases) {
+      const result = createRolloutResult(request, makeResultAssemblyInput({
+        ...base,
+        candidateSummaries: [{ ...summary, workUnitCount: summaryWorkUnitCount }],
+        aggregateDiagnostics: { ...base.aggregateDiagnostics, workUnitCount: aggregateWorkUnitCount },
+      }));
+      expect(result.ok, label).toBe(expectedSuccess);
+    }
+
+    const secondCandidateId = canonicalActionIdentity(makeAction(1));
+    const secondCandidate = { ...request.candidates[0]!, candidateId: secondCandidateId, action: makeAction(1) };
+    const multiCandidateSummaries = [
+      { ...summary, workUnitCount: 24 },
+      { ...summary, candidateId: secondCandidateId, workUnitCount: 24 },
+    ].sort((left, right) => left.candidateId < right.candidateId ? -1 : left.candidateId > right.candidateId ? 1 : 0);
+    const multiCandidateResult = createRolloutResult({
+      ...request,
+      candidates: [request.candidates[0]!, secondCandidate],
+    }, makeResultAssemblyInput({
+      ...base,
+      candidateSummaries: multiCandidateSummaries,
+      ranking: multiCandidateSummaries.map((candidateSummary) => candidateSummary.candidateId),
+      aggregateDiagnostics: {
+        ...base.aggregateDiagnostics,
+        candidateCount: 2,
+        completedReplicateCount: 4,
+        expectedCompletedReplicateCount: 4,
+        workUnitCount: 48,
+      },
+    }));
+    expect(multiCandidateResult.ok).toBe(true);
+
+    const overflowResult = createRolloutResult({
+      ...request,
+      candidates: [request.candidates[0]!, secondCandidate],
+    }, makeResultAssemblyInput({
+      ...base,
+      candidateSummaries: [
+        { ...summary, workUnitCount: Number.MAX_SAFE_INTEGER },
+        { ...summary, candidateId: secondCandidateId, workUnitCount: Number.MAX_SAFE_INTEGER },
+      ].sort((left, right) => left.candidateId < right.candidateId ? -1 : left.candidateId > right.candidateId ? 1 : 0),
+      ranking: [request.candidates[0]!.candidateId, secondCandidateId].sort(),
+      aggregateDiagnostics: {
+        ...base.aggregateDiagnostics,
+        candidateCount: 2,
+        workUnitCount: Number.MAX_SAFE_INTEGER,
+      },
+    }));
+    expect(overflowResult.ok).toBe(false);
+  });
+
   test("rejects overflowing candidate coverage products", () => {
     const input = makeResultInput();
     const result = createRolloutResult(makeRequestInput(), makeResultAssemblyInput({
@@ -2267,17 +2509,20 @@ describe("D2F ParticleBank bridge", () => {
     };
     const internalFile = files.find((file) => sourcePath(file).endsWith("/src/ai/particles/particleBankInternals.ts"));
     const bridgeFile = files.find((file) => sourcePath(file).endsWith("/src/ai/particles/particleBankRolloutAccess.ts"));
+    const publicValidatorFile = files.find((file) => sourcePath(file).endsWith("/src/ai/particles/particleBankPublicValidation.ts"));
     const sourceFile = files.find((file) => sourcePath(file).endsWith("/src/ai/rollout/particleScenarioSource.ts"));
     expect(internalFile).toBeDefined();
     expect(bridgeFile).toBeDefined();
+    expect(publicValidatorFile).toBeDefined();
     expect(sourceFile).toBeDefined();
-    if (internalFile === undefined || bridgeFile === undefined || sourceFile === undefined) return;
+    if (internalFile === undefined || bridgeFile === undefined || publicValidatorFile === undefined || sourceFile === undefined) return;
 
     const privateModule = checker.getSymbolAtLocation(internalFile);
     if (privateModule === undefined) throw new Error("PRIVATE_MODULE_SYMBOL_MISSING");
     const contractsFile = files.find((file) => sourcePath(file).endsWith("/src/ai/rollout/contracts.ts"));
     const bridgeModule = checker.getSymbolAtLocation(bridgeFile);
-    if (contractsFile === undefined || bridgeModule === undefined) throw new Error("CONTRACT_OR_BRIDGE_MODULE_SYMBOL_MISSING");
+    const publicValidatorModule = checker.getSymbolAtLocation(publicValidatorFile);
+    if (contractsFile === undefined || bridgeModule === undefined || publicValidatorModule === undefined) throw new Error("CONTRACT_OR_BRIDGE_VALIDATOR_MODULE_SYMBOL_MISSING");
     const contractsModule = checker.getSymbolAtLocation(contractsFile);
     if (contractsModule === undefined) throw new Error("CONTRACT_MODULE_SYMBOL_MISSING");
     const resolveSymbol = (symbol: ts.Symbol): ts.Symbol => symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
@@ -2295,6 +2540,9 @@ describe("D2F ParticleBank bridge", () => {
     const sourceFilePath = sourcePath(sourceFile);
     const privateSymbols = new Set(checker.getExportsOfModule(privateModule).map(resolveSymbol));
     const bridgeSymbols = new Set(checker.getExportsOfModule(bridgeModule).map(resolveSymbol));
+    const publicValidatorSymbols = new Set(checker.getExportsOfModule(publicValidatorModule).map(resolveSymbol));
+    const publicValidatorExport = checker.getExportsOfModule(publicValidatorModule).find((symbol) => symbol.name === "validateParticleBankPublic");
+    if (publicValidatorExport === undefined) throw new Error("PUBLIC_VALIDATOR_EXPORT_MISSING");
     const contractSymbols = new Set(checker.getExportsOfModule(contractsModule!).map(resolveSymbol));
     const directReadImporters: string[] = [];
     const rolloutInternalImporters: string[] = [];
@@ -2303,6 +2551,10 @@ describe("D2F ParticleBank bridge", () => {
     const privateSourceConsumers: string[] = [];
     const bridgeCallers: string[] = [];
     const associationConsumers: string[] = [];
+    const publicValidatorImporters: string[] = [];
+    const publicValidatorReexporters: string[] = [];
+    let validatorImportsForbiddenBoundary = false;
+    let contractsImportForbiddenBoundary = false;
     let forbiddenReexport = false;
     let forbiddenBridgeReexport = false;
     let forbiddenSourceReexport = false;
@@ -2326,6 +2578,7 @@ describe("D2F ParticleBank bridge", () => {
             if (localSymbol === undefined) continue;
             const resolved = resolveSymbol(localSymbol);
             if (associationSymbols.has(resolved)) associationConsumers.push(sourcePath(file));
+            if (publicValidatorSymbols.has(resolved)) publicValidatorImporters.push(sourcePath(file));
             if (resolved.name === "readParticleBankInternals" && privateSymbols.has(resolved)) directReadImporters.push(sourcePath(file));
             const target = declarationFile(resolved);
             if (target !== undefined && normalize(target).endsWith("/src/ai/rollout/particleScenarioSource.ts") && sourcePath(file) !== sourceFilePath) privateSourceConsumers.push(sourcePath(file));
@@ -2342,6 +2595,7 @@ describe("D2F ParticleBank bridge", () => {
             const resolved = resolveSymbol(propertySymbol);
             const consumerPath = sourcePath(file);
             if (associationSymbols.has(resolved)) associationConsumers.push(consumerPath);
+            if (publicValidatorSymbols.has(resolved)) publicValidatorImporters.push(consumerPath);
             if (resolved.name === "readParticleBankInternals" && privateSymbols.has(resolved)) directReadImporters.push(consumerPath);
             if (bridgeSymbols.has(resolved)) {
               bridgeImporters.push(consumerPath);
@@ -2356,12 +2610,24 @@ describe("D2F ParticleBank bridge", () => {
           if (identifierSymbol !== undefined && associationSymbols.has(resolveSymbol(identifierSymbol))) associationConsumers.push(sourcePath(file));
         }
         if (ts.isExportDeclaration(node) && node.moduleSpecifier !== undefined) {
+          if (ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text.endsWith("particleBankPublicValidation")) publicValidatorReexporters.push(sourcePath(file));
           const moduleSymbol = checker.getSymbolAtLocation(node.moduleSpecifier);
           if (moduleSymbol !== undefined) {
             const exports = checker.getExportsOfModule(moduleSymbol).map(resolveSymbol);
             if (exports.some((symbol) => privateSymbols.has(symbol))) forbiddenReexport = true;
             if (exports.some((symbol) => bridgeSymbols.has(symbol))) forbiddenBridgeReexport = true;
             if (exports.some((symbol) => declarationFile(symbol) !== undefined && normalize(declarationFile(symbol)!).endsWith("/src/ai/rollout/particleScenarioSource.ts"))) forbiddenSourceReexport = true;
+          }
+        }
+        if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+          const moduleSpecifier = node.moduleSpecifier.text;
+          if (sourcePath(file) === sourcePath(publicValidatorFile!)
+            && (moduleSpecifier.endsWith("particleBankInternals") || moduleSpecifier.endsWith("particleBankRolloutAccess") || moduleSpecifier.includes("/rollout/"))) {
+            validatorImportsForbiddenBoundary = true;
+          }
+          if (sourcePath(file) === sourcePath(contractsFile!)
+            && (moduleSpecifier.endsWith("particleBankInternals") || moduleSpecifier.endsWith("particleBankRolloutAccess"))) {
+            contractsImportForbiddenBoundary = true;
           }
         }
         const identityFile = sourcePath(file).endsWith("/src/ai/rollout/contracts.ts") || sourcePath(file).endsWith("/src/ai/particles/canonicalDeal.ts");
@@ -2390,5 +2656,9 @@ describe("D2F ParticleBank bridge", () => {
     expect(localeCompareUse).toBe(false);
     expect(bridgeCallers).toContain("readParticleBankRolloutAccess");
     expect([...new Set(associationConsumers)]).toEqual([sourcePath(contractsFile)]);
+    expect([...new Set(publicValidatorImporters)].sort()).toEqual([sourcePath(contractsFile), sourcePath(bridgeFile)].sort());
+    expect([...new Set(publicValidatorReexporters)]).toEqual([]);
+    expect(validatorImportsForbiddenBoundary).toBe(false);
+    expect(contractsImportForbiddenBoundary).toBe(false);
   });
 });

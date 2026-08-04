@@ -45,6 +45,8 @@ import {
   canonicalReplayContextIdentity,
   createRolloutRequest,
 } from "../../../src/ai/rollout/contracts";
+import { readParticleBankRolloutAccess } from "../../../src/ai/particles/particleBankRolloutAccess";
+import { createParticleScenarioSource } from "../../../src/ai/rollout/particleScenarioSource";
 import type {
   CanonicalInitialDeal,
   ParticleActionObservation,
@@ -55,6 +57,7 @@ import type {
   ParticleScenario,
   PrivateParticleSummary,
 } from "../../../src/ai/particles/contracts";
+import type { RolloutScenarioSourceInput } from "../../../src/ai/rollout/contracts";
 
 const builderModulePath = "../../../src/ai/particles/particleBankBuilder";
 const diagnosticsModulePath = "../../../src/ai/particles/particleDiagnostics";
@@ -1285,6 +1288,98 @@ describe("immutable particle bank builder core", () => {
     expect(bank.summary.status).toBe("ready");
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.scenarioSourceInput.bank).toBe(bank);
+  });
+
+  test("passes a deterministic multi-particle builder bank through request, bridge and scenario source", () => {
+    const fixture = makeFixture();
+    const bank = successfulBank(makeBuildInput(fixture, { particleCount: 2, particleSeed: 0 }));
+    const bridge = readParticleBankRolloutAccess(bank);
+    expect(bridge.ok).toBe(true);
+    if (!bridge.ok) throw new Error("EXPECTED_BUILDER_BRIDGE_SUCCESS");
+
+    const currentLastPlay = detectGroups([fixture.laterPlayCard], fixture.gameRank).find((group) => group.type === "single");
+    if (currentLastPlay === undefined) throw new Error("CURRENT_LAST_PLAY_FIXTURE_MISSING");
+    const scenarioSourceInput: RolloutScenarioSourceInput = {
+      bank,
+      publicHistoryEvents: fixture.publicHistoryEvents,
+      initialLedger: fixture.initialLedger,
+      finalLedger: fixture.finalLedger,
+      gameRank: fixture.gameRank,
+      perspectiveSeat: 0,
+      ownCurrentHand: fixture.ownCurrentHand,
+      publicState: {
+        gameRank: fixture.gameRank,
+        actingSeat: 1,
+        perspectiveSeat: 0,
+        partnerSeat: 2,
+        handCounts: { ...fixture.finalLedger.handCounts },
+        finishOrder: [...fixture.finalLedger.finishOrder],
+        publicPlayedCardIds: [...fixture.finalLedger.playedCardIds],
+        currentLastPlay,
+        currentLastPlaySeat: 1,
+      },
+    };
+    const rootIdentity = canonicalReplayContextIdentity({
+      publicHistoryEvents: scenarioSourceInput.publicHistoryEvents,
+      initialLedger: scenarioSourceInput.initialLedger,
+      finalLedger: scenarioSourceInput.finalLedger,
+      gameRank: scenarioSourceInput.gameRank,
+      perspectiveSeat: scenarioSourceInput.perspectiveSeat,
+      ownCurrentHand: scenarioSourceInput.ownCurrentHand,
+      actingSeat: scenarioSourceInput.publicState.actingSeat,
+      publicState: scenarioSourceInput.publicState,
+      particleBankSnapshot: scenarioSourceInput.bank.snapshot,
+    });
+    const action = { type: "pass" } as const;
+    const request = createRolloutRequest({
+      schemaVersion: "d2f-rollout-request-v2",
+      mode: "detached",
+      formalExecutionAllowed: false,
+      rootIdentity,
+      scenarioSourceInput,
+      candidates: [{ candidateId: canonicalActionIdentity(action), action, baselineEvaluatorScore: 0 }],
+      budget: {
+        replicateCountPerScenario: 1,
+        maxPliesPerReplicate: 3,
+        maxPolicyActionEvaluationsPerPly: 4,
+        maxWorkUnits: 12,
+      },
+      limits: {
+        maxReplicateCountPerScenario: 2,
+        maxPliesPerReplicate: 6,
+        maxPolicyActionEvaluationsPerPly: 8,
+        maxWorkUnits: 96,
+      },
+      evidenceRequirements: {
+        schemaVersion: "d2f-rollout-evidence-requirements-v1",
+        minimumEffectiveSampleSize: 1,
+        minimumAcceptedScenarioCount: 1,
+        minimumCompletedReplicateCount: 1,
+        requireCompleteCoverage: true,
+      },
+      riskPolicy: {
+        schemaVersion: "d2f-rollout-risk-policy-v1",
+        variancePenalty: 0,
+        downsideRiskPenalty: 0,
+      },
+      policyId: "d2f-lightweight-v1",
+    });
+    expect(request.ok).toBe(true);
+    if (!request.ok) throw new Error("EXPECTED_BUILDER_REQUEST_SUCCESS");
+    const source = createParticleScenarioSource(scenarioSourceInput);
+    expect(source.ok).toBe(true);
+    if (!source.ok) throw new Error("EXPECTED_BUILDER_SOURCE_SUCCESS");
+
+    expect(bank.particleCount).toBeGreaterThan(1);
+    expect(bridge.access.records).toHaveLength(bank.summary.acceptedParticleCount);
+    expect(source.acceptedScenarioCount).toBe(bank.summary.acceptedParticleCount);
+    expect(source.scenarios.map((scenario) => scenario.scenarioIdentity).sort()).toEqual(
+      bridge.access.records.map((record) => record.particleId).sort(),
+    );
+    expect(bridge.access.effectiveSampleSize).toBe(bank.effectiveSampleSize);
+    expect(bank.summary.effectiveSampleSize).toBe(bank.effectiveSampleSize);
+    expect(request.value.scenarioSourceInput.bank).toBe(bank);
+    expect(JSON.stringify(request.value.scenarioSourceInput.bank)).not.toMatch(/records|scenarios|hands|normalizedWeight|seed/);
   });
 
   test("returns degraded success for low ESS without resampling", () => {
