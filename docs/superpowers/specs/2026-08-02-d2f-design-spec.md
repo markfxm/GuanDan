@@ -2,8 +2,8 @@
 
 状态：
 TASK 1 INDEPENDENT REVIEW BLOCKED
-TASK 1 REVIEW REMEDIATION DESIGN FROZEN
-TASK 1 REVIEW REMEDIATION CODE PENDING
+TASK 1 FINAL GATE REMEDIATION DESIGN FROZEN
+TASK 1 CODE REMEDIATION PENDING
 TASK 2 NOT STARTED
 
 ## Task 1 Independent Review Findings — formal adjudication
@@ -61,7 +61,7 @@ src/ai/rollout/particleScenarioSource.ts
 
 bridge success 的最低保证是 defense-in-depth，而不是替代 source 的 replay 防线：bank 必须是已登记 WeakMap handle，public status/metadata 合法；records 非空；`particleId` 非空且唯一；scenario schema 合法；canonical initial deal 合法；hidden transfer assignments 结构合法；`particleId === particleScenarioIdentity(bank.snapshot, scenario)`；normalizedWeight finite 且非负；weight 总和在冻结 tolerance 内为 1；ESS finite、非负且不超过 scenario count。bridge 必须逐字段 clone 并递归 freeze projection，getter、symbol、function、malformed scenario、fake/unknown handle 都返回已有 typed `fake-or-unknown-particle-bank` 或 `{ kind: "scenario-source-failed"; reason: "private-state-invalid" }` failure，不执行 caller accessor，不扩大 public ParticleBank API。优先复用 `particleScenarioIdentity` 和 `validateCanonicalInitialDeal`，不复制粒子语义算法；source 仍必须二次验证 replay/public consistency，不能因 bridge 增强而删除 source 防线。
 
-Task 1 review remediation 的后续 code allowlist 固定为以下五个路径；若需要共享 public consistency helper，先在 `src/ai/rollout/contracts.ts` 内实现为不导出的纯函数。不得创建通用 validation framework、registry 或新的 public barrel；不得修改 `src/game/room.ts`、`src/ai/aiDecisionEngine.ts`、`src/ai/planning/**`、package/package-lock、配置或 Task 2–9 的其他路径。
+此前五路径是已经完成的 bridge/source remediation implementation scope，不是本轮 final-gate code remediation 的 allowlist。当前 expected HEAD 的下一轮修复边界统一冻结在第 3.1.2 节；本轮只修改文档，不修改其中任何 production 或 test 文件。
 
 ```text
 src/ai/rollout/contracts.ts
@@ -205,6 +205,137 @@ aggregate.completedReplicateCount
 aggregate.expectedCompletedReplicateCount
   = candidateCount * candidateSummary.expectedReplicateCount
 ```
+
+### 3.1.2 Task 1 Final Gate Remediation Design Freeze
+
+本节是三份 D2F 文档共同的 final-gate remediation source of truth。以下结论由 expected HEAD `5cd433d3e623e7e516effb36ab5bc080f5427d1a` 的真实类型、builder、ESS helper、result factory 和现有测试路径核对得到；本轮只冻结下一轮 code remediation，不宣称代码已修复。
+
+#### I-1：ESS 边界与 ParticleBank public metadata
+
+真实调用路径为：
+
+~~~text
+calculateEffectiveSampleSize
+  -> ess.status = degraded iff ess < degradedEssThreshold
+particleBankBuilder summary.status
+  -> ess.status
+particleBankBuilder bank.status
+  -> degraded iff ess <= degradedEssThreshold
+~~~
+
+因此真实边界 particleCount = 1、normalized weights 为 [1]、degradedEssThreshold = 1 会产生 summary.status = ready 与 bank.status = degraded。这是当前 builder 与 public request validator 的根因不一致，不是测试 fixture 问题。
+
+后续最小修复统一冻结为：
+
+~~~text
+ESS < threshold  -> degraded
+ESS == threshold -> ready
+ESS > threshold  -> ready
+bank.status === summary.status === effectiveSampleSizeResult.status
+~~~
+
+阈值的唯一语义入口是 ESS helper；top-level bank 不得继续单独使用 <= 维护第二套规则。该修复只允许调整 builder 对 helper status 的使用，不扩展为 ParticleBank 重构。
+
+真实成功 builder/sampler 路径同时冻结以下不变量：
+
+- acceptedParticleCount === requestedParticleCount；
+- acceptedParticleCount === config.particleCount；
+- samplingAttempts <= config.maxSamplingAttempts；
+- samplingAttempts >= acceptedParticleCount + duplicateCount；
+- duplicateCount 是采样器真实 identity duplicate 计数，范围为 0 <= duplicateCount <= samplingAttempts，不得凭字段名添加 duplicateCount <= acceptedParticleCount；
+- zeroWeightCount 是 normalized weights 中等于 0 的真实计数，范围为 0 <= zeroWeightCount <= acceptedParticleCount；
+- normalized weights 总和在 builder tolerance 内为 1，ESS 为 finite 且位于 [1, acceptedParticleCount]；
+- builder 成功 bank 的 public ESS 与 summary ESS 来自同一个 ESS helper 结果；
+- ready/degraded bank 不带 own failureReason；failed summary 只出现在 ParticleBankBuildResult.ok === false，不能伪装成 public success bank。
+
+accepted public ParticleBank 的 exact public schema 以真实类型为准：
+
+~~~text
+ParticleBank:
+schemaVersion, snapshot, config, particleCount, effectiveSampleSize, status, summary
+
+snapshot:
+gameId, roundIdentity, handIdentity, initialLedgerHash,
+lastAppliedEventIndex, ledgerHash, perspectiveSeat, gameRank
+
+config:
+schemaVersion, particleCount, maxSamplingAttempts, maxIndexDraws,
+samplerConfigVersion, likelihoodConfigHash
+
+accepted success summary:
+status, requestedParticleCount, acceptedParticleCount, samplingAttempts,
+duplicateCount, zeroWeightCount, effectiveSampleSize
+
+failed private summary only:
+status = failed, requestedParticleCount, acceptedParticleCount,
+samplingAttempts, duplicateCount, zeroWeightCount, failureReason
+~~~
+
+accepted public bank 的 summary status 只能是 ready/degraded，exact own keys 不包含 failureReason；failureReason 只允许出现在真实 private failed summary/build-failure union。validator 必须逐层执行 conditional exact own keys、plain data、strict prototype、data descriptor、无 symbol/accessor/function、deep-frozen 检查，并且不得读取 getter。
+
+public metadata validator 必须拒绝 NaN、Infinity、fractional、negative、unsafe integer 和 Object.is(value, -0) 的不合法数值表示；正零只保留给真实允许为 0 的 samplingAttempts、duplicateCount 和 zeroWeightCount，所有其他 numeric field 的 -0 也拒绝。particleCount、requested/accepted count、config count 和上限必须是正 safe integer。public/summary ESS 的 metadata equality 使用绝对误差 <= 1e-9；这只是两个已计算 ESS 字段的一致性比较，ESS helper 自身仍使用 builder 传入的 1e-12..1e-6 computational tolerance、clamp 和严格 threshold rule。必须覆盖极小误差、恰好阈值和刚超 tolerance 的边界。private bridge 的 raw ESS 重算不得使用比 builder 可接受 clamp 更严格的 tolerance；若现有 bridge 无法满足，必须先报告根因，再申请扩大 forbidden-path allowlist。
+
+#### I-2：RolloutResult 与 Request provenance 绑定
+
+当前真实字段映射冻结如下：
+
+| Validated Request 来源 | Result/assembly 字段 | 必须满足的关系 |
+| --- | --- | --- |
+| request.candidates[*].candidateId | CandidateRolloutSummary.candidateId、ranking[*] | summary 集合与 request candidate 集合精确相等；无 foreign/missing/duplicate |
+| 同一 candidate 的 baselineEvaluatorScore | CandidateRolloutSummary.baselineEvaluatorScore | finite 且使用 Object.is 精确相等；保留 -0 语义，不重算、不舍入、不从其他 candidate 借用 |
+| request.budget.replicateCountPerScenario | 每个 summary 与 aggregate 的 replicateCountPerScenario | 精确相等 |
+| request.scenarioSourceInput.bank.summary.acceptedParticleCount | summary/aggregate 的 acceptedScenarioCount | 使用已验证 public bank 的 accepted count；它必须等于 bank.particleCount、config.particleCount 和 requestedParticleCount |
+| accepted scenario count × request repeat count | expectedReplicateCount | safe integer product；不得由 assembly 任意声明 |
+| 每个 summary 的 completed count | aggregate completed count | 所有 candidate summary 的 safe sum |
+| request candidate count × expected local coverage | expectedCompletedReplicateCount | safe integer product |
+| request.scenarioSourceInput.bank.effectiveSampleSize | aggregate effectiveSampleSize | 使用同一 public metadata tolerance；不得由 assembly 任意声明 |
+| request.evidenceRequirements | evidence/coverage fields | minimumEffectiveSampleSize、minimumAcceptedScenarioCount、minimumCompletedReplicateCount 和 requireCompleteCoverage 必须被满足 |
+| validated request | result mode、formalExecutionAllowed、policyId、rootDigest | 只能由 validated request 派生 |
+
+createRolloutResult(requestInput, assemblyInput) 必须重新验证 request；assembly 只允许当前真实的 candidateSummaries、ranking、aggregateDiagnostics 三个字段。assembly 不得声明 budget、scenario count、repeat count、root、policy、mode 或 formal flag。任一 provenance 不一致都返回 typed invalid-request，不得 throw，不得返回 partial result。
+
+当前 contracts.ts 只验证 candidate ID 集合和 assembly 内部计数，未把 summary baseline score、summary/aggregate repeat count、bank accepted count、bank ESS 与 validated request 绑定；下一轮必须以真实 production factory 测试关闭该缺口。当前类型没有 expectedScenarioCount、completedScenarioCount 或 totalCompletedReplicates 字段，也不需要为本修复新增它们：唯一允许的 scenario provenance 是已验证 request.scenarioSourceInput.bank.summary.acceptedParticleCount 与 bank.effectiveSampleSize，唯一允许的 repeat provenance 是 request.budget.replicateCountPerScenario。若未来 source 允许 accepted count 与该 public bank count 不同，必须先停止并报告缺少 provenance 的根因，不得把 caller assembly 字段当作替代，也不得扩大 forbidden-path allowlist。
+
+#### I-3：完整负向测试矩阵
+
+下一轮必须在真实 production entry 上加入并先 RED 后 GREEN 的测试：
+
+1. builder 使用真实 buildParticleBank 覆盖 ESS < threshold、ESS == threshold、ESS > threshold，断言 bank、summary 和 ESS helper 三者 status 一致；
+2. request public metadata 覆盖 config identity、snapshot identity、config particle count、requested/accepted/top-level particle count 冲突；
+3. 覆盖 accepted count 小于/大于目标、samplingAttempts 超过 config max、ready/degraded 携带 failureReason、status/summary status 冲突、public/summary ESS 冲突、zeroWeightCount 越界、duplicateCount 越界；
+4. 对真实 config/summary/top-level numeric fields 逐字段覆盖 NaN、Infinity、-Infinity、fractional、negative、-0、unsafe integer、上限溢出、合法 0 和合法最大边界；不适用的类别必须在测试名称或矩阵中说明；
+5. result/request provenance 覆盖 summary repeat count 不同、aggregate repeat count 不同、修改 baseline score、candidate A 使用 candidate B score、foreign/missing/duplicate summary、ranking 集合不一致、scenario/repeat product 不一致、assembly 注入 budget/root/policy/mode/formal 字段，以及合法多 candidate/multi-scenario/multi-replicate 正例；
+6. 每个 failure 断言 typed classification、no throw、无 partial result、无私有 diagnostics；所有 hostile callback/getter 调用计数必须为 0。
+
+所有测试必须直接调用 buildParticleBank、createRolloutRequest、createRolloutResult、readParticleBankRolloutAccess 或 createParticleScenarioSource 等真实入口，不得用 mock validator 或与 production helper 共享 expected 的测试替代。
+
+#### Next code remediation allowlist
+
+~~~text
+src/ai/particles/particleBankBuilder.ts
+src/ai/rollout/contracts.ts
+tests/ai/particles/particleBankBuilder.test.ts
+tests/ai/particles/effectiveSampleSize.test.ts        # only if necessary
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+tests/ai/rollout/particleScenarioSource.test.ts       # only for responsibility regression
+~~~
+
+forbidden paths remain：
+
+~~~text
+src/game/room.ts
+src/ai/aiDecisionEngine.ts
+src/ai/planning/**
+src/ai/particles/particleBankInternals.ts
+src/ai/particles/particleBankRolloutAccess.ts
+src/ai/rollout/particleScenarioSource.ts
+package.json
+package-lock.json
+tsconfig.json
+vite.config.ts
+~~~
+
+只有调查证明 forbidden path 是无法绕开的根因时，才停止并报告；不得自行扩大范围。Task 2–9 不开始。
 
 ### 3.2 Public state、candidate 和 scenario
 

@@ -2,8 +2,8 @@
 
 状态：
 TASK 1 INDEPENDENT REVIEW BLOCKED
-TASK 1 REVIEW REMEDIATION DESIGN FROZEN
-TASK 1 REVIEW REMEDIATION CODE PENDING
+TASK 1 FINAL GATE REMEDIATION DESIGN FROZEN
+TASK 1 CODE REMEDIATION PENDING
 TASK 2 NOT STARTED
 
 ## Task 1 Independent Review Findings — formal adjudication
@@ -385,7 +385,9 @@ Task 1 review remediation 的 runtime boundary 固定为递归 plain data。requ
 
 `createRolloutResult` 必须重新验证 request；`RolloutResultAssemblyInput` 只含 candidateSummaries、ranking 和 aggregateDiagnostics，不能含 rootDigest/rootIdentity/policyId/mode/formalExecutionAllowed/replayContextIdentity。result 的 mode、literal false formal flag、policyId 和 rootDigest 由 validated request 派生，rootDigest 内部只由 validatedRequest.rootIdentity 计算。`rootDigestFromReplayContextIdentity(string)` 不再是可接受任意 64 位 hex 的 public production entry；不得使用 WeakSet/object identity 或 global mutable registry。
 
-## 2. Task 1 — contracts / private bridge / replay-ready source
+## 2. Task 1 — historical bridge implementation record
+
+> 本节记录 expected HEAD 已完成的 bridge/source remediation。其旧的五路径 scope 与 RED 1–16 仅作历史证据；下一轮 final-gate code remediation 只执行第 2.1 节，且本轮 docs-only 不修改本节所列 production/test 文件。
 
 ### Scope
 
@@ -468,6 +470,112 @@ Task 1 remediation 的最小实现顺序、文件和 commit 边界固定如下�
 ### Produces / consumes
 
 Produces frozen contracts, RolloutScenarioSourceInput, source success/failure union and one private bridge. Consumes existing public ParticleBank handle plus complete replay context; does not enlarge the public ParticleBank API.
+
+## 2.1 Task 1 Final Gate Remediation Design Freeze
+
+本节是当前 expected HEAD 5cd433d3e623e7e516effb36ab5bc080f5427d1a 的唯一下一轮 Task 1 code remediation plan。本轮只冻结文档，不修改 production/test；Task 2–9 不开始。I-1、I-2、I-3 均已用真实类型、builder、ESS helper、result factory 和现有测试入口核对，不能以 fixture 自洽或实施者 PASS 代替后续 RED/GREEN 证据。
+
+### Frozen review findings and implementation goal
+
+| Finding | 真实根因 | 最小修复目标 |
+| --- | --- | --- |
+| I-1 ESS boundary/public metadata | ESS helper 使用严格小于，但 particleBankBuilder 的 top-level bank status 使用小于等于；request public validator 还需要冻结完整 schema、identity、状态、计数和 ESS 关系。 | 只让 builder bank status 复用同一个 ESS helper status；在 contracts.ts 完成 public metadata exact validation，并冻结真实 builder 能产生的状态/计数不变量。 |
+| I-2 result provenance | createRolloutResult 当前校验 candidate 集合和 assembly 内部算术，却未把 baselineEvaluatorScore、replicateCountPerScenario、acceptedScenarioCount 和 ESS 与已验证 request 绑定。 | 结果只能由 validated request 的 candidate/budget/source provenance 组装；assembly 继续只接受真实的三个字段。 |
+| I-3 test gate completeness | 现有测试没有直接覆盖 builder 的小于、等于、大于三个 ESS 关系，也没有完整覆盖 request metadata conflict 和 result/request provenance conflict。 | 用真实 production entry 先写逐项 RED，再以最小修复转 GREEN；所有 failure 均 typed、no-throw、no-partial。 |
+
+I-1 的 frozen ESS semantics 为：
+
+~~~text
+ESS < threshold  -> degraded
+ESS == threshold -> ready
+ESS > threshold  -> ready
+bank.status === summary.status === effectiveSampleSizeResult.status
+~~~
+
+真实 builder 成功路径同时必须保持：
+
+- acceptedParticleCount 等于 requestedParticleCount，且等于 config.particleCount；
+- samplingAttempts 不超过 config.maxSamplingAttempts，且不小于 acceptedParticleCount + duplicateCount；
+- duplicateCount 是真实 sampler identity duplicate 计数，范围为 0 到 samplingAttempts，不额外发明 duplicateCount 不超过 acceptedParticleCount；
+- zeroWeightCount 是 normalized weights 中等于 0 的真实计数，范围为 0 到 acceptedParticleCount；
+- normalized weights 在 builder tolerance 内求和为 1，ESS finite 且在 1 到 acceptedParticleCount 之间；
+- ready/degraded public bank 不携带 own failureReason；failed summary 只属于 build failure，不伪装成 public success bank。
+
+### Exact next code allowlist
+
+下一轮实现只允许触碰以下路径；两个注释表示条件性测试路径，不得解释为扩大 production scope：
+
+~~~text
+src/ai/particles/particleBankBuilder.ts
+src/ai/rollout/contracts.ts
+tests/ai/particles/particleBankBuilder.test.ts
+tests/ai/particles/effectiveSampleSize.test.ts        # only if necessary
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+tests/ai/rollout/particleScenarioSource.test.ts       # only for responsibility regression
+~~~
+
+以下路径明确 forbidden：
+
+~~~text
+src/game/room.ts
+src/ai/aiDecisionEngine.ts
+src/ai/planning/**
+src/ai/particles/particleBankInternals.ts
+src/ai/particles/particleBankRolloutAccess.ts
+src/ai/rollout/particleScenarioSource.ts
+package.json
+package-lock.json
+tsconfig.json
+vite.config.ts
+~~~
+
+如果调查证明 forbidden path 是无法绕开的真实根因，必须停止并报告证据，不得自行扩大 allowlist。不得创建新的 registration accessor、brand token、global registry、public barrel、通用 validation framework 或新增 public ParticleBank 字段。
+
+### Bite-sized RED → GREEN implementation steps
+
+#### Slice A — builder ESS status alignment
+
+1. 在 tests/ai/particles/particleBankBuilder.test.ts 直接调用真实 buildParticleBank，构造真实可产生的 normalized-weight 场景，分别覆盖 ESS 小于、恰好等于、大于 degradedEssThreshold；同时断言 helper result、summary 和 top-level bank 的 status。
+2. 首个 RED 必须证明 particleCount = 1、weights = [1]、threshold = 1 的现状冲突是 builder 小于等于分支，而不是 fixture 或 mock validator。
+3. 最小 production 修复只修改 src/ai/particles/particleBankBuilder.ts 的 top-level status 选择，使 bank.status 复用 helper status；不得复制第二套阈值比较。
+4. 如 helper 本身需要独立 exact-threshold 断言，才增加 tests/ai/particles/effectiveSampleSize.test.ts；否则不改该文件。
+5. GREEN 还必须覆盖 builder 的 accepted/attempt/duplicate/zero-weight/ESS/status/failure 不变量，并确认合法边界 0 与 particleCount = 1 不被错误拒绝。
+
+#### Slice B — public ParticleBank request boundary
+
+1. 在 tests/ai/rollout/particleBankRolloutBoundary.test.ts 直接调用真实 createRolloutRequest，使用真实 registered ParticleBank handle；不通过测试 mock、复制 validator 或重新构造 private record。
+2. contracts.ts 必须先验证 top-level 和每个 nested public object 的 strict prototype、Reflect.ownKeys exact set、own data descriptors、无 symbol/accessor/function、frozen/plain-data，再读取值；snapshot、config、summary、failure metadata 等 nested object 同样受保护，getter 调用计数必须为 0。
+3. exact public schema 固定为 ParticleBank 的 schemaVersion、snapshot、config、particleCount、effectiveSampleSize、status、summary；snapshot 为真实八字段，config 为真实六字段，accepted ready/degraded summary 为真实 status/count/ESS 字段；failureReason 只属于 status=failed 的 private summary/build-failure union，public success summary exact own keys 不包含它。不得发明 rejected 字段。
+4. 绑定 snapshot identity、config identity、config particle count、requested/accepted/top-level particle count、status/summary status、public/summary ESS、samplingAttempts/maxSamplingAttempts、duplicateCount、zeroWeightCount 和 failureReason 的真实关系；ready/degraded bank 拒绝 own failureReason。
+5. 数值 RED 必须逐字段覆盖 NaN、Infinity、-Infinity、fractional、negative、-0、unsafe integer、上限溢出、合法 0 和合法最大边界；Object.is(value, -0) 对所有 numeric field 均拒绝，只有正零可出现在真实允许的 attempts、duplicate 和 zero-weight 字段；正 count/config limit 不接受零。public/summary ESS metadata equality 的绝对误差固定为 <= 1e-9，helper computation 仍使用 builder 的 1e-12..1e-6 tolerance/clamp。
+6. 仍保持合法 registered handle 的 object identity、WeakMap registration 和 caller isolation；request 阶段不读取 private records、不 spread/clone/rebuild handle。合法但 unregistered public handle 只在 source/bridge 阶段返回 typed fake-or-unknown-particle-bank。
+
+#### Slice C — result/request provenance binding
+
+1. 在 tests/ai/rollout/particleBankRolloutBoundary.test.ts 直接调用真实 createRolloutResult(requestInput, assemblyInput)，先确认当前 request budget repeat count 与 assembly repeat count 不一致仍错误通过，作为 I-2 RED。
+2. contracts.ts 只允许当前真实 RolloutResultAssemblyInput 的 candidateSummaries、ranking、aggregateDiagnostics 三个 own fields；assembly 注入 budget、scenario count、repeat count、root、policy、mode 或 formal 字段必须 typed reject。
+3. summary candidateId/ranking 集合必须与 request candidates 精确相等；对应 candidate 的 baselineEvaluatorScore 必须 finite 且 Object.is 精确相等，保留 -0；summary 和 aggregate replicateCountPerScenario 必须精确等于 request budget.replicateCountPerScenario；summary 和 aggregate acceptedScenarioCount 必须精确等于已验证 request.scenarioSourceInput.bank.summary.acceptedParticleCount，且该值必须等于 bank.particleCount、config.particleCount 和 requestedParticleCount；expectedReplicateCount、completedReplicateCount、expectedCompletedReplicateCount 和 aggregate ESS 必须由这些已验证 request fields 约束，aggregate ESS 必须匹配 request.scenarioSourceInput.bank.effectiveSampleSize 的 public tolerance。
+4. 结果的 mode、formalExecutionAllowed、policyId、rootDigest 继续只能从 validated request 派生；不得从 assembly 重建、接受 caller digest 或添加不存在的 provenance 字段。
+5. 使用至少两个 candidate、多个 accepted scenarios 和多个 replicates 的合法正例，证明映射不是只对单 candidate fixture 自洽；对 baseline 修改、candidate 交叉 baseline、repeat mismatch、scenario/repeat product mismatch、bank accepted count/ESS mismatch、foreign/missing/duplicate summary 和 ranking mismatch 逐一 RED→GREEN。当前真实类型没有 expectedScenarioCount、completedScenarioCount 或 totalCompletedReplicates；不得新增这些字段或用 assembly 自报值替代 request.bank public provenance。
+
+#### Slice D — responsibility regression only
+
+只有在 Slice B/C 的测试需要证明 failure 发生在 source/bridge responsibility boundary 时，才修改 tests/ai/rollout/particleScenarioSource.test.ts。不得修改 forbidden 的 particleScenarioSource.ts、particleBankRolloutAccess.ts 或 particleBankInternals.ts。测试应证明 public-valid but unregistered handle 经 request public validation 后，由 source/bridge 返回 typed fake-or-unknown-particle-bank，且不返回 partial scenario、不泄漏 private diagnostics。
+
+### Complete RED/GREEN acceptance matrix
+
+| Gate | 必须先 RED 的真实场景 | GREEN 必须证明 |
+| --- | --- | --- |
+| I-1 ESS | real builder 的 ESS <、==、> threshold，含 particleCount = 1 / threshold = 1 | helper、summary、bank status 一致；builder success invariants 与合法边界值保持成立 |
+| I-1 public shape | missing key、enumerable/non-enumerable extra key、symbol、accessor/getter、custom/inherited prototype、malformed descriptor | exact schema、strict plain/frozen/data-only 检查先于 value read，getter 0 次 |
+| I-1 identity/status | snapshot/config identity conflict、config count conflict、status conflict、summary conflict、ready/degraded failureReason、public/summary ESS conflict | typed invalid-request、no throw、no partial request，不泄漏私有信息 |
+| I-1 numeric | 每个真实 count/limit/measure 字段的 NaN、Infinity、-Infinity、fractional、negative、-0、unsafe integer、overflow、合法 0、合法最大值 | safe-integer/finite/range/tolerance 语义与真实 builder 一致，不错误拒绝合法零值 |
+| I-2 provenance | request 与 result baseline、budget repeat、accepted scenario count、ESS 不一致；foreign/missing/duplicate candidate；ranking mismatch；assembly 注入 provenance | exact request/result mapping，Object.is baseline，产品字段只从 validated request 派生 |
+| I-3 failure quality | hostile callback/getter/Proxy trap、fake/unknown handle、malformed private projection、所有 invalid union 分支 | typed classification、no throw、no partial result、无 raw scenario/hands/assignment/weight/seed/tape/cursor diagnostics，callback/getter 0 次 |
+
+### Verification boundary for the next code pass
+
+下一轮 code remediation 完成后才运行 focused boundary、source、combined 和 particle baseline commands，以及 tsc/build/diff-check；本轮 docs-only 不运行 Vitest、tsc、build 或 benchmark。任何 forbidden path、package/config、Room、decision engine、planning 或 Task 2–9 变更都使该轮 BLOCKED。固定 benchmark runner、Node 22 CI 和 Task 9 full permitted regression 继续是 deferred gates；不得宣称 D2F Shadow release ready。
 
 ## 3. Task 2 — Team Utility / terminal truth table / leaf
 

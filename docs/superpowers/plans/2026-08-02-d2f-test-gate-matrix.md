@@ -2,8 +2,8 @@
 
 状态：
 TASK 1 INDEPENDENT REVIEW BLOCKED
-TASK 1 REVIEW REMEDIATION DESIGN FROZEN
-TASK 1 REVIEW REMEDIATION CODE PENDING
+TASK 1 FINAL GATE REMEDIATION DESIGN FROZEN
+TASK 1 CODE REMEDIATION PENDING
 TASK 2 NOT STARTED
 
 ## Task 1 Independent Review Findings — formal adjudication
@@ -495,6 +495,104 @@ tests/ai/rollout/particleScenarioSource.test.ts
 
 每个 RED 都必须使用真实 production entry，记录行为缺失并证明原因不是 fixture/import/environment；只完成对应最小 production 改动后，用相同命令转 GREEN；不得先写完所有 production 再补测试。每个 Task 仍是单一可审计 commit；correctness 与 benchmark 严格分离。
 
+## 1.4 Task 1 Final Gate Remediation Matrix
+
+> §1.3 和 §1.3.1 是已完成的 historical bridge/source remediation gate；本节 supersede 其旧 allowlist，冻结 expected HEAD 5cd433d3e623e7e516effb36ab5bc080f5427d1a 之后唯一允许的 Task 1 final-gate code remediation。当前动作仅为 docs-only design freeze，不宣称任何 Vitest、tsc、build 或 benchmark 通过。
+
+### 1.4.1 I-1 — ESS and public ParticleBank metadata
+
+真实 ESS helper 的唯一阈值语义为：
+
+~~~text
+ESS < threshold  -> degraded
+ESS == threshold -> ready
+ESS > threshold  -> ready
+bank.status === summary.status === effectiveSampleSizeResult.status
+~~~
+
+当前代码证据是 calculateEffectiveSampleSize 使用严格小于，summary 复用 helper status，而 particleBankBuilder top-level bank 使用小于等于；particleCount = 1、weights = [1]、threshold = 1 会暴露 summary ready / bank degraded。该 RED 必须通过真实 buildParticleBank 复现。
+
+| RED case | Direct production entry | Required GREEN evidence |
+| --- | --- | --- |
+| ESS below threshold | real buildParticleBank | helper、summary、bank 全部 degraded |
+| ESS exactly at threshold | real buildParticleBank；必须含 particleCount = 1 / weights = [1] / threshold = 1 | helper、summary、bank 全部 ready |
+| ESS above threshold | real buildParticleBank | helper、summary、bank 全部 ready |
+| builder success invariants | real builder output 与真实 sampler/config | accepted=requested=config particle count；attempts 不超过 max 且不小于 accepted+duplicate；zeroWeight 在 0..accepted；ESS finite 在 1..accepted；ready/degraded 无 failureReason |
+| public exact schema | real createRolloutRequest | top-level 7 keys、真实 snapshot 8 keys、config 6 keys、accepted ready/degraded summary 的真实字段 exact；failureReason 仅属 failed private summary；无 rejected/re invented field |
+| nested hostile shape | real createRolloutRequest | missing、enumerable/non-enumerable extra、symbol、accessor/getter、custom/inherited prototype、malformed descriptor 全部 typed reject；getter 0 次 |
+| identity and status consistency | real createRolloutRequest | snapshot/config identity、config particle count、requested/accepted/top-level count、bank/summary status、public/summary ESS 冲突均 typed reject，no throw/no partial |
+| numeric semantics | real createRolloutRequest | NaN、Infinity、-Infinity、fractional、negative、Object.is(value, -0)、unsafe integer、overflow 按真实字段拒绝；只有正零可在 attempts/duplicate/zero-weight 出现；public/summary ESS metadata equality 绝对误差 <= 1e-9，helper computation tolerance/clamp 仍与 builder 一致；合法最大边界保留 |
+
+public validator 必须在 value read 前完成 strict prototype、Reflect.ownKeys exact set、own data descriptor、无 symbol/accessor/function、frozen/plain-data 检查；snapshot、config、summary、failure metadata 等 nested object 不能绕过同一边界。public/summary ESS metadata equality 的绝对误差固定为 <= 1e-9；helper computation 仍使用 builder 的 1e-12..1e-6 tolerance/clamp，必须覆盖极小误差、恰好阈值和刚超 tolerance。private bridge raw ESS 若无法与 builder clamp/tolerance 兼容，必须停止并报告 forbidden-path 根因，不能自行改 bridge。
+
+### 1.4.2 I-2 — exact Request → RolloutResult binding
+
+| Validated request source | Result field | Exact gate |
+| --- | --- | --- |
+| candidates candidateId set | summary candidateId set and ranking set | exact equal; no foreign/missing/duplicate |
+| same candidate baselineEvaluatorScore | summary baselineEvaluatorScore | finite and Object.is exact, including -0 |
+| budget.replicateCountPerScenario | each summary and aggregate repeat field | exact equal |
+| request.scenarioSourceInput.bank.summary.acceptedParticleCount | summary/aggregate acceptedScenarioCount | exact validated public-bank count; it equals bank.particleCount, config.particleCount and requestedParticleCount |
+| accepted scenarios × request repeat | expectedReplicateCount | safe product derived from request, not assembly |
+| completed counts per summary | aggregate completedReplicateCount | safe sum derived from summaries |
+| request candidate count × expected local coverage | expectedCompletedReplicateCount | safe product derived from request and summaries |
+| request.scenarioSourceInput.bank.effectiveSampleSize | aggregate effectiveSampleSize | same public tolerance; assembly cannot declare it |
+| request.evidenceRequirements | evidence/coverage fields | all minimums and complete-coverage requirement must hold |
+| validated request provenance | result mode/formalExecutionAllowed/policyId/rootDigest | derived only from request |
+
+I-2 RED 必须直接调用真实 createRolloutResult(requestInput, assemblyInput)，覆盖 summary repeat mismatch、aggregate repeat mismatch、baseline mutation、candidate A 使用 candidate B baseline、request bank accepted count/product mismatch、aggregate ESS mismatch、foreign/missing/duplicate summary、ranking set mismatch，以及 assembly 注入 budget/root/policy/mode/formal 字段。合法多 candidate、多 scenario、多 replicate 正例必须 GREEN，证明绑定不是 fixture 偶合。当前真实 assembly input 只允许 candidateSummaries、ranking、aggregateDiagnostics 三个字段；当前类型没有 expectedScenarioCount、completedScenarioCount 或 totalCompletedReplicates，不得发明这些字段。
+
+### 1.4.3 I-3 — complete RED/GREEN test quality
+
+| Matrix family | Required direct cases | GREEN assertions |
+| --- | --- | --- |
+| public identity/schema | missing key；enumerable/non-enumerable extra；symbol；accessor/getter；custom/inherited prototype；malformed descriptor；snapshot/config identity conflict | real production request rejects typed；no throw/no partial；getter/callback count = 0 |
+| status/failure | bank/summary conflict；ESS conflict；zero-weight conflict；count conflict；ready/degraded with failureReason；failed status combination | only real ParticleBank public success combinations pass；failure metadata does not leak into accepted public bank |
+| count/measure numeric | NaN、Infinity、-Infinity、fractional、negative、-0、unsafe integer、overflow；legal 0；legal max；particle count 1 | finite/safe/nonnegative/range/tolerance rules match real builder; no false rejection of legal zero or boundary |
+| request/result provenance | baseline/budget/accepted/ESS mismatches；candidate sets；ranking；product arithmetic；assembly injection；positive multi-variant mapping | exact request-bound result, Object.is baseline, no caller-controlled provenance |
+| opaque handle and bridge | registered identity；public-valid unregistered handle；malformed registered private record；identity/weight/ESS invalid | request preserves handle identity; only source/bridge returns typed fake-or-unknown/private-state failure; no partial scenario/private diagnostics |
+| failure safety | hostile callback/getter/Proxy trap and all invalid union branches | typed failure classification, no throw, no partial request/result/scenario, zero hostile callback/getter executions |
+
+所有条目必须直接调用真实 buildParticleBank、createRolloutRequest、createRolloutResult、readParticleBankRolloutAccess 或 createParticleScenarioSource；禁止 mock validator、复制 production expected、任何测试过滤标记。测试文件只能从以下 final-gate allowlist 选择：
+
+~~~text
+src/ai/particles/particleBankBuilder.ts
+src/ai/rollout/contracts.ts
+tests/ai/particles/particleBankBuilder.test.ts
+tests/ai/particles/effectiveSampleSize.test.ts        # only if necessary
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+tests/ai/rollout/particleScenarioSource.test.ts       # only for responsibility regression
+~~~
+
+forbidden paths：
+
+~~~text
+src/game/room.ts
+src/ai/aiDecisionEngine.ts
+src/ai/planning/**
+src/ai/particles/particleBankInternals.ts
+src/ai/particles/particleBankRolloutAccess.ts
+src/ai/rollout/particleScenarioSource.ts
+package.json
+package-lock.json
+tsconfig.json
+vite.config.ts
+~~~
+
+若 forbidden path 被证明是根因，状态必须为 BLOCKED 并附证据；不得扩展 allowlist。Task 2–9 不开始。
+
+### 1.4.4 Current-round boundary and deferred gates
+
+本轮只提交三份文档的 design freeze。不会运行 Vitest、tsc、build、benchmark，也不会修改 production、tests、package、lock、config、Room、decision engine、planning 或 bridge/source formal action path。下一轮 code remediation 完成后，才按冻结 manifest 运行 focused boundary/source/combined、Particle baseline 和 D2 current regression。
+
+以下 gate 保留为 deferred，不得被解释为当前 Task 1 code 或 Shadow release 通过：
+
+~~~text
+AWAITING_FIXED_BENCHMARK_RUNNER
+AWAITING_NODE22_CI
+Task 9 full permitted regression
+~~~
+
 ## 2. Exact accepted Particle focused manifest
 
 manifest 只能由 git ls-files 'tests/ai/particles/*.test.ts' 生成；下列 10 个路径各一次，全部位于当前 worktree 的 tests/ai/particles/，不包含 .worktrees/**：
@@ -923,7 +1021,7 @@ rg -n "effectiveSampleSize|minimumAcceptedScenarioCount|minimumCompletedReplicat
 rg -n "riskAdjustedUtility|variancePenalty|downsideRiskPenalty|baselineEvaluatorScore|UTF-16" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
 rg -n "representativeActionShadowObserver|aiDecisionEngine|src/game/room.ts|observeD2FShadow|elapsedWallClockMs" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
 rg -n "23 files|222 tests|D2_CURRENT_REGRESSION_MANIFEST|87 files|898 tests|AWAITING_NODE22_CI|AWAITING_FIXED_BENCHMARK_RUNNER" docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
-rg -n -i "TBD|TODO|later|follow up|appropriate|as needed|etc\\.|similar to|implement validation|add tests|待定|后续补充|适当|视情况|类似|必要时" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
+rg -n -i "placeholder|later|follow up|appropriate|as needed|etc\\.|similar to|implement validation|add tests|待定|后续补充|适当|视情况|类似|必要时" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
 git diff --name-only -- docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
 $docs = @("docs/superpowers/specs/2026-08-02-d2f-design-spec.md", "docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md", "docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md")
 foreach ($doc in $docs) {
