@@ -171,7 +171,7 @@ export type RolloutAggregationFailure =
 
 export type RolloutFailure =
   | { kind: "invalid-request"; field: string }
-  | { kind: "invalid-budget"; field: "budget" | "limits" | "replicateCountPerScenario" | "maxPliesPerReplicate" | "maxPolicyActionEvaluationsPerPly" | "maxWorkUnits" }
+  | { kind: "invalid-budget"; field: "replicateCountPerScenario" | "maxPliesPerReplicate" | "maxPolicyActionEvaluationsPerPly" | "maxWorkUnits" }
   | { kind: "invalid-risk-policy"; field: "variancePenalty" | "downsideRiskPenalty" }
   | { kind: "invalid-evidence-requirements"; field: "minimumEffectiveSampleSize" | "minimumAcceptedScenarioCount" | "minimumCompletedReplicateCount" }
   | { kind: "fake-or-unknown-particle-bank" }
@@ -432,16 +432,16 @@ export function validateRolloutBudget(input: Readonly<{
   let budgetInput: unknown;
   let limitsInput: unknown;
   try {
-    if (!isPlainDataRecord(input, ["budget", "limits"])) return invalidBudget("budget");
+    if (!isPlainDataRecord(input, ["budget", "limits"])) return invalid("budget");
     budgetInput = getOwnDataProperty(input, "budget");
     limitsInput = getOwnDataProperty(input, "limits");
     if (!hasExactOwnDataKeys(budgetInput, [
       "replicateCountPerScenario", "maxPliesPerReplicate", "maxPolicyActionEvaluationsPerPly", "maxWorkUnits",
     ]) || !hasExactOwnDataKeys(limitsInput, [
       "maxReplicateCountPerScenario", "maxPliesPerReplicate", "maxPolicyActionEvaluationsPerPly", "maxWorkUnits",
-    ])) return invalidBudget("budget");
+    ])) return invalid("budget");
   } catch {
-    return invalidBudget("budget");
+    return invalid("budget");
   }
   const budgetFields: readonly (keyof RolloutBudget)[] = [
     "replicateCountPerScenario", "maxPliesPerReplicate", "maxPolicyActionEvaluationsPerPly", "maxWorkUnits",
@@ -465,7 +465,7 @@ export function validateRolloutBudget(input: Readonly<{
       maxWorkUnits: getOwnDataProperty(limitsInput, "maxWorkUnits") as number,
     };
   } catch {
-    return invalidBudget("budget");
+    return invalid("budget");
   }
   for (const field of budgetFields) {
     if (!isPositiveSafeInteger(budgetValues[field])) return invalidBudget(field);
@@ -538,8 +538,8 @@ export function validateRolloutRiskPolicy(input: unknown): RolloutContractResult
 export function createRolloutRequest(input: unknown): RolloutContractResult<RolloutRequest> {
   try {
     const envelopeFailure = requestEnvelopeFailure(input);
-    if (envelopeFailure === "budget") return invalidBudget("budget");
-    if (envelopeFailure === "limits") return invalidBudget("limits");
+    if (envelopeFailure === "budget") return invalid("budget");
+    if (envelopeFailure === "limits") return invalid("limits");
     if (envelopeFailure === "evidenceRequirements") return invalidEvidence("minimumEffectiveSampleSize");
     if (envelopeFailure === "riskPolicy") return invalidRisk("variancePenalty");
     if (envelopeFailure !== undefined) return invalid(envelopeFailure);
@@ -742,8 +742,7 @@ function createRolloutResultUnchecked(requestInput: unknown, assemblyInput: unkn
   const evidenceRequirements = requestResult.value.evidenceRequirements;
   if (aggregate.effectiveSampleSize < evidenceRequirements.minimumEffectiveSampleSize
     || aggregate.acceptedScenarioCount < evidenceRequirements.minimumAcceptedScenarioCount
-    || aggregate.completedReplicateCount < evidenceRequirements.minimumCompletedReplicateCount
-    || (evidenceRequirements.requireCompleteCoverage && aggregate.completedReplicateCount !== aggregate.expectedCompletedReplicateCount)) return invalid("aggregateDiagnostics");
+    || aggregate.completedReplicateCount < evidenceRequirements.minimumCompletedReplicateCount) return invalid("aggregateDiagnostics");
   return {
     ok: true,
     value: deepFreeze({
@@ -780,7 +779,7 @@ function isAggregateDiagnostics(value: unknown, candidateCount: number): value i
   const expected = total === undefined ? undefined : safeProduct([candidateCount, total]);
   return total !== undefined
     && expected !== undefined
-    && value.completedReplicateCount === expected
+    && value.completedReplicateCount <= expected
     && value.expectedCompletedReplicateCount === expected;
 }
 
@@ -1010,6 +1009,10 @@ function isPublicSummary(value: unknown): value is Readonly<Record<string, strin
 
 function isPublicEventSemanticShape(value: PublicActionEvent): boolean {
   const event = value as unknown as Record<string, unknown>;
+  if (!isSeat(event.seat)) return false;
+  for (const key of ["leadSeat", "lastPlaySeat", "fromSeat", "toSeat"] as const) {
+    if (event[key] !== undefined && !isSeat(event[key])) return false;
+  }
   if (!hasOnlyKeys(event, [
     "schemaVersion", "gameId", "roundIdentity", "handIdentity", "eventIndex", "kind", "seat", "publicStableKey", "trickIndex",
     "patternType", "groupType", "handCountBefore", "handCountAfter", "leadSeat", "lastPlaySeat", "usedWildcardCount", "usedBomb",

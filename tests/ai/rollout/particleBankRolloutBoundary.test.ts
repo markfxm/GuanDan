@@ -1269,7 +1269,7 @@ describe("D2F ParticleBank bridge", () => {
       budget: { ...(input.budget as object), callback: injectedClosure },
     } as unknown);
 
-    expect(result).toEqual({ ok: false, failure: { kind: "invalid-budget", field: "budget" } });
+    expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "budget" } });
     expect(callbackCallCount).toBe(0);
     if (result.ok) expect((result.value.budget as unknown as Record<string, unknown>).callback).toBeUndefined();
   });
@@ -1296,7 +1296,7 @@ describe("D2F ParticleBank bridge", () => {
     };
     const input = makeRequestInput();
     const result = createRolloutRequest({ ...input, limits: buildLimits(input.limits, callback) } as unknown);
-    expect(result).toEqual({ ok: false, failure: { kind: "invalid-budget", field: "budget" } });
+    expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "budget" } });
     expect(callbackCallCount).toBe(0);
   });
 
@@ -2660,5 +2660,69 @@ describe("D2F ParticleBank bridge", () => {
     expect([...new Set(publicValidatorReexporters)]).toEqual([]);
     expect(validatorImportsForbiddenBoundary).toBe(false);
     expect(contractsImportForbiddenBoundary).toBe(false);
+  });
+
+  test("accepts valid early completion as incomplete coverage", () => {
+    const request = makeRequestInput();
+    const assembly = makeResultAssemblyInput();
+    const incompleteAssembly = {
+      ...assembly,
+      candidateSummaries: assembly.candidateSummaries.map((summary) => ({
+        ...summary,
+        completedReplicateCount: summary.completedReplicateCount - 1,
+      })),
+      aggregateDiagnostics: {
+        ...assembly.aggregateDiagnostics,
+        completedReplicateCount: assembly.aggregateDiagnostics.completedReplicateCount - 1,
+      },
+    };
+
+    const result = createRolloutResult(request, incompleteAssembly);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.aggregateDiagnostics.completedReplicateCount).toBe(1);
+  });
+
+  test("rejects a public event seat encoded as negative zero before hash normalization", () => {
+    const sourceInput = makeAntiTributeSourceInput();
+    const validRootIdentity = replayRoot(sourceInput);
+    const hostileEvent = {
+      ...sourceInput.publicHistoryEvents[0]!,
+      seat: -0 as PublicSeat,
+    };
+    const hostileSourceInput = {
+      ...sourceInput,
+      publicHistoryEvents: [hostileEvent],
+    };
+    const request = makeRequestInput();
+    const result = createRolloutRequest({
+      ...request,
+      rootIdentity: validRootIdentity,
+      scenarioSourceInput: hostileSourceInput,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      failure: { kind: "invalid-request", field: expect.any(String) },
+    });
+  });
+
+  test("uses invalid-request for malformed budget envelopes", () => {
+    const request = makeRequestInput();
+    const { budget: _budget, ...missingBudget } = request;
+    const missingBudgetResult = createRolloutRequest(missingBudget);
+    expect(missingBudgetResult).toEqual({
+      ok: false,
+      failure: { kind: "invalid-request", field: "budget" },
+    });
+
+    const malformedBudgetResult = createRolloutRequest({
+      ...request,
+      budget: { ...request.budget, callback: () => undefined },
+    });
+    expect(malformedBudgetResult).toEqual({
+      ok: false,
+      failure: { kind: "invalid-request", field: "budget" },
+    });
   });
 });
