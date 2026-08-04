@@ -495,9 +495,9 @@ tests/ai/rollout/particleScenarioSource.test.ts
 
 每个 RED 都必须使用真实 production entry，记录行为缺失并证明原因不是 fixture/import/environment；只完成对应最小 production 改动后，用相同命令转 GREEN；不得先写完所有 production 再补测试。每个 Task 仍是单一可审计 commit；correctness 与 benchmark 严格分离。
 
-## 1.4 Task 1 Final Gate Remediation Matrix
+## 1.4 Historical Task 1 Final Gate Remediation Matrix
 
-> §1.3 和 §1.3.1 是已完成的 historical bridge/source remediation gate；本节 supersede 其旧 allowlist，冻结 expected HEAD 5cd433d3e623e7e516effb36ab5bc080f5427d1a 之后唯一允许的 Task 1 final-gate code remediation。当前动作仅为 docs-only design freeze，不宣称任何 Vitest、tsc、build 或 benchmark 通过。
+> §1.3 和 §1.3.1 是已完成的 historical bridge/source remediation gate；本节是旧 final-gate 矩阵，已被第 1.5 节 supersede。当前 validation-consolidation code pass 从 `f1944efc24e0404d057e86c16460bfd2a5e31794` 开始；当前动作仅为 docs-only design freeze，不宣称任何 Vitest、tsc、build 或 benchmark 通过。
 
 ### 1.4.1 I-1 — ESS and public ParticleBank metadata
 
@@ -592,6 +592,116 @@ AWAITING_FIXED_BENCHMARK_RUNNER
 AWAITING_NODE22_CI
 Task 9 full permitted regression
 ~~~
+
+## 1.5 Task 1 Validation Consolidation Gate Matrix
+
+> 本节 supersede historical §1.4，是下一轮 validation-consolidation code pass 的唯一 gate matrix。起始 HEAD 固定为 `f1944efc24e0404d057e86c16460bfd2a5e31794`、branch 固定为 `codex/d2f-crn-rollout-source`；本轮只冻结三份文档，不运行 Vitest、tsc、build 或 benchmark。
+
+### 1.5.1 Shared validator architecture gate
+
+| Gate | 真实检查 | RED evidence | GREEN requirement |
+| --- | --- | --- | --- |
+| shared path | `src/ai/particles/particleBankPublicValidation.ts` 存在，`validateParticleBankPublic(unknown)` 返回 typed success/failure | 当前两处 boundary 各自维护 metadata schema | contracts.ts 与 particleBankRolloutAccess.ts 都委托同一 helper；success 保持原始 handle identity |
+| descriptor-first | `Reflect.ownKeys` exact keys、strict prototype、own data descriptors、no symbol/accessor/function、plain/frozen 先于 value read | malformed descriptor、custom prototype、getter/Proxy 可绕过或抛出 | typed failure、no throw、no partial；hostile getter/callback count = 0 |
+| import graph | Compiler API/symbol gate 解析 import/export 与 symbol ownership | shared path 不存在，或 internals reader/bridge consumer 责任不唯一 | shared validator 不导入 internals/bridge/rollout；只有 bridge 解析 `readParticleBankInternals`；只有 source 解析 bridge；无 public barrel、registration accessor、brand token、global registry |
+| opaque identity | registered handle 与 request bank `Object.is` 相等；不 spread/clone/rebuild | request 或 bridge 通过复制/重建绕过 handle identity | identity 保持；request 不读取 WeakMap/private records |
+| unregistered handle | public-valid unregistered handle → request → source/bridge | request 直接读 private records，或 fake handle 产生 partial scenario | request public validation 可成功；随后 typed `fake-or-unknown-particle-bank`，无 private diagnostics |
+
+### 1.5.2 ESS, metadata and numeric gate
+
+冻结 status 与 domain 规则：`ESS < threshold => degraded`、`ESS == threshold => ready`、`ESS > threshold => ready`；helper、summary、bank 三者 status 一致。public ESS 严格满足 `1 <= ESS <= N`，不使用 domain epsilon；bank ESS 与 summary ESS 只以 `abs(delta) <= 1e-9` 做 equality。
+
+| Gate | Direct production entry and input | RED expected before remediation | GREEN evidence |
+| --- | --- | --- | --- |
+| ESS below | real `buildParticleBank`, ESS below threshold | status path not proven by real builder | helper/summary/bank all degraded |
+| ESS equality | real builder，`particleCount = 1`、weights `[1]`、threshold `1` | helper/summary ready but bank degraded，或 fixture 绕过 builder | helper/summary/bank all ready |
+| ESS above | real builder，ESS above threshold | top-level status 维护第二套比较 | helper/summary/bank all ready |
+| strict lower/upper | real request bank ESS `0.9999999995` and `N + 0.0000000005` | request validator 用 `1e-9` 放行 domain 外值 | both typed invalid request；`1e-9` 只用于 bank↔summary equality |
+| ESS equality tolerance | bank/summary delta exactly `1e-9`, then just above; NaN/±Infinity | tolerance relative/rounding ambiguity或 non-finite accepted | exact boundary passes, just-over/non-finite rejects |
+| counts/attempts | real builder plus request/bridge metadata conflicts | accepted < requested/config/top-level，或 attempts > max 被接受 | accepted=requested=config=top-level；attempts <= max 且 attempts >= accepted+duplicate |
+| duplicate/zero weight | real builder count invariants and malformed registered projection | negative/out-of-range/incorrect relationship accepted | `0 <= duplicate <= attempts`；`0 <= zeroWeight <= accepted` |
+| status/failure | ready/degraded with `failureReason`、bank/summary conflict、failed success shape | failureReason leaks into accepted success or status mismatch accepted | only ready/degraded success without failureReason；failed remains build-failure union |
+| canonical integer | snapshot/ledger/seat/config/summary/top-level/request/aggregate fields | NaN、±Infinity、fractional、negative、`-0`、unsafe integer、overflow accepted | `Number.isSafeInteger && !Object.is(-0)`；nonnegative/range applied after; `0`/`-1` sentinel/maximum legal boundaries preserved |
+
+整数矩阵固定为：positive counts/limits/budget reject zero；samplingAttempts、duplicateCount、zeroWeightCount、workUnitCount、completed counts allow positive zero；ledger index allows `-1` or nonnegative safe integer；seat allows `0..3`；baseline score is finite and retains signed zero for `Object.is` provenance；ESS is finite strict `[1, N]` and only bank/summary equality uses `<= 1e-9`.
+
+### 1.5.3 Request/result provenance gate
+
+| Provenance | Direct case | Required assertion |
+| --- | --- | --- |
+| baseline | two real request candidates; mutate candidate A summary to candidate B score；test `+0` vs `-0` | `Object.is(summary.baselineEvaluatorScore, matchingRequestCandidate.baselineEvaluatorScore)`；wrong candidate typed reject |
+| replicate budget | summaries and aggregate declare a different repeat/replicate value | exact request budget equality；assembly cannot change budget |
+| scenario count | alter summary/aggregate accepted count or use caller expected count | count is exactly `request.scenarioSourceInput.bank.summary.acceptedParticleCount`，which equals bank/config/requested count |
+| replicate product | mismatch accepted scenarios × request repeats；completed count and coverage denominator mismatch | checked product/sum derived from validated request/summaries；no caller declaration |
+| aggregate ESS | exact `1e-9` delta、just over、NaN、Infinity | absolute tolerance only；within passes，outside/non-finite typed reject |
+| candidate set | foreign/missing/duplicate summary；ranking reorder | summaries/ranking/request candidate set exact equal；ranking may permute only |
+| assembly surface | inject `rootDigest`、`policyId`、`mode`、formal flag、budget、scenario/repeat fields | assembly accepts only `candidateSummaries`、`ranking`、`aggregateDiagnostics`；no partial result |
+| result derivation | mutate request after validation or supply caller provenance | result mode/formalExecutionAllowed/policyId/rootDigest only from revalidated request |
+
+当前真实字段没有 `expectedScenarioCount`、`completedScenarioCount`、`totalCompletedReplicates`；本矩阵禁止新增或接受这些模糊重复字段。
+
+### 1.5.4 Unique work-unit gate
+
+当前 `ValidatedRolloutBudget.maximumWorkUnits` 按真实类型/消费点冻结为 per-candidate 上限。令 `C = validated request candidate count`，`B = min(request.maxWorkUnits, checkedProduct(requestReplicates, maxPlies, maxPolicyActionEvaluations))`：
+
+~~~text
+每个 summary.workUnitCount <= B
+aggregate.workUnitCount = checkedSum(all summary.workUnitCount)
+aggregate.workUnitCount <= checkedProduct(C, B)
+~~~
+
+| Case | Input | Required result |
+| --- | --- | --- |
+| under budget | each summary below B；aggregate is checked sum | accept |
+| exact budget | a summary equals B；aggregate equals checked sum and <= C×B | accept |
+| early completion | completed replicates below expected with valid evidence | accept as incomplete coverage；不得强行补成完整 |
+| summary over | one summary `workUnitCount > B` | typed failure |
+| aggregate over | aggregate > checked `C * B` | typed failure |
+| sum mismatch | aggregate != checked sum of summaries | typed failure |
+| overflow | MAX_SAFE_INTEGER product/sum overflow or non-finite result | typed failure before unsafe arithmetic |
+
+不得把 `completedReplicateCount` 与 `workUnitCount` 合并，也不得由 assembly 添加 budget 字段或切换 per-candidate/global interpretation。
+
+### 1.5.5 Real integration and failure-quality gate
+
+所有新增测试必须直接调用真实 `buildParticleBank`、`createRolloutRequest`、`createRolloutResult`、`readParticleBankRolloutAccess` 或 `createParticleScenarioSource`；主要正例必须使用 `particleCount > 1` 的真实 builder output、同一 registered handle 和 request→bridge/source 链。手工 public bank 只能作为单字段 hostile mutation 的基线，不能替代 builder integration。每个 invalid case 断言 typed classification、no throw、no partial request/result/scenario、无 raw private diagnostics；hostile getter/callback/proxy 计数为零；测试不得带过滤、跳过或占位标记。
+
+| Test path | Required named table cases |
+| --- | --- |
+| `tests/ai/rollout/particleBankRolloutBoundary.test.ts` | strict ESS range/equality；count/attempt/duplicate/zero-weight/status/failureReason；snapshot/config identity；full numeric `-0` matrix；registered/unregistered handle；baseline cross-candidate；repeat/scenario/product/coverage；aggregate ESS tolerance；work-unit under/equal/early/over/overflow；Compiler API/symbol gate |
+| `tests/ai/rollout/particleScenarioSource.test.ts` | public-valid unregistered handle typed fake-or-unknown；malformed registered private projection；bridge-only internals read；no partial scenario/private diagnostics |
+| `tests/ai/particles/particleBankBuilder.test.ts` | real builder ESS `<`/`==`/`>`，特别是 `particleCount=1`, `[1]`, threshold `1`；helper/summary/bank status；real multi-particle ready/degraded chain invariants |
+| `tests/ai/particles/effectiveSampleSize.test.ts` | only when the helper exact-threshold table is absent；no duplicate production expected helper |
+
+### 1.5.6 Next code allowlist, verification and deferred gates
+
+下一轮 code remediation 只允许：
+
+~~~text
+src/ai/particles/particleBankPublicValidation.ts
+src/ai/particles/particleBankRolloutAccess.ts
+src/ai/rollout/contracts.ts
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+tests/ai/rollout/particleScenarioSource.test.ts
+tests/ai/particles/particleBankBuilder.test.ts
+tests/ai/particles/effectiveSampleSize.test.ts        # only when the helper exact-threshold assertion is absent
+~~~
+
+forbidden：`src/ai/particles/particleBankInternals.ts`、`src/ai/rollout/particleScenarioSource.ts`、Room、decision engine、planning、其他 particles internals、public barrels、package/lock/config、Task 2–9。`particleBankBuilder.ts` 不在本轮 consolidation allowlist；其 status 修复视为已冻结，若新 RED 证明它回归则直接 BLOCKED，不扩大 allowlist。
+
+下一轮 code pass 的 fresh commands：
+
+~~~text
+npx vitest run tests/ai/rollout/particleBankRolloutBoundary.test.ts --exclude "**/.worktrees/**" --reporter=verbose
+npx vitest run tests/ai/rollout/particleScenarioSource.test.ts --exclude "**/.worktrees/**" --reporter=verbose
+npx vitest run tests/ai/rollout/particleBankRolloutBoundary.test.ts tests/ai/rollout/particleScenarioSource.test.ts --exclude "**/.worktrees/**" --reporter=dot
+npx vitest run tests/ai/particles --exclude "**/.worktrees/**" --reporter=dot
+npx tsc --noEmit
+npm run build
+git diff --check
+~~~
+
+本轮 docs-only 不运行这些命令。`AWAITING_FIXED_BENCHMARK_RUNNER`、`AWAITING_NODE22_CI`、Task 9 full permitted regression 保持 deferred；本矩阵通过不等于 D2F Shadow release ready。
 
 ## 2. Exact accepted Particle focused manifest
 
@@ -1021,7 +1131,7 @@ rg -n "effectiveSampleSize|minimumAcceptedScenarioCount|minimumCompletedReplicat
 rg -n "riskAdjustedUtility|variancePenalty|downsideRiskPenalty|baselineEvaluatorScore|UTF-16" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
 rg -n "representativeActionShadowObserver|aiDecisionEngine|src/game/room.ts|observeD2FShadow|elapsedWallClockMs" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
 rg -n "23 files|222 tests|D2_CURRENT_REGRESSION_MANIFEST|87 files|898 tests|AWAITING_NODE22_CI|AWAITING_FIXED_BENCHMARK_RUNNER" docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
-rg -n -i "placeholder|later|follow up|appropriate|as needed|etc\\.|similar to|implement validation|add tests|待定|后续补充|适当|视情况|类似|必要时" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
+rg -n -i "T[B]D|T[O]DO|F[I]XME|placeh[o]lder|l[a]ter|follow [u]p|a[p]propriate|as n[e]eded|e[t]c\\.|similar t[o]|implement validati[o]n|add t[e]sts|待[定]|后续[补]充|适[当]|视[情]况|类[似]|必[要]时" docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
 git diff --name-only -- docs/superpowers/specs/2026-08-02-d2f-design-spec.md docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
 $docs = @("docs/superpowers/specs/2026-08-02-d2f-design-spec.md", "docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md", "docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md")
 foreach ($doc in $docs) {
@@ -1031,7 +1141,7 @@ foreach ($doc in $docs) {
 }
 ~~~
 
-CandidateId scan is expected to find only prohibition/validation language, never a random function signature or random derivation expression. Placeholder hits are manually classified: a forbidden-term explanation or scan command is allowed; an implementation step is not. The full permitted regression manifest is frozen by §4's explicit generation and shard rule and does not require multi-exclude semantic evidence.
+CandidateId scan is expected to find only prohibition/validation language, never a random function signature or random derivation expression. 禁用词扫描必须为零命中；所有 implementation step 都必须使用具体文件、symbol、输入和断言。The full permitted regression manifest is frozen by §4's explicit generation and shard rule and does not require multi-exclude semantic evidence.
 
 ## 13. Final status vocabulary
 

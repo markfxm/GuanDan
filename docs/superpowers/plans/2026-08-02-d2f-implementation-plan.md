@@ -471,9 +471,9 @@ Task 1 remediation 的最小实现顺序、文件和 commit 边界固定如下�
 
 Produces frozen contracts, RolloutScenarioSourceInput, source success/failure union and one private bridge. Consumes existing public ParticleBank handle plus complete replay context; does not enlarge the public ParticleBank API.
 
-## 2.1 Task 1 Final Gate Remediation Design Freeze
+## 2.1 Historical Task 1 Final Gate Remediation Design Freeze
 
-本节是当前 expected HEAD 5cd433d3e623e7e516effb36ab5bc080f5427d1a 的唯一下一轮 Task 1 code remediation plan。本轮只冻结文档，不修改 production/test；Task 2–9 不开始。I-1、I-2、I-3 均已用真实类型、builder、ESS helper、result factory 和现有测试入口核对，不能以 fixture 自洽或实施者 PASS 代替后续 RED/GREEN 证据。
+本节保留上一轮 expected HEAD `5cd433d3e623e7e516effb36ab5bc080f5427d1a` 的历史计划，已被第 2.2 节 supersede。当前 code pass 的起始 HEAD 是 `f1944efc24e0404d057e86c16460bfd2a5e31794`；本轮只冻结文档，不修改 production/test；Task 2–9 不开始。
 
 ### Frozen review findings and implementation goal
 
@@ -576,6 +576,135 @@ vite.config.ts
 ### Verification boundary for the next code pass
 
 下一轮 code remediation 完成后才运行 focused boundary、source、combined 和 particle baseline commands，以及 tsc/build/diff-check；本轮 docs-only 不运行 Vitest、tsc、build 或 benchmark。任何 forbidden path、package/config、Room、decision engine、planning 或 Task 2–9 变更都使该轮 BLOCKED。固定 benchmark runner、Node 22 CI 和 Task 9 full permitted regression 继续是 deferred gates；不得宣称 D2F Shadow release ready。
+
+## 2.2 Task 1 Validation Consolidation Remediation Design Freeze
+
+### Scope and starting proof
+
+本节 supersede 历史第 2.1 节，是下一轮 code remediation 的唯一执行计划。设计起点必须是 `f1944efc24e0404d057e86c16460bfd2a5e31794`、branch `codex/d2f-crn-rollout-source`、clean worktree；本轮已经完成的动作只有三份文档冻结。下一轮不得从旧 `5cd433d3e623e7e516effb36ab5bc080f5427d1a` 推断代码状态，不得修改 Task 2–9。
+
+五个已独立复核的 RED 根因是：`contracts.ts` 与 `particleBankRolloutAccess.ts` 重复维护 public metadata schema；request ESS domain 错把 `1e-9` equality tolerance 当作范围 tolerance；snapshot/ledger/seat/metadata numeric helper 接受 `-0`；bridge 未强制 accepted/requested/config count 与 sampling-attempt 上限；`createRolloutResult` 只检查 aggregate 内部和式而不检查 per-candidate `maximumWorkUnits` 及 candidate-count 总上限；现有 metadata boundary tests 主要手工构造 bank，缺少真实 builder multi-particle integration path。
+
+### Frozen production shape and responsibilities
+
+新增 `src/ai/particles/particleBankPublicValidation.ts`，只依赖 ParticleBank public types。唯一 helper 名称为 `validateParticleBankPublic(input: unknown)`，返回 typed success/failure；成功保留原始 handle identity，不读 WeakMap、不 clone、不 rebuild。`src/ai/rollout/contracts.ts` 和 `src/ai/particles/particleBankRolloutAccess.ts` 是唯一 consumers。shared validator 不得导入 internals、bridge、rollout、Room、decision engine、planning，也不得 public-barrel re-export。
+
+`particleBankRolloutAccess.ts` 在 public success 后仍是唯一 `readParticleBankInternals` reader，负责 registration、private records、scenario/deal/transfer、weights/ESS consistency 和 frozen projection；`particleScenarioSource.ts` 仍是唯一 bridge consumer。request 只做 public acceptance/provenance/reference isolation；public-valid but unregistered handle 可通过 request，随后 source/bridge 返回 typed `fake-or-unknown-particle-bank`，无 partial scenario/private diagnostics。
+
+统一 schema gate 为 descriptor-first：`Reflect.ownKeys` exact set、strict prototype、own data descriptor、no symbol/accessor/function、plain/frozen，所有 hostile callback/getter/proxy 计数为零。统一 numeric gate 为 `Number.isSafeInteger(value) && !Object.is(value, -0)`，非负字段再加 `value >= 0`；ESS domain 严格 `[1, N]`，只有 bank↔summary equality 使用 absolute error `<= 1e-9`。状态唯一为 `ESS < threshold => degraded`、`ESS == threshold => ready`、`ESS > threshold => ready`，bank、summary、helper 三者一致。
+
+### Bite-sized RED → GREEN steps
+
+每个 slice 都先新增真实入口测试并运行该 slice 的 RED command，记录旧代码的实际失败行为；随后只做该 slice 的最小 production change，再用同一 command GREEN。不得先改完所有 production 再补测试。
+
+#### Slice A — shared public validator and boundary delegation
+
+1. 修改 `tests/ai/rollout/particleBankRolloutBoundary.test.ts`，增加以下直接入口用例：
+   - `rejects ESS just outside strict [1, N] without metadata tolerance`；输入真实 public bank 的 ESS `0.9999999995` 和 `N + 0.0000000005`，直接调用 `createRolloutRequest`，期望 typed invalid request；
+   - `rejects noncanonical -0 across snapshot ledger seat and metadata`；每次只篡改一个真实字段，期望 typed invalid request，getter count 为零；
+   - `preserves registered handle identity through request validation`；断言 request 中的 bank 与输入 `Object.is` 相等；
+   - `accepts public-valid unregistered handle at request and defers failure to source bridge`；request 成功，随后 source 返回 typed `fake-or-unknown-particle-bank`，无 partial scenario。
+2. RED command：
+
+   ~~~text
+   npx vitest run tests/ai/rollout/particleBankRolloutBoundary.test.ts --exclude "**/.worktrees/**" --reporter=verbose -t "strict \[1, N\]|noncanonical -0|registered handle identity|unregistered handle"
+   ~~~
+
+   旧代码预期至少证明：ESS 近下界/上界被错误接受，`-0` 至少在一个真实字段被接受，或 bridge/request responsibility 与预期不一致；若某一已修复例不再 RED，保留该 GREEN regression 并只记录仍失败的例子。
+3. 最小 production change：创建 `particleBankPublicValidation.ts`，将 contracts.ts 和 particleBankRolloutAccess.ts 的重复 public shape/numeric/status/count/ESS checks 委托给该 helper；不改变 internals、builder、scenario source 或 public ParticleBank schema。GREEN 使用同一 command，并新增 compiler API/symbol assertion：shared helper 无 internals import，bridge 是唯一 internals reader，source 是唯一 bridge consumer。
+
+#### Slice B — canonical integers and bridge defense-in-depth
+
+1. 在 `particleBankRolloutBoundary.test.ts` 增加 table-driven numeric matrix，覆盖 snapshot `lastAppliedEventIndex`、seat、config counts/limits、summary counts、top-level counts、samplingAttempts、duplicateCount、zeroWeightCount、workUnitCount：NaN、`+Infinity`、`-Infinity`、fractional、negative、`-0`、unsafe integer、overflow、合法 0、合法最大 safe integer；另加 `-1` ledger sentinel 和 seat `0` 正例。
+2. 在同一文件直接构造真实 registered handle 的 malformed private projection，逐项覆盖 accepted `< requested`、accepted `> requested`、requested/config/top-level mismatch、attempts > max、duplicate/zero-weight bounds、status/failureReason 和 ESS mismatch；所有失败断言 typed/no-throw/no-partial。
+3. RED command：
+
+   ~~~text
+   npx vitest run tests/ai/rollout/particleBankRolloutBoundary.test.ts --exclude "**/.worktrees/**" --reporter=verbose -t "canonical integer matrix|bridge metadata invariants|samplingAttempts|failureReason"
+   ~~~
+
+   旧代码预期至少复现 bridge 接受 accepted count/config/max-attempts 矛盾和 `-0`，并复现公共 validator 与 bridge 对同一 metadata 给出不同结论。
+4. 最小 production change：contracts.ts 与 bridge 使用同一 canonical integer predicates；bridge 在 public success 后补 private projection checks，但不读取 private records 的 request path、不创建 accessor/registry。GREEN 使用同一 command。
+
+#### Slice C — ESS status and real builder integration
+
+1. 修改 `tests/ai/particles/particleBankBuilder.test.ts`，直接调用真实 `buildParticleBank`，用 table-driven `<`、`==`、`>` cases；必须包含 `particleCount = 1`, normalized weights `[1]`, threshold `1`。每个 case 同时断言 helper status、summary.status、bank.status、accepted/requested/config counts、sampling/duplicate/zero-weight/ESS/failureReason invariants。此 slice 不允许修改 `particleBankBuilder.ts`；它只证明 f1944ef 的 builder 修复没有被 consolidation 破坏。
+2. 增加真实 multi-particle chain：builder output → registered same handle → `createRolloutRequest` → `readParticleBankRolloutAccess` → `createParticleScenarioSource`，覆盖 ready 和 deterministic degraded output；禁止手工 public bank 作为该正例的 source。
+3. RED command：
+
+   ~~~text
+   npx vitest run tests/ai/particles/particleBankBuilder.test.ts tests/ai/rollout/particleBankRolloutBoundary.test.ts tests/ai/rollout/particleScenarioSource.test.ts --exclude "**/.worktrees/**" --reporter=verbose -t "ESS status matrix|real multi-particle builder chain"
+   ~~~
+
+   旧测试预期缺少真实 multi-particle chain；若 equality case 或 status invariants 回归，则该 RED 必须保留为 blocker。只有 helper 本身缺少独立 exact-threshold regression 时才修改 `tests/ai/particles/effectiveSampleSize.test.ts`。
+4. 最小 production change：本 slice 默认无 production change；若 RED 证明不一致，停止并报告，因为 builder 不在 consolidation allowlist。GREEN 使用同一 command。
+
+#### Slice D — request/result provenance and aggregate ESS
+
+1. 在 `tests/ai/rollout/particleBankRolloutBoundary.test.ts` 用真实 `createRolloutRequest`/`createRolloutResult` 构造至少两个 candidate、多个 accepted scenarios 和多个 replicates。增加用例：candidate A 使用 candidate B baseline、`+0/-0` baseline Object.is 区分、summary/aggregate repeat budget mismatch、scenario count 不是 validated bank accepted count、expected replicate product mismatch、aggregate ESS 在 `1e-9` 内通过且刚超 `1e-9`/NaN/Infinity 拒绝、foreign/missing/duplicate summary、ranking 重排合法、assembly 注入 budget/rootDigest/policyId/mode/formal flag 拒绝。
+2. RED command：
+
+   ~~~text
+   npx vitest run tests/ai/rollout/particleBankRolloutBoundary.test.ts --exclude "**/.worktrees/**" --reporter=verbose -t "baseline provenance|replicate budget|accepted scenario provenance|aggregate ESS|assembly provenance"
+   ~~~
+
+   旧代码预期至少允许 baseline 借用、repeat/scenario/ESS caller declaration 或 assembly provenance injection 中的一项；所有真实 request/result failures 必须 typed/no-throw/no-partial。
+3. 最小 production change：contracts.ts 在 validated request 上重新绑定 baseline、replicate count、accepted scenario count、expected/completed/coverage product、aggregate ESS 和 candidate/ranking set；assembly 仍只允许 `candidateSummaries`、`ranking`、`aggregateDiagnostics` 三个字段，不新增 `expectedScenarioCount`、`completedScenarioCount`、`totalCompletedReplicates`。GREEN 使用同一 command。
+
+#### Slice E — unique per-candidate work-unit bound
+
+1. 在 `particleBankRolloutBoundary.test.ts` 固定唯一公式：`B = min(request.budget.maxWorkUnits, checkedProduct(replicates, maxPlies, maxPolicyActionEvaluations))`；每个 summary `workUnitCount <= B`，aggregate 是 summaries checked sum，且 `aggregate.workUnitCount <= checkedProduct(candidateCount, B)`。测试 under-budget、exact-budget、early completion 正例；summary over `B`、aggregate over `candidateCount * B`、aggregate sum mismatch、MAX_SAFE_INTEGER overflow、product overflow 负例。
+2. RED command：
+
+   ~~~text
+   npx vitest run tests/ai/rollout/particleBankRolloutBoundary.test.ts --exclude "**/.worktrees/**" --reporter=verbose -t "per-candidate work-unit budget|early completion|work-unit overflow"
+   ~~~
+
+   旧代码预期接受合法 request 下的 `Number.MAX_SAFE_INTEGER` summary/aggregate workUnitCount，只要 assembly 内部和式相等。
+3. 最小 production change：contracts.ts 对每个 summary 绑定 per-candidate `B`，对 aggregate 使用 checked sum 与 checked `candidateCount * B` 上限；所有算术先验证 finite safe integer，不添加重复字段，不由 assembly 改写预算。GREEN 使用同一 command。
+
+#### Slice F — static boundary gate and focused verification
+
+1. 在 `tests/ai/rollout/particleBankRolloutBoundary.test.ts` 加入 Compiler API/symbol gate，解析当前 TypeScript program 并精确断言：`particleBankPublicValidation.ts` 无 internals/bridge import；contracts.ts 和 bridge 各自只导入 shared validator；只有 bridge 绑定 `readParticleBankInternals`；source 只导入 bridge；没有 public barrel/export、registration accessor、brand token、global registry。
+2. RED command：
+
+   ~~~text
+   npx vitest run tests/ai/rollout/particleBankRolloutBoundary.test.ts --exclude "**/.worktrees/**" --reporter=verbose -t "shared validator import graph"
+   ~~~
+
+   旧代码预期因 shared validator 文件或统一 consumer graph 不存在而失败；GREEN 必须同时证明行为和 import graph，不得只 grep 文本。
+3. 下一轮 code pass 的最终命令顺序：
+
+   ~~~text
+   npx vitest run tests/ai/rollout/particleBankRolloutBoundary.test.ts --exclude "**/.worktrees/**" --reporter=verbose
+   npx vitest run tests/ai/rollout/particleScenarioSource.test.ts --exclude "**/.worktrees/**" --reporter=verbose
+   npx vitest run tests/ai/rollout/particleBankRolloutBoundary.test.ts tests/ai/rollout/particleScenarioSource.test.ts --exclude "**/.worktrees/**" --reporter=dot
+   npx vitest run tests/ai/particles --exclude "**/.worktrees/**" --reporter=dot
+   npx tsc --noEmit
+   npm run build
+   git diff --check
+   git status --short
+   ~~~
+
+   本轮 docs-only 不运行上述命令。下一轮必须以 RED/GREEN、test count、changed paths 和 clean status 记录证据；D2 audited shards、fixed benchmark runner、Node 22 CI、Task 9 full permitted regression 继续 deferred，不得宣称 Shadow release ready。
+
+本轮文档 gate 全部通过后，只允许执行一次 `git commit -m "docs(ai): freeze Task 1 validation consolidation"`；不得 amend、squash、reset、stash、checkout、rebase 或混入任何 code/test/config 变更。提交后保持 clean 并停止，等待 review。
+
+### Exact next code allowlist
+
+下一轮只能修改以下路径；本轮三份文档冻结 commit 不得混入其中任何 code/test 修改：
+
+~~~text
+src/ai/particles/particleBankPublicValidation.ts
+src/ai/particles/particleBankRolloutAccess.ts
+src/ai/rollout/contracts.ts
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+tests/ai/rollout/particleScenarioSource.test.ts
+tests/ai/particles/particleBankBuilder.test.ts
+tests/ai/particles/effectiveSampleSize.test.ts        # only when the helper exact-threshold assertion is absent
+~~~
+
+始终 forbidden：`src/ai/particles/particleBankInternals.ts`、`src/ai/rollout/particleScenarioSource.ts`、`src/game/room.ts`、`src/ai/aiDecisionEngine.ts`、`src/ai/planning/**`、其他 particles internals、任何 public barrel、package/lock/config、Task 2–9。任何需要扩大 allowlist 的事实必须先停止并报告，不能自行扩大。
 
 ## 3. Task 2 — Team Utility / terminal truth table / leaf
 

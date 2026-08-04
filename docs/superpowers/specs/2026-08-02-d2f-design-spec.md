@@ -50,10 +50,11 @@ src/ai/rollout/**
 tests/ai/rollout/**
 ```
 
-Task 1 允许对 `src/ai/particles/**` 的唯一 production 修改是下列窄桥接及其必要测试：
+Task 1 的历史 bridge/source remediation 已完成；当前 validation-consolidation code pass 的唯一 particles-side production additions are the shared public validator and the existing narrow bridge. 本轮仍只修改文档，不修改其中任何 production 或 test 文件：
 
 ```text
 src/ai/particles/particleBankRolloutAccess.ts
+src/ai/particles/particleBankPublicValidation.ts
 src/ai/rollout/particleScenarioSource.ts
 ```
 
@@ -61,7 +62,7 @@ src/ai/rollout/particleScenarioSource.ts
 
 bridge success 的最低保证是 defense-in-depth，而不是替代 source 的 replay 防线：bank 必须是已登记 WeakMap handle，public status/metadata 合法；records 非空；`particleId` 非空且唯一；scenario schema 合法；canonical initial deal 合法；hidden transfer assignments 结构合法；`particleId === particleScenarioIdentity(bank.snapshot, scenario)`；normalizedWeight finite 且非负；weight 总和在冻结 tolerance 内为 1；ESS finite、非负且不超过 scenario count。bridge 必须逐字段 clone 并递归 freeze projection，getter、symbol、function、malformed scenario、fake/unknown handle 都返回已有 typed `fake-or-unknown-particle-bank` 或 `{ kind: "scenario-source-failed"; reason: "private-state-invalid" }` failure，不执行 caller accessor，不扩大 public ParticleBank API。优先复用 `particleScenarioIdentity` 和 `validateCanonicalInitialDeal`，不复制粒子语义算法；source 仍必须二次验证 replay/public consistency，不能因 bridge 增强而删除 source 防线。
 
-此前五路径是已经完成的 bridge/source remediation implementation scope，不是本轮 final-gate code remediation 的 allowlist。当前 expected HEAD 的下一轮修复边界统一冻结在第 3.1.2 节；本轮只修改文档，不修改其中任何 production 或 test 文件。
+此前五路径是已经完成的 bridge/source remediation implementation scope，不是本轮 validation-consolidation code remediation 的 allowlist。当前 expected HEAD 的下一轮修复边界统一冻结在第 3.1.3 节；本轮只修改文档，不修改其中任何 production 或 test 文件。
 
 ```text
 src/ai/rollout/contracts.ts
@@ -206,9 +207,9 @@ aggregate.expectedCompletedReplicateCount
   = candidateCount * candidateSummary.expectedReplicateCount
 ```
 
-### 3.1.2 Task 1 Final Gate Remediation Design Freeze
+### 3.1.2 Historical Task 1 Final Gate Remediation Design Freeze
 
-本节是三份 D2F 文档共同的 final-gate remediation source of truth。以下结论由 expected HEAD `5cd433d3e623e7e516effb36ab5bc080f5427d1a` 的真实类型、builder、ESS helper、result factory 和现有测试路径核对得到；本轮只冻结下一轮 code remediation，不宣称代码已修复。
+本节保留上一轮 final-gate remediation 记录。它不是当前 code pass 的 source of truth；当前 source of truth 是紧随其后的第 3.1.3 节。上一轮 expected HEAD `5cd433d3e623e7e516effb36ab5bc080f5427d1a` 的结论不得替代当前起始 HEAD `f1944efc24e0404d057e86c16460bfd2a5e31794` 的独立审查。
 
 #### I-1：ESS 边界与 ParticleBank public metadata
 
@@ -336,6 +337,146 @@ vite.config.ts
 ~~~
 
 只有调查证明 forbidden path 是无法绕开的根因时，才停止并报告；不得自行扩大范围。Task 2–9 不开始。
+
+### 3.1.3 Task 1 Validation Consolidation Remediation Design Freeze
+
+本节是当前三份 D2F 文档的唯一 validation-consolidation source of truth。设计冻结基于起始 HEAD `f1944efc24e0404d057e86c16460bfd2a5e31794`、branch `codex/d2f-crn-rollout-source` 的真实代码和测试审查结果；本轮只修改本节所属的三份文档，不修改 production、tests、package、lock、config，不运行长测试、build 或 benchmark，不开始 Task 2。
+
+#### Root cause and architecture decision
+
+五项待修复问题的共同根因不是单个字段漏判，而是同一 public ParticleBank metadata schema 在 `src/ai/rollout/contracts.ts` 和 `src/ai/particles/particleBankRolloutAccess.ts` 被分别维护；两处因此出现不同的 ESS 范围、`-0` 整数语义、accepted/config/count 关系和 sampling-attempt 上限。`createRolloutResult` 另有一条只检查 assembly 内部和式的 work-unit 路径，没有把结果上限绑定到已验证 request budget。现有 boundary tests 的主要 bank 是手工 public fixture，未把真实 multi-particle builder → registered handle → request → bridge → scenario source 串成一个验收路径。
+
+下一轮唯一允许的架构修复是一个纯 public、descriptor-first 的共享校验器：
+
+~~~text
+src/ai/particles/particleBankPublicValidation.ts
+  -> src/ai/particles/contracts.ts                 (ParticleBank public types only)
+src/ai/rollout/contracts.ts
+  -> particleBankPublicValidation.ts                (request boundary consumer)
+src/ai/particles/particleBankRolloutAccess.ts
+  -> particleBankPublicValidation.ts                (bridge boundary consumer)
+  -> particleBankInternals.ts                      (the only private-record reader)
+src/ai/rollout/particleScenarioSource.ts
+  -> particleBankRolloutAccess.ts                   (the only bridge consumer)
+~~~
+
+`particleBankPublicValidation.ts` 不得导入 `particleBankInternals.ts`、bridge、rollout、Room、decision engine 或 planning；不得加入 public barrel。它提供给上述两个 boundary consumer 的唯一 helper 为：
+
+~~~ts
+type ParticleBankPublicValidationResult =
+  | Readonly<{ ok: true; bank: ParticleBank }>
+  | Readonly<{ ok: false; failure: { kind: "invalid-public-particle-bank" } }>;
+
+function validateParticleBankPublic(input: unknown): ParticleBankPublicValidationResult;
+~~~
+
+该函数必须先对 opaque `unknown` 做 `Reflect.ownKeys`、strict prototype、exact own-key、own data-descriptor、无 symbol/accessor/function、plain/frozen 形状检查，再读取任何字段；任何异常、Proxy、getter 或 callback 均转 typed failure，调用计数必须为零。成功只返回原始 bank handle，必须保持 `Object.is(result.bank, input)`，不得 spread、clone、rebuild 或读取 WeakMap/private records。request 和 bridge 只能消费该 helper 的 validated public result；bridge 在 public success 之后才可调用 `readParticleBankInternals` 做私有 projection 检查。compiler API/symbol gate 必须证明：共享 helper 无 internals import，只有 bridge 解析 `readParticleBankInternals`，只有 source 解析 bridge，且无 registration accessor、brand token、global registry 或 public barrel 泄漏。
+
+#### ESS and public metadata contract
+
+ESS 有两个不同语义，必须在代码和测试中分开：
+
+~~~text
+status: ESS < threshold  -> degraded
+        ESS == threshold -> ready
+        ESS > threshold  -> ready
+
+public range: 1 <= bank.effectiveSampleSize <= acceptedParticleCount
+              1 <= summary.effectiveSampleSize <= acceptedParticleCount
+bank.effectiveSampleSize ≈ summary.effectiveSampleSize
+  iff abs(bankESS - summaryESS) <= 1e-9
+~~~
+
+public range 是严格 domain check，不使用 `1e-9` 容差；`1e-9` 只用于 bank ESS 与 summary ESS 两个已计算字段的 equality check。NaN、`+Infinity`、`-Infinity`、`0.9999999995`（下界外）和 `N + 0.0000000005`（上界外）必须拒绝。builder 的 normalized weights、ESS helper 计算 tolerance/clamp 不在该 equality tolerance 中重新实现。helper 是 status 的唯一入口；summary.status、bank.status 必须都直接复用 helper status，不能在 top-level 继续维护 `<=` 分支。真实 builder 正例必须覆盖 `<`、`==`、`>`，包括 `particleCount = 1`、weights `[1]`、threshold `1`；三者状态必须一致。
+
+成功 public bank 的真实关系固定为：
+
+- `acceptedParticleCount === requestedParticleCount`；
+- `acceptedParticleCount === config.particleCount === bank.particleCount`；
+- `samplingAttempts <= config.maxSamplingAttempts` 且 `samplingAttempts >= acceptedParticleCount + duplicateCount`，加法先做 safe checked operation；
+- `0 <= duplicateCount <= samplingAttempts`，duplicate 是 sampler 的真实 identity duplicate 计数；
+- `0 <= zeroWeightCount <= acceptedParticleCount`，zero-weight 是 normalized weights 中等于零的真实计数；
+- normalized weights 的 builder tolerance、finite ESS 和真实 sampler failure 关系保持不变；
+- ready/degraded bank 和其 accepted summary 都没有 own `failureReason`；failed 只存在于真实 build-failure union，不得伪装成 accepted public bank。
+
+#### Canonical integer and signed-zero matrix
+
+所有整数 helper 统一先执行 `Number.isSafeInteger(value)` 和 `!Object.is(value, -0)`；非负整数再执行 `value >= 0`。`Number.isFinite` 不能替代 safe-integer check，`value >= 0` 不能单独承担 `-0` 保护，整数 canonical encoding 也不能在 guard 之前把 `-0` 写成 `"0"`。
+
+| 字段类别 | 允许值 | `-0` | 边界规则 |
+| --- | --- | --- | --- |
+| particle/request/accepted/config particle count、正 limits、replicate budget | positive safe integer | reject | zero、fractional、negative、NaN、±Infinity、unsafe integer reject；最大 safe integer 在未超出关系时保留 |
+| samplingAttempts、duplicateCount、zeroWeightCount、workUnitCount、completed counts | nonnegative safe integer | reject | 正零合法；加法/乘法先 checked，越界 reject |
+| lastAppliedEventIndex / ledger index | `-1` sentinel 或 nonnegative safe integer | reject | `-1` 合法；fractional、其他 negative、NaN、±Infinity、unsafe integer reject |
+| public seat fields | safe integer `0..3` | reject | `0` 合法；`-0` 不是 canonical seat |
+| baselineEvaluatorScore | finite number | preserve signed zero | 用 `Object.is` 做 request→summary provenance；不得转字符串、舍入或归一化 |
+| ESS | finite real in strict `[1, N]` public domain | reject as numeric identity | 仅 bank↔summary equality 使用 absolute error `<= 1e-9` |
+
+上述矩阵必须覆盖 snapshot、ledger、seat、config、summary、top-level bank、request budget、result aggregate 的真实 numeric fields。bridge 使用同一 canonical integer rules，不能重新定义接受范围。合法零值和合法最大 safe integer 需要正例；fractional、negative、NaN、±Infinity、`-0`、unsafe integer 和超界需要 typed negative case。
+
+#### Unified request/bridge validation and opaque-handle duties
+
+共享 validator 的 invariant 集合必须同时约束 top-level bank、snapshot、config、summary 的 schema、strict prototype、descriptor、identity、count、status、failureReason、ESS、sampling、duplicate 和 zero-weight metadata。request validator 的职责是 public acceptance、request field binding 和 caller reference isolation；它不读 WeakMap/private records。bridge 的职责是 public validation 之后的 registered-handle/private projection defense-in-depth：验证 handle registration、record count、particle identity uniqueness、scenario identity、deal/transfer schema、normalized weights、raw ESS/weight consistency、projection identity 与 deep freeze，并在失败时返回已有 typed `fake-or-unknown-particle-bank` 或 `private-state-invalid` union。
+
+因此：public-valid but unregistered handle 可以通过 public `createRolloutRequest` validation 并保持同一对象 identity；随后 `particleBankRolloutAccess`/`particleScenarioSource` 必须返回 typed fake-or-unknown-particle-bank failure，不得读取不存在的 private record、返回 partial scenario 或泄漏 raw diagnostics。bridge 仍是唯一 internals reader，scenario source 仍是唯一 bridge consumer；不能通过 public ParticleBank API、registration accessor、brand token 或 global registry 绕过这条边界。
+
+#### RolloutResult provenance and unique work-unit formula
+
+所有 result 字段必须沿唯一 provenance 链派生：
+
+~~~text
+validated RolloutRequest
+  -> request candidate/baseline/budget/source metadata
+  -> CandidateRolloutSummary per candidate
+  -> RolloutAggregateDiagnostics
+  -> ranking set permutation
+  -> RolloutResult
+~~~
+
+每个 summary 的 baseline 必须满足：
+
+~~~ts
+Object.is(summary.baselineEvaluatorScore,
+  matchingRequestCandidate.baselineEvaluatorScore)
+~~~
+
+两值都必须 finite；candidate A 不得使用 candidate B 的 baseline；`+0` 与 `-0` 按 `Object.is` 区分。每个 summary 和 aggregate 的 replicate budget 必须精确等于 `request.budget.replicateCountPerScenario`，assembly 不得改变它。accepted scenario count 唯一来自 `request.scenarioSourceInput.bank.summary.acceptedParticleCount`；expected replicate product 唯一为 `acceptedScenarioCount * requestReplicateCount`，completed count 只能来自 summaries 的 checked sum，coverage 分母和 aggregate count 只能从这些 validated values 派生。不得新增或接受 `expectedScenarioCount`、`completedScenarioCount`、`totalCompletedReplicates` 作为 caller provenance 字段。
+
+当前类型和调用关系证明 `ValidatedRolloutBudget.maximumWorkUnits` 是 per-candidate 上限：它被单个 candidate 的 `RolloutReplicateInput` 消费，既有计算式只包含 `replicateCountPerScenario * maxPliesPerReplicate * maxPolicyActionEvaluationsPerPly`，没有 candidate count 或 assembly 自报的 scenario factor。冻结唯一公式如下，其中 `C` 是 validated request candidate count，`B` 是 validated `maximumWorkUnits`：
+
+~~~text
+B = min(request.budget.maxWorkUnits,
+        checkedProduct(requestReplicates, maxPlies, maxPolicyActionEvaluations))
+每个 summary.workUnitCount <= B
+aggregate.workUnitCount = checkedSum(summary.workUnitCount for every candidate)
+aggregate.workUnitCount <= checkedProduct(C, B)
+~~~
+
+所有 product/sum 必须在运算前做 finite safe-integer checked arithmetic；overflow、MAX_SAFE_INTEGER 以上、summary 超过 `B`、aggregate 超过 `C * B`、aggregate 不等于 summaries checked sum 都 typed reject。under-budget、恰好 budget、early completion 都是合法状态；early completion 不得被误当成完整 coverage。`completedReplicateCount` 与 `workUnitCount` 是不同字段，不能通过新增模糊重复字段解决歧义。若未来要改为 global budget，必须先改变冻结类型和三份文档，不得在 assembly 中隐式切换解释。
+
+candidateSummaries、ranking 和 request candidate 集合必须精确相等；ranking 可以重排但不能增删。assembly 只允许冻结的三个字段：`candidateSummaries`、`ranking`、`aggregateDiagnostics`，不得注入 rootDigest、policyId、mode、formal flag、budget 或 scenario/repeat provenance。result provenance 字段只能从重新验证后的 request 派生；任何 foreign/missing/extra/duplicate、baseline/ESS/budget/count/product mismatch 返回 typed failure、no throw、no partial result。
+
+#### Real builder integration test design
+
+下一轮测试必须直接调用真实 `buildParticleBank`、`createRolloutRequest`、`readParticleBankRolloutAccess`、`createParticleScenarioSource` 和 `createRolloutResult`，不得手工伪造 public success bank 作为主要证明，不得用 production helper 生成同一 expected。真实 integration 正例链为：`buildParticleBank` 产生 `particleCount > 1` 的 ready/degraded bank → 注册得到的同一 handle → `createRolloutRequest` → bridge/source；同时保留 `particleCount = 1`, `[1]`, threshold `1` equality case。每个 negative case 都断言具体 typed failure、no throw、no partial request/result/scenario；hostile getter/callback/proxy 的计数为零。测试必须包括 ESS 三边界、count/attempt/duplicate/zero-weight/status/failureReason、snapshot/config identity、numeric matrix、unregistered handle、candidate baseline 错配、budget/replicate/scenario/product/coverage、aggregate ESS tolerance 和 work-unit under/equal/early/over-budget/overflow。
+
+#### Next code allowlist and fences
+
+下一轮 code remediation 只允许以下路径：
+
+~~~text
+src/ai/particles/particleBankPublicValidation.ts
+src/ai/particles/particleBankRolloutAccess.ts
+src/ai/rollout/contracts.ts
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+tests/ai/rollout/particleScenarioSource.test.ts
+tests/ai/particles/particleBankBuilder.test.ts
+tests/ai/particles/effectiveSampleSize.test.ts        # only if helper coverage is necessary
+~~~
+
+`particleBankBuilder.ts` 的 ESS helper status 使用视为已冻结，下一轮不得修改 builder production；若真实 RED 证明它回归，直接 BLOCKED 并报告，不扩大 allowlist。始终 forbidden：`particleBankInternals.ts`、`particleScenarioSource.ts` production、Room、decision engine、planning、bridge 以外的 particles internals、public barrels、package/lock/config、Task 2–9。不得创建 registration accessor、brand token、global registry、通用 validation framework 或新的 public ParticleBank 字段。
+
+下一轮 RED 必须先在现有 boundary/source tests 中以真实入口复现五项缺陷；每个 slice 只做对应最小 production change，随后用相同命令 GREEN。代码 pass 完成后才可运行 focused boundary/source/combined、Particle baseline、tsc、build 和 diff-check；固定 benchmark runner、Node 22 CI、Task 9 full permitted regression 仍为 deferred gates，不得宣称 D2F Shadow release ready。
 
 ### 3.2 Public state、candidate 和 scenario
 
