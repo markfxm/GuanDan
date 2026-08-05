@@ -236,6 +236,26 @@ type RolloutPolicyResult =
 
 type TeamUtility = -3 | -2 | -1 | 1 | 2 | 3;
 
+export type TeamUtilityInput = Readonly<{
+  perspectiveSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+}>;
+
+export function evaluateTeamUtility(
+  input: TeamUtilityInput,
+): TeamUtilityResult;
+
+export type LeafEvaluationInput = Readonly<{
+  perspectiveSeat: PublicSeat;
+  actingSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+  handCounts: Readonly<Record<PublicSeat, number>>;
+}>;
+
+export function evaluateNonTerminalLeaf(
+  input: LeafEvaluationInput,
+): LeafEvaluationResult;
+
 type CandidateRolloutSummary = Readonly<{
   candidateId: string;
   riskAdjustedUtility: number;
@@ -310,11 +330,14 @@ type D2FShadowEvidence = Readonly<{
 }>;
 
 type TeamUtilityFailure =
+  | { kind: "invalid-perspective-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }
   | { kind: "invalid-finish-order"; reason: "duplicate-seat" | "missing-seat" | "unknown-seat" }
   | { kind: "unsupported-team-pair"; teamSeats: readonly PublicSeat[] };
 
 type LeafEvaluationFailure =
-  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" }
+  | { kind: "invalid-perspective-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }
+  | { kind: "invalid-acting-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" | "finished-seat" }
+  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" | "non-finite-hand-count" | "fractional-hand-count" | "unsafe-hand-count" | "negative-zero-hand-count" | "missing-hand-count" | "unknown-hand-count" | "finish-hand-count-mismatch" | "terminal-state" }
   | { kind: "rotation-tie-break-unproven"; evidence: string };
 
 type RolloutPolicyFailure =
@@ -713,29 +736,146 @@ tests/ai/particles/effectiveSampleSize.test.ts        # only when the helper exa
 允许创建/修改：
 
 ~~~text
+src/ai/rollout/contracts.ts
 src/ai/rollout/teamUtility.ts
 src/ai/rollout/leafEvaluation.ts
 tests/ai/rollout/teamUtility.test.ts
 tests/ai/rollout/leafEvaluation.test.ts
 ~~~
 
+`contracts.ts` 的 Task 2 修改仅新增 `TeamUtilityInput`、`LeafEvaluationInput` 并扩展本计划冻结的 `TeamUtilityFailure`/`LeafEvaluationFailure` discriminated union；不得改变任何 Task 1 字段、factory、validation 或 result 行为。
+
+真实类型来源与依赖方向：`PublicSeat` 从 `src/game/publicEvent.ts` 导入，且严格为 `0 | 1 | 2 | 3`；`RolloutPublicState.actingSeat` 是 public current acting/turn seat，`src/game/publicLedger.ts` 的 `currentTrick` 记录 `leadSeat`、可选 `lastPlaySeat`/stable key 与 `passSeats`，contracts 的 public-event projection 负责推导 acting seat。`RolloutPublicState.handCounts` 与 contracts 的 canonical hand-count representation 都是 `Readonly<Record<PublicSeat, number>>`，四个 key 的顺序语义为 seat `0, 1, 2, 3`；`src/game/publicLedger.ts` 的私有 `HandCounts` 使用相同结构但不是 Task 2 API。`src/game/settlement.ts` 的 `teamOf` 与 `partnerSeat` 是私有且使用 `room.ts` 的 `Seat`，不能安全 import，因此 `teamUtility.ts` 必须本地实现 `seat % 2` 和 `partner = (seat + 2) % 4` 这两个已冻结公式，不修改 settlement production。
+
+生产依赖方向固定为：
+
+~~~text
+contracts.ts
+    ↑
+teamUtility.ts
+    ↑
+leafEvaluation.ts
+~~~
+
+`leafEvaluation.ts` 必须调用 `evaluateTeamUtility`，不得复制 truth table；两个函数均为同步、确定性、无副作用纯函数。禁止传入整个 rollout/kernel context、位置参数串、动态 evaluator registry、caller evaluator、callback、factory、policy、RNG、Room、ParticleBank、scenario、replay state、对手具体手牌或 mutable context。
+
+### Frozen callable interface
+
+~~~ts
+export type TeamUtilityInput = Readonly<{
+  perspectiveSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+}>;
+
+export function evaluateTeamUtility(
+  input: TeamUtilityInput,
+): TeamUtilityResult;
+
+export type LeafEvaluationInput = Readonly<{
+  perspectiveSeat: PublicSeat;
+  actingSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+  handCounts: Readonly<Record<PublicSeat, number>>;
+}>;
+
+export function evaluateNonTerminalLeaf(
+  input: LeafEvaluationInput,
+): LeafEvaluationResult;
+~~~
+
+该声明表示两个文件的 named export；`contracts.ts` 只承载两个 shared input type，`teamUtility.ts` 承载 `evaluateTeamUtility`，`leafEvaluation.ts` 承载 `evaluateNonTerminalLeaf`。函数不得修改 caller-owned arrays/records；success/failure graph 与 `predictedFinishOrder` 必须满足现有不可变契约。
+
+### Team Utility input and failure contract
+
+`perspectiveSeat` 必须是 canonical `PublicSeat`。`finishOrder` 必须包含四个座位，顺序表示第 1 名至第 4 名，每个座位恰好一次；数组不可修改。视角队伍是 `perspectiveSeat` 与 `((perspectiveSeat + 2) % 4) as PublicSeat`，用两个 1-based finish positions 的升序 pair 查固定表。对手队伍 utility 取反，搭档视角相同；只允许 `-3 | -2 | -1 | 1 | 2 | 3`，绝不产生 zero、额外奖励、权重或 rounding。
+
+Team Utility 的失败映射固定为：
+
+| invalid input | exact failure |
+| --- | --- |
+| `perspectiveSeat` 为越界/非数值 | `{ kind: "invalid-perspective-seat", reason: "unknown-seat" }` |
+| `perspectiveSeat` 为 fractional / unsafe integer / `-0` | 同一 kind，分别使用 `fractional-seat` / `unsafe-integer-seat` / `negative-zero-seat` |
+| finish order 含 duplicate | `{ kind: "invalid-finish-order", reason: "duplicate-seat" }` |
+| finish order 缺 seat 或长度不是 4 且不能形成完整四座位 order | `{ kind: "invalid-finish-order", reason: "missing-seat" }` |
+| finish order 含越界、非数值、fractional、unsafe integer 或 `-0` | `{ kind: "invalid-finish-order", reason: "unknown-seat" }` |
+| canonical seat pair 无法映射到项目两队 | `{ kind: "unsupported-team-pair", teamSeats }` |
+
+`unsupported-team-pair` 在四座位 parity 规则下应不可达，但保留为现有 typed union 分支；不得用 throw 或模糊字符串替代。
+
+### Non-terminal leaf input and fixed algorithm
+
+`finishOrder` 是真实完成顺序的有序前缀，长度严格为 `0 | 1 | 2 | 3`；长度 4 是 terminal input，不能被错误当作 non-terminal leaf。前缀座位必须 canonical 且唯一。`actingSeat` 必须 canonical 且不在完成前缀中；该窄接口没有 current trick/history，因此 acting seat 与 public ledger 的当前 turn 一致性由 caller 以 public state precondition 保证，函数不读取或猜测隐藏上下文。`perspectiveSeat` 可以已完成或未完成。
+
+`handCounts` 必须覆盖 seat `0, 1, 2, 3` 的 canonical keys；每个 count 必须 finite、nonnegative、safe integer，并拒绝 `-0`。已完成座位 count 必须为 0。public ledger 的真实时序允许 play event 先将某未完成座位的 `handCountAfter` 设为 0，再由后续 finish event 写入 `finishOrder`；因此未完成座位 count 为 0 是合法 transient exception，窄函数无法仅凭输入证明其来源，caller 必须提供已由 public event/ledger 证明的状态。除此之外不放宽 hand-count 约束。
+
+固定算法：
+
+1. 复制真实 finish-order 前缀；
+2. 收集所有尚未完成座位；
+3. 按 `handCounts[seat]` 升序排列；
+4. 相同 hand count 按 `clockwiseDistance = (seat - actingSeat + 4) % 4` 升序排列；
+5. 将排序结果追加到前缀，得到完整 `predictedFinishOrder`；
+6. 调用同一 `evaluateTeamUtility` truth table；
+7. 返回不可变 `predictedFinishOrder` 与 utility。
+
+该 tie-break 只使用相对 acting seat 的环距离，不使用绝对 seat number 作为独立排序依据。禁止 Card identity、current trick strength、hidden assignment、Particle weight、policy score、baseline evaluator score、随机数、wall clock、rounding、搭档奖励和 Task 3 CRN。
+
+Leaf failure 映射固定为：
+
+| invalid input | exact failure |
+| --- | --- |
+| `perspectiveSeat` 非 canonical | `{ kind: "invalid-perspective-seat", reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }` |
+| `actingSeat` 非 canonical | `{ kind: "invalid-acting-seat", reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }` |
+| `actingSeat` 已在 finish prefix | `{ kind: "invalid-acting-seat", reason: "finished-seat" }` |
+| finish prefix duplicate | `{ kind: "invalid-leaf-state", reason: "duplicate-finish" }` |
+| finish prefix 含非 canonical seat | `{ kind: "invalid-leaf-state", reason: "unknown-seat" }` |
+| finishOrder 长度为 4 | `{ kind: "invalid-leaf-state", reason: "terminal-state" }` |
+| handCounts 缺少 seat key | `{ kind: "invalid-leaf-state", reason: "missing-hand-count" }` |
+| handCounts 含额外/未知 seat key | `{ kind: "invalid-leaf-state", reason: "unknown-hand-count" }` |
+| hand count 为 negative | `{ kind: "invalid-leaf-state", reason: "negative-hand-count" }` |
+| hand count 为 NaN/Infinity | `{ kind: "invalid-leaf-state", reason: "non-finite-hand-count" }` |
+| hand count 为 fractional / unsafe integer / `-0` | 分别为 `fractional-hand-count` / `unsafe-hand-count` / `negative-zero-hand-count` |
+| 已完成 seat 的 hand count 非 0 | `{ kind: "invalid-leaf-state", reason: "finish-hand-count-mismatch" }` |
+| 固定相对 tie-break 无法由 canonical seat ring 证明 | `{ kind: "rotation-tie-break-unproven", evidence }` |
+
 ### TDD actions
 
-- [ ] 创建 describe("teamUtility")，先加入 it("maps all six valid team rank pairs")，断言 {1,2} 到 {3,4} 的六个值为 3,2,1,-1,-2,-3。
-- [ ] RED：npx vitest run tests/ai/rollout/teamUtility.test.ts --exclude "**/.worktrees/**" --reporter=verbose；预期为 export/module/function 不存在。
-- [ ] 加入 it("rejects zero utility and malformed finish orders")，覆盖缺失、重复、未知座位和 zero。
-- [ ] 加入 it("preserves team swap sign, seat rotation, and partner interchange")；使用相对团队座位，不用绝对 seat number。
-- [ ] 创建 describe("leafEvaluation") 与 it("projects unfinished seats by hand count then relative turn distance")。
-- [ ] 加入 it("keeps completed finish order before unfinished projection") 和 it("replays the same leaf state identically")。
-- [ ] 最小实现 utility lookup、finish validation、hand-count/tie-distance projection 和同一 utility truth table；禁止经验系数、额外搭档奖励。
-- [ ] 若仓库轮转事实无法证明 tie-break 旋转等变，停止该实现并报告证据，不能改成绝对 seat number。
-- [ ] GREEN focused：两个文件全部通过；回归 Task 1 contracts。
-- [ ] 运行 npx tsc --noEmit、build、git diff --check；审计 TeamUtility 不包含 zero。
-- [ ] 使用 git commit -m "feat(ai): add D2F team utility and leaf evaluation"；提交后停止。
+- [ ] 先在 `tests/ai/rollout/teamUtility.test.ts` 通过真实 named export 写出 six-value literal oracle；不得复制 production lookup 作为 expected。
+- [ ] RED：`npx vitest run tests/ai/rollout/teamUtility.test.ts --exclude "**/.worktrees/**" --reporter=verbose`；预期只因 `teamUtility.ts`/`evaluateTeamUtility` 尚不存在而失败，不得是 import、fixture 或语法错误。
+- [ ] 使用真实调用验证：
+
+  ~~~ts
+  const result = evaluateTeamUtility({
+    perspectiveSeat: 0,
+    finishOrder: [0, 2, 1, 3],
+  });
+  ~~~
+
+  预期 `result.ok === true` 且 `result.utility === 3`。
+- [ ] 覆盖 perspective invalid、六项 truth table、duplicate/missing/unknown finish seat、对手视角取反、搭档互换、整体 seat/team rotation、无 zero、输入不可变和重复调用 byte-stable。
+- [ ] 在 `tests/ai/rollout/leafEvaluation.test.ts` 通过真实 named export 写出 independent known vectors；不得复制 production sort 作为 expected。
+- [ ] RED：`npx vitest run tests/ai/rollout/leafEvaluation.test.ts --exclude "**/.worktrees/**" --reporter=verbose`；预期只因 `leafEvaluation.ts`/`evaluateNonTerminalLeaf` 尚不存在而失败。
+- [ ] 使用真实 canonical hand-count representation 的示例：
+
+  ~~~ts
+  const result = evaluateNonTerminalLeaf({
+    perspectiveSeat: 0,
+    actingSeat: 1,
+    finishOrder: [],
+    handCounts: { 0: 3, 1: 2, 2: 1, 3: 4 },
+  });
+  ~~~
+
+  预期 `result.ok === true`、`result.predictedFinishOrder` 为 `[2, 1, 0, 3]`、`result.utility === 2`。
+- [ ] 覆盖 completed prefix、hand-count sort、相同 count 的相对距离、合法 transient zero、invalid hand counts、finish/count mismatch、finished acting seat、terminal input、rotation/team/perspective invariance、输入顺序与重复调用确定性，以及 finite/non-zero Team Utility。
+- [ ] 最小实现只包含 parity team helper、finish validation、hand-count validation、relative-distance projection、对 `evaluateTeamUtility` 的一次调用；禁止经验系数和额外搭档奖励。
+- [ ] GREEN focused：两个 Task 2 test 文件全部通过；回归只执行 Task 1 contracts 相关测试，不能提前进入 Task 3。
+- [ ] 本轮文档冻结提交前不运行 Vitest、tsc、build 或 benchmark；production implementation 轮次才执行对应 GREEN/compile/build gates。
+- [ ] 使用 git commit -m "feat(ai): add D2F team utility and leaf evaluation"；该 commit 属于下一轮 production Task 2，不是本轮 docs-only commit。
 
 ### Produces / consumes
 
-Produces TeamUtilityResult、LeafEvaluationResult 和纯函数 leaf evaluator。Consumes RolloutPublicState、finish order、hand counts、team seat metadata；不读取 Room 或 hidden hands。
+Produces `TeamUtilityInput`、`LeafEvaluationInput`、`TeamUtilityResult`、`LeafEvaluationResult` and the two named pure functions. Consumes only canonical `PublicSeat`, finish-order prefix/full order, and `Readonly<Record<PublicSeat, number>>`; it does not read `RolloutRequest`, `RolloutPublicState` as a whole, Room, hidden hands, ParticleBank, scenario, replay state, policy or random state.
 
 ## 4. Task 3 — keyed CRN identity and replay
 

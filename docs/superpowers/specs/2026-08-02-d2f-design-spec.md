@@ -625,6 +625,26 @@ root identity
 ```ts
 type TeamUtility = -3 | -2 | -1 | 1 | 2 | 3;
 
+export type TeamUtilityInput = Readonly<{
+  perspectiveSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+}>;
+
+export function evaluateTeamUtility(
+  input: TeamUtilityInput,
+): TeamUtilityResult;
+
+export type LeafEvaluationInput = Readonly<{
+  perspectiveSeat: PublicSeat;
+  actingSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+  handCounts: Readonly<Record<PublicSeat, number>>;
+}>;
+
+export function evaluateNonTerminalLeaf(
+  input: LeafEvaluationInput,
+): LeafEvaluationResult;
+
 type TeamUtilityResult =
   | { ok: true; utility: TeamUtility }
   | { ok: false; failure: TeamUtilityFailure };
@@ -637,6 +657,55 @@ type LeafEvaluationResult =
     }
   | { ok: false; failure: LeafEvaluationFailure };
 ```
+
+Task 2 的接口采用窄输入对象方案。`TeamUtilityInput` 只传入视角座位和完整终局顺序；`LeafEvaluationInput` 只传入视角座位、当前 acting/turn seat、已完成顺序前缀和公开 hand counts。两个函数都是同步、确定性、无副作用的纯函数；不得接收整个 `RolloutRequest`、kernel context、`Room`、`ParticleBank`、scenario、replay state、callback、factory、policy、RNG 或 mutable context，也不得读取对手具体手牌。禁止位置参数串、动态 evaluator registry 和 caller-provided evaluator。
+
+`PublicSeat` 的唯一来源是 `src/game/publicEvent.ts` 的 `PublicSeat = 0 | 1 | 2 | 3`。`RolloutPublicState.actingSeat` 是 public current acting/turn seat；`src/game/publicLedger.ts` 的 `currentTrick` 记录 `leadSeat`、可选 `lastPlaySeat`/stable key 与 `passSeats`，contracts 的 public-event projection 负责推导 acting seat。`RolloutPublicState.handCounts` 和 Task 1 contracts 使用的 canonical hand-count representation 是 `Readonly<Record<PublicSeat, number>>`，其四个 key 的语义固定为 seat `0`、seat `1`、seat `2`、seat `3`；Task 2 不定义第二种 hand-count representation。`src/game/publicLedger.ts` 的私有 `HandCounts = Record<PublicSeat, number>` 与该结构相同，但不是 Task 2 的 import API。`src/game/settlement.ts` 的 `teamOf` 与 `partnerSeat` 是私有 helper，且使用 `room.ts` 的 `Seat`，因此 Task 2 不 import 它们；`teamUtility.ts` 在本地复用已冻结的 `seat % 2` 与 `(seat + 2) % 4` 语义，不修改 settlement production。
+
+Team Utility 的 `perspectiveSeat` 必须是 canonical `PublicSeat`。`finishOrder` 必须是四座位按第 1 名至第 4 名排列的完整顺序，每个座位恰好出现一次；输入数组不可修改。视角队伍由 `perspectiveSeat` 与 `((perspectiveSeat + 2) % 4) as PublicSeat` 构成，按完成名次取两个 1-based position 后以升序 pair 查表。对手队伍 utility 是本方 utility 的相反数；搭档视角相同；不产生 zero、额外奖励、权重或 rounding。
+
+Non-terminal leaf 的 `finishOrder` 是真实完成顺序的有序前缀，长度严格为 `0 | 1 | 2 | 3`；长度为 4 的完整终局不得进入 `evaluateNonTerminalLeaf`，必须返回 `terminal-state` failure。前缀内座位必须 canonical 且唯一。`actingSeat` 必须是 canonical 且尚未出现在前缀中；由于窄接口不携带 current trick/history，当前 turn 与 public ledger 的一致性是 caller 的 precondition，不由该纯函数伪造或推断。`perspectiveSeat` 可以已完成或未完成。
+
+`handCounts` 必须是覆盖四个 canonical seat key 的 `Readonly<Record<PublicSeat, number>>`，每个 count 必须 finite、nonnegative、safe integer，并拒绝 `-0`。已完成座位的 count 必须为 0。未完成座位 count 为 0 是允许的真实时序例外：`publicLedger.ts` 允许 play event 将 `handCountAfter` 设为 0，而对应 finish event 尚未应用；窄接口无法仅凭两个输入区分该合法瞬间与其他来源，因此 caller 必须提供已由 public event/ledger 证明的状态。
+
+固定 leaf 算法如下：复制真实 finish-order 前缀；收集全部未完成座位；按 `handCounts[seat]` 升序排列；相同 count 按 `clockwiseDistance = (seat - actingSeat + 4) % 4` 升序排列；将结果追加到前缀得到完整 `predictedFinishOrder`；调用同一个 `evaluateTeamUtility` truth table；返回不可变的 `predictedFinishOrder` 和 utility。该 tie-break 使用相对 acting seat 的环距离，不以绝对 seat number 作为独立 tie-break。不得使用 Card identity、current trick strength、hidden assignment、Particle weight、policy/baseline score、随机数、wall clock、rounding、搭档奖励或 Task 3 CRN。
+
+Failure mapping 固定如下：
+
+| invalid input | exact failure |
+| --- | --- |
+| `perspectiveSeat` 为越界/非数值 | `{ kind: "invalid-perspective-seat", reason: "unknown-seat" }` |
+| `perspectiveSeat` 为 fractional / unsafe integer / `-0` | 同一 kind，分别使用 `fractional-seat` / `unsafe-integer-seat` / `negative-zero-seat` |
+| Team Utility finish order 含 duplicate | `{ kind: "invalid-finish-order", reason: "duplicate-seat" }` |
+| Team Utility finish order 缺 seat 或长度不是 4 且不能形成完整四座位 order | `{ kind: "invalid-finish-order", reason: "missing-seat" }` |
+| Team Utility finish order 含越界、非数值、fractional、unsafe integer 或 `-0` | `{ kind: "invalid-finish-order", reason: "unknown-seat" }` |
+| canonical seat pair 无法映射到项目两队 | `{ kind: "unsupported-team-pair", teamSeats }` |
+| `actingSeat` 非 canonical | `{ kind: "invalid-acting-seat", reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }` |
+| `actingSeat` 已在 finish prefix | `{ kind: "invalid-acting-seat", reason: "finished-seat" }` |
+| leaf finish prefix duplicate | `{ kind: "invalid-leaf-state", reason: "duplicate-finish" }` |
+| leaf finish prefix 含非 canonical seat | `{ kind: "invalid-leaf-state", reason: "unknown-seat" }` |
+| leaf finishOrder 长度为 4 | `{ kind: "invalid-leaf-state", reason: "terminal-state" }` |
+| handCounts 缺少 seat key | `{ kind: "invalid-leaf-state", reason: "missing-hand-count" }` |
+| handCounts 含额外/未知 seat key | `{ kind: "invalid-leaf-state", reason: "unknown-hand-count" }` |
+| hand count 为 negative | `{ kind: "invalid-leaf-state", reason: "negative-hand-count" }` |
+| hand count 为 NaN/Infinity | `{ kind: "invalid-leaf-state", reason: "non-finite-hand-count" }` |
+| hand count 为 fractional / unsafe integer / `-0` | 分别为 `fractional-hand-count` / `unsafe-hand-count` / `negative-zero-hand-count` |
+| 已完成 seat 的 hand count 非 0 | `{ kind: "invalid-leaf-state", reason: "finish-hand-count-mismatch" }` |
+| 固定相对 tie-break 无法由 canonical seat ring 证明 | `{ kind: "rotation-tie-break-unproven", evidence }` |
+
+所有失败均为 typed discriminated union；不得新增模糊字符串、optional failure field 或 throw-based API。`unsupported-team-pair` 在四座位 parity 规则下应不可达，但保留为现有 union 分支。
+
+Task 2 的唯一 code/test allowlist 为：
+
+```text
+src/ai/rollout/contracts.ts                  # 只新增两个输入 type，并更新本节 failure unions；不改变 Task 1 字段或 factory 行为
+src/ai/rollout/teamUtility.ts
+src/ai/rollout/leafEvaluation.ts
+tests/ai/rollout/teamUtility.test.ts
+tests/ai/rollout/leafEvaluation.test.ts
+```
+
+依赖方向固定为 `contracts.ts` ← `teamUtility.ts` ← `leafEvaluation.ts`：`leafEvaluation.ts` 必须调用 `evaluateTeamUtility`，不得复制 truth table；不得反向循环依赖、public barrel、Room、ParticleBank、scenario 或 replay import。
 
 terminal truth table：
 
@@ -659,11 +728,14 @@ utility 严格属于 `[-3,+3]` 且不包含 zero。非法、重复或缺失名�
 
 ```ts
 type TeamUtilityFailure =
+  | { kind: "invalid-perspective-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }
   | { kind: "invalid-finish-order"; reason: "duplicate-seat" | "missing-seat" | "unknown-seat" }
   | { kind: "unsupported-team-pair"; teamSeats: readonly PublicSeat[] };
 
 type LeafEvaluationFailure =
-  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" }
+  | { kind: "invalid-perspective-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }
+  | { kind: "invalid-acting-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" | "finished-seat" }
+  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" | "non-finite-hand-count" | "fractional-hand-count" | "unsafe-hand-count" | "negative-zero-hand-count" | "missing-hand-count" | "unknown-hand-count" | "finish-hand-count-mismatch" | "terminal-state" }
   | { kind: "rotation-tie-break-unproven"; evidence: string };
 
 type RolloutPolicyFailure =

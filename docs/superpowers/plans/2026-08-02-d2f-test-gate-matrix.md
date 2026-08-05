@@ -232,6 +232,26 @@ type RolloutRequest = Readonly<{
 
 type TeamUtility = -3 | -2 | -1 | 1 | 2 | 3;
 
+export type TeamUtilityInput = Readonly<{
+  perspectiveSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+}>;
+
+export function evaluateTeamUtility(
+  input: TeamUtilityInput,
+): TeamUtilityResult;
+
+export type LeafEvaluationInput = Readonly<{
+  perspectiveSeat: PublicSeat;
+  actingSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+  handCounts: Readonly<Record<PublicSeat, number>>;
+}>;
+
+export function evaluateNonTerminalLeaf(
+  input: LeafEvaluationInput,
+): LeafEvaluationResult;
+
 type CandidateRolloutSummary = Readonly<{
   candidateId: string;
   riskAdjustedUtility: number;
@@ -322,11 +342,14 @@ type RolloutAggregationResult =
   | { ok: false; failure: RolloutAggregationFailure };
 
 type TeamUtilityFailure =
+  | { kind: "invalid-perspective-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }
   | { kind: "invalid-finish-order"; reason: "duplicate-seat" | "missing-seat" | "unknown-seat" }
   | { kind: "unsupported-team-pair"; teamSeats: readonly PublicSeat[] };
 
 type LeafEvaluationFailure =
-  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" }
+  | { kind: "invalid-perspective-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }
+  | { kind: "invalid-acting-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" | "finished-seat" }
+  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" | "non-finite-hand-count" | "fractional-hand-count" | "unsafe-hand-count" | "negative-zero-hand-count" | "missing-hand-count" | "unknown-hand-count" | "finish-hand-count-mismatch" | "terminal-state" }
   | { kind: "rotation-tie-break-unproven"; evidence: string };
 
 type RolloutPolicyFailure =
@@ -977,6 +1000,34 @@ has become stricter.
 
 ### Team Utility
 
+Task 2 uses the following narrow synchronous pure-function interface：
+
+~~~ts
+export type TeamUtilityInput = Readonly<{
+  perspectiveSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+}>;
+
+export function evaluateTeamUtility(
+  input: TeamUtilityInput,
+): TeamUtilityResult;
+
+export type LeafEvaluationInput = Readonly<{
+  perspectiveSeat: PublicSeat;
+  actingSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+  handCounts: Readonly<Record<PublicSeat, number>>;
+}>;
+
+export function evaluateNonTerminalLeaf(
+  input: LeafEvaluationInput,
+): LeafEvaluationResult;
+~~~
+
+`PublicSeat` is imported from `src/game/publicEvent.ts` and is exactly `0 | 1 | 2 | 3`. `RolloutPublicState.actingSeat` is the public current acting/turn seat; `src/game/publicLedger.ts`'s `currentTrick` records `leadSeat`, optional `lastPlaySeat`/stable key and `passSeats`, while the contracts public-event projection derives the acting seat. The canonical hand-count representation is the existing `Readonly<Record<PublicSeat, number>>` used by `RolloutPublicState` in `src/ai/rollout/contracts.ts`; its key order semantics are seat `0, 1, 2, 3`. `src/game/publicLedger.ts` uses the same shape through a private `HandCounts` alias. `settlement.ts`'s `teamOf` and `partnerSeat` are private `Seat`-based helpers and are not imported; `teamUtility.ts` locally applies `seat % 2` and `(seat + 2) % 4`.
+
+Shared input types are added to the Task 2 `contracts.ts` allowlist only; no Task 1 field, factory or behavior changes are allowed. The dependency direction is `contracts.ts` ← `teamUtility.ts` ← `leafEvaluation.ts`; leaf evaluation must call `evaluateTeamUtility`, not duplicate the table. The functions receive no whole rollout/kernel context, positional argument string, registry, callback, factory, policy, RNG, Room, ParticleBank, scenario, replay state, hidden hand or mutable context.
+
 The only terminal table is：
 
 | own team places | utility |
@@ -988,11 +1039,72 @@ The only terminal table is：
 | {2,4} | -2 |
 | {3,4} | -3 |
 
-TeamUtility is exactly -3 | -2 | -1 | 1 | 2 | 3; zero is invalid. Tests must cover malformed, duplicate and missing ranks, team swap sign, seat rotation, partner interchange and no extra reward.
+TeamUtility is exactly -3 | -2 | -1 | 1 | 2 | 3; zero is invalid. `perspectiveSeat` selects the team `{ perspectiveSeat, (perspectiveSeat + 2) % 4 }`; the opposing team is the sign inverse. Tests must cover malformed, duplicate and missing ranks, invalid perspective seats, team swap sign, seat rotation, partner interchange, immutability and no extra reward.
 
 ### Leaf
 
-The leaf test must preserve completed finish order, sort unfinished seats by remaining hand count, and tie by clockwise distance from current acting/turn seat. Same-state replay, team swap and seat rotation are required. Absolute seat number is prohibited.
+`finishOrder` is a real completed prefix of length `0 | 1 | 2 | 3`; a four-seat order is terminal and must return `invalid-leaf-state/terminal-state`. The prefix is unique and canonical. `actingSeat` is canonical and not completed; current-turn/history consistency is a caller precondition because the narrow input has no trick/history fields. `perspectiveSeat` may be completed or unfinished.
+
+`handCounts` must contain exactly the four canonical seat keys and each count must be finite, nonnegative, a safe integer and not `-0`. Completed seats must have count 0. A not-yet-finished seat with count 0 is a valid transient public-ledger state after a play event sets `handCountAfter` to 0 and before its finish event; the caller must establish that provenance because the pure function cannot infer it.
+
+The leaf algorithm is fixed: preserve the completed prefix; collect unfinished seats; sort by `handCounts[seat]` ascending; tie by `clockwiseDistance = (seat - actingSeat + 4) % 4` ascending; append to produce `predictedFinishOrder`; call the same `evaluateTeamUtility` table; return an immutable result. Absolute seat number, card identity, current trick strength, hidden assignment, particle weight, policy/baseline score, random, wall clock, rounding, partner reward and Task 3 CRN are prohibited. Same-state replay, team swap, partner view and seat rotation are required.
+
+### Failure mapping
+
+The exact unions are shared by all three D2F documents：
+
+~~~text
+TeamUtilityFailure:
+  invalid-perspective-seat: unknown-seat | fractional-seat | unsafe-integer-seat | negative-zero-seat
+  invalid-finish-order: duplicate-seat | missing-seat | unknown-seat
+  unsupported-team-pair: teamSeats
+
+LeafEvaluationFailure:
+  invalid-perspective-seat: unknown-seat | fractional-seat | unsafe-integer-seat | negative-zero-seat
+  invalid-acting-seat: unknown-seat | fractional-seat | unsafe-integer-seat | negative-zero-seat | finished-seat
+  invalid-leaf-state:
+    duplicate-finish | unknown-seat | negative-hand-count | non-finite-hand-count |
+    fractional-hand-count | unsafe-hand-count | negative-zero-hand-count |
+    missing-hand-count | unknown-hand-count | finish-hand-count-mismatch | terminal-state
+  rotation-tie-break-unproven: evidence
+~~~
+
+Failure mapping is exact：
+
+| invalid input | exact failure |
+| --- | --- |
+| `perspectiveSeat` 为越界/非数值 | `{ kind: "invalid-perspective-seat", reason: "unknown-seat" }` |
+| `perspectiveSeat` 为 fractional / unsafe integer / `-0` | 同一 kind，分别使用 `fractional-seat` / `unsafe-integer-seat` / `negative-zero-seat` |
+| Team Utility finish order 含 duplicate | `{ kind: "invalid-finish-order", reason: "duplicate-seat" }` |
+| Team Utility finish order 缺 seat 或长度不是 4 且不能形成完整四座位 order | `{ kind: "invalid-finish-order", reason: "missing-seat" }` |
+| Team Utility finish order 含越界、非数值、fractional、unsafe integer 或 `-0` | `{ kind: "invalid-finish-order", reason: "unknown-seat" }` |
+| canonical seat pair 无法映射到项目两队 | `{ kind: "unsupported-team-pair", teamSeats }` |
+| `actingSeat` 非 canonical | `{ kind: "invalid-acting-seat", reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }` |
+| `actingSeat` 已在 finish prefix | `{ kind: "invalid-acting-seat", reason: "finished-seat" }` |
+| leaf finish prefix duplicate | `{ kind: "invalid-leaf-state", reason: "duplicate-finish" }` |
+| leaf finish prefix 含非 canonical seat | `{ kind: "invalid-leaf-state", reason: "unknown-seat" }` |
+| leaf finishOrder 长度为 4 | `{ kind: "invalid-leaf-state", reason: "terminal-state" }` |
+| handCounts 缺少 seat key | `{ kind: "invalid-leaf-state", reason: "missing-hand-count" }` |
+| handCounts 含额外/未知 seat key | `{ kind: "invalid-leaf-state", reason: "unknown-hand-count" }` |
+| hand count 为 negative | `{ kind: "invalid-leaf-state", reason: "negative-hand-count" }` |
+| hand count 为 NaN/Infinity | `{ kind: "invalid-leaf-state", reason: "non-finite-hand-count" }` |
+| hand count 为 fractional / unsafe integer / `-0` | 分别为 `fractional-hand-count` / `unsafe-hand-count` / `negative-zero-hand-count` |
+| 已完成 seat 的 hand count 非 0 | `{ kind: "invalid-leaf-state", reason: "finish-hand-count-mismatch" }` |
+| 固定相对 tie-break 无法由 canonical seat ring 证明 | `{ kind: "rotation-tie-break-unproven", evidence }` |
+
+All failures are typed discriminated-union values; no vague string, optional failure field or throw-based API is permitted. `unsupported-team-pair` is unreachable under the four-seat parity rule but remains as the existing union branch.
+
+### Task 2 allowlist
+
+~~~text
+src/ai/rollout/contracts.ts                  # add two shared input types and the exact Task 2 failure-union variants only
+src/ai/rollout/teamUtility.ts
+src/ai/rollout/leafEvaluation.ts
+tests/ai/rollout/teamUtility.test.ts
+tests/ai/rollout/leafEvaluation.test.ts
+~~~
+
+No production/test/package/config/Room/Task 1/Task 3–9 path may change in this interface-freeze round.
 
 ### Aggregation
 
