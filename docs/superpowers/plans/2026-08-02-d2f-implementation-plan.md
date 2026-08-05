@@ -337,8 +337,7 @@ type TeamUtilityFailure =
 type LeafEvaluationFailure =
   | { kind: "invalid-perspective-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }
   | { kind: "invalid-acting-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" | "finished-seat" }
-  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" | "non-finite-hand-count" | "fractional-hand-count" | "unsafe-hand-count" | "negative-zero-hand-count" | "missing-hand-count" | "unknown-hand-count" | "finish-hand-count-mismatch" | "terminal-state" }
-  | { kind: "rotation-tie-break-unproven"; evidence: string };
+  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" | "non-finite-hand-count" | "fractional-hand-count" | "unsafe-hand-count" | "negative-zero-hand-count" | "unfinished-zero-hand-count" | "missing-hand-count" | "unknown-hand-count" | "finish-hand-count-mismatch" | "terminal-state" };
 
 type RolloutPolicyFailure =
   | { kind: "no-legal-action"; actingSeat: PublicSeat }
@@ -804,9 +803,11 @@ Team Utility 的失败映射固定为：
 
 ### Non-terminal leaf input and fixed algorithm
 
-`finishOrder` 是真实完成顺序的有序前缀，长度严格为 `0 | 1 | 2 | 3`；长度 4 是 terminal input，不能被错误当作 non-terminal leaf。前缀座位必须 canonical 且唯一。`actingSeat` 必须 canonical 且不在完成前缀中；该窄接口没有 current trick/history，因此 acting seat 与 public ledger 的当前 turn 一致性由 caller 以 public state precondition 保证，函数不读取或猜测隐藏上下文。`perspectiveSeat` 可以已完成或未完成。
+Stable leaf evaluation state 表示：当前 action 已完整应用；action 产生的 hand-count 变化已应用；如果某座位手牌归零，对应 finish-order 更新已经完成；current acting/turn seat 已推进到合法的未完成座位；play、finish、trick-clear、turn advance 等相关状态更新不存在待处理的中间步骤；leaf evaluation 不允许在上述处理过程的中间调用。游戏/rollout 提前终局是合法 leaf 输入语义；事件处理到一半的 transient state 不是 leaf evaluation 输入。
 
-`handCounts` 必须覆盖 seat `0, 1, 2, 3` 的 canonical keys；每个 count 必须 finite、nonnegative、safe integer，并拒绝 `-0`。已完成座位 count 必须为 0。public ledger 的真实时序允许 play event 先将某未完成座位的 `handCountAfter` 设为 0，再由后续 finish event 写入 `finishOrder`；因此未完成座位 count 为 0 是合法 transient exception，窄函数无法仅凭输入证明其来源，caller 必须提供已由 public event/ledger 证明的状态。除此之外不放宽 hand-count 约束。
+`finishOrder` 是 stable state 中真实完成顺序的有序前缀，长度严格为 `0 | 1 | 2 | 3`；长度 4 是 terminal input，不能被错误当作 non-terminal leaf。前缀座位必须 canonical 且唯一。`actingSeat` 必须 canonical 且不在完成前缀中；该窄接口没有 current trick/history，因此 acting seat 与 public ledger 的当前 turn 一致性由 caller 以 stable-state precondition 保证，函数不读取或猜测隐藏上下文。`perspectiveSeat` 可以已完成或未完成。
+
+`handCounts` 必须覆盖四个 canonical seat key，类型为 `Readonly<Record<PublicSeat, number>>`，其顺序语义为 seat `0, 1, 2, 3`；每个 count 必须 finite、nonnegative、safe integer，并拒绝 `-0`。稳定状态不变量严格为：`seat ∈ finishOrder → handCounts[seat] === 0`；`seat ∉ finishOrder → handCounts[seat] > 0`。因此 unfinished seat 为 0 必须返回 `{ kind: "invalid-leaf-state", reason: "unfinished-zero-hand-count" }`，不得通过 ledger、recent event、pending flag 或推测放行。`actingSeat` 必须不在 `finishOrder` 且 `handCounts[actingSeat] > 0`。
 
 固定算法：
 
@@ -836,7 +837,8 @@ Leaf failure 映射固定为：
 | hand count 为 NaN/Infinity | `{ kind: "invalid-leaf-state", reason: "non-finite-hand-count" }` |
 | hand count 为 fractional / unsafe integer / `-0` | 分别为 `fractional-hand-count` / `unsafe-hand-count` / `negative-zero-hand-count` |
 | 已完成 seat 的 hand count 非 0 | `{ kind: "invalid-leaf-state", reason: "finish-hand-count-mismatch" }` |
-| 固定相对 tie-break 无法由 canonical seat ring 证明 | `{ kind: "rotation-tie-break-unproven", evidence }` |
+| `actingSeat` 的 hand count 为 0 | `{ kind: "invalid-leaf-state", reason: "unfinished-zero-hand-count" }` |
+| 未完成 seat 的 hand count 为 0 | `{ kind: "invalid-leaf-state", reason: "unfinished-zero-hand-count" }` |
 
 ### TDD actions
 
@@ -867,7 +869,9 @@ Leaf failure 映射固定为：
   ~~~
 
   预期 `result.ok === true`、`result.predictedFinishOrder` 为 `[2, 1, 0, 3]`、`result.utility === 2`。
-- [ ] 覆盖 completed prefix、hand-count sort、相同 count 的相对距离、合法 transient zero、invalid hand counts、finish/count mismatch、finished acting seat、terminal input、rotation/team/perspective invariance、输入顺序与重复调用确定性，以及 finite/non-zero Team Utility。
+- [ ] Leaf 合法状态必须覆盖：`finishOrder=[]` 且四个 hand count 均大于 0；长度为 1、2、3 且前缀内 seat count 为 0；所有未完成 seat count 均大于 0；`actingSeat` 未完成且 count 大于 0；已完成和未完成两种 `perspectiveSeat`；相同 hand count 按相对 `actingSeat` 距离排序；seat rotation 保持 utility 和相对排序。
+- [ ] Leaf 非法状态必须覆盖：已完成 seat count 大于 0、未完成 seat count 等于 0、`actingSeat` 已完成、`actingSeat` count 为 0、长度为 4、duplicate/unknown seat、unknown hand-count key、missing hand-count key，以及 negative/fractional/NaN/Infinity/unsafe integer/`-0`；每项断言上表中的精确 failure reason。
+- [ ] 不得把事件处理过程中的零手牌状态判为 success；旋转只作为成功路径的 metamorphic/property test，不作为 failure 分支。测试必须调用真实 production API，不得使用 mock、skip、only 或 todo。
 - [ ] 最小实现只包含 parity team helper、finish validation、hand-count validation、relative-distance projection、对 `evaluateTeamUtility` 的一次调用；禁止经验系数和额外搭档奖励。
 - [ ] GREEN focused：两个 Task 2 test 文件全部通过；回归只执行 Task 1 contracts 相关测试，不能提前进入 Task 3。
 - [ ] 本轮文档冻结提交前不运行 Vitest、tsc、build 或 benchmark；production implementation 轮次才执行对应 GREEN/compile/build gates。
@@ -925,6 +929,8 @@ tests/ai/rollout/policy.test.ts
 tests/ai/rollout/kernel.test.ts
 tests/ai/rollout/rolloutPrivacyAst.test.ts
 ~~~
+
+Task 4 rollout kernel MUST NOT call `evaluateNonTerminalLeaf` until the simulated action and every derived finish/trick/turn update have been applied atomically to the isolated rollout state. Frozen call order：应用模拟动作 → 更新手牌数 → 更新 `finishOrder` → 处理 trick/turn 变化 → 验证 stable leaf evaluation state → 调用 `evaluateNonTerminalLeaf`。Task 2 leaf 不接收 public ledger、recent events、pending finish seat、Room、replay state 或 raw scenario；本段只是 Task 4 的后续接口前置条件，本轮不实现 kernel。
 
 ### TDD actions
 

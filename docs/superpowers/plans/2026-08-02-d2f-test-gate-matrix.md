@@ -349,8 +349,7 @@ type TeamUtilityFailure =
 type LeafEvaluationFailure =
   | { kind: "invalid-perspective-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }
   | { kind: "invalid-acting-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" | "finished-seat" }
-  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" | "non-finite-hand-count" | "fractional-hand-count" | "unsafe-hand-count" | "negative-zero-hand-count" | "missing-hand-count" | "unknown-hand-count" | "finish-hand-count-mismatch" | "terminal-state" }
-  | { kind: "rotation-tie-break-unproven"; evidence: string };
+  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" | "non-finite-hand-count" | "fractional-hand-count" | "unsafe-hand-count" | "negative-zero-hand-count" | "unfinished-zero-hand-count" | "missing-hand-count" | "unknown-hand-count" | "finish-hand-count-mismatch" | "terminal-state" };
 
 type RolloutPolicyFailure =
   | { kind: "no-legal-action"; actingSeat: PublicSeat }
@@ -455,6 +454,13 @@ mapping with no dynamic registration, caller-supplied function/class/factory, mo
 `CrnView`; it cannot access Room/RoomState, full opponent hands, `privateState`, raw ParticleBank
 scenario/record/weight/seed, HandPlanner, formal `decideAiAction`, wall clock, `Math.random()`,
 global mutable state, worker id or object address.
+
+Task 4 rollout kernel MUST NOT call `evaluateNonTerminalLeaf` until the simulated action and every
+derived finish/trick/turn update have been applied atomically to the isolated rollout state. Frozen
+call order：应用模拟动作 → 更新手牌数 → 更新 `finishOrder` → 处理 trick/turn 变化 → 验证 stable
+leaf evaluation state → 调用 `evaluateNonTerminalLeaf`。Task 2 leaf 不接收 public ledger、recent
+events、pending finish seat、Room、replay state 或 raw scenario；本段只是 Task 4 的接口前置条件，
+本轮不实现 kernel。
 
 The focused RED/GREEN gate must prove all of the following:
 
@@ -1043,9 +1049,11 @@ TeamUtility is exactly -3 | -2 | -1 | 1 | 2 | 3; zero is invalid. `perspectiveSe
 
 ### Leaf
 
-`finishOrder` is a real completed prefix of length `0 | 1 | 2 | 3`; a four-seat order is terminal and must return `invalid-leaf-state/terminal-state`. The prefix is unique and canonical. `actingSeat` is canonical and not completed; current-turn/history consistency is a caller precondition because the narrow input has no trick/history fields. `perspectiveSeat` may be completed or unfinished.
+Stable leaf evaluation state means: the current action is fully applied; all hand-count changes caused by that action are applied; if a seat's hand reaches zero, its finish-order update is complete; the current acting/turn seat has advanced to a legal unfinished seat; and no play, finish, trick-clear or turn-advance update remains pending. Leaf evaluation MUST NOT be called in the middle of those updates. An early game/rollout terminal state is a legal leaf semantic; an event-processing transient state is not a leaf input.
 
-`handCounts` must contain exactly the four canonical seat keys and each count must be finite, nonnegative, a safe integer and not `-0`. Completed seats must have count 0. A not-yet-finished seat with count 0 is a valid transient public-ledger state after a play event sets `handCountAfter` to 0 and before its finish event; the caller must establish that provenance because the pure function cannot infer it.
+`finishOrder` is a real completed prefix of length `0 | 1 | 2 | 3`; a four-seat order is terminal and must return `invalid-leaf-state/terminal-state`. The prefix is unique and canonical. `actingSeat` is canonical and not completed; current-turn/history consistency is a stable-state caller precondition because the narrow input has no trick/history fields. `perspectiveSeat` may be completed or unfinished.
+
+`handCounts` must contain exactly the four canonical seat keys in the existing `Readonly<Record<PublicSeat, number>>` representation, with order semantics seat `0, 1, 2, 3`. Each count must be finite, nonnegative, a safe integer and not `-0`. The stable-state invariant is strict: `seat ∈ finishOrder → handCounts[seat] === 0`; `seat ∉ finishOrder → handCounts[seat] > 0`. An unfinished seat with count 0 must return `{ kind: "invalid-leaf-state", reason: "unfinished-zero-hand-count" }`; ledger, recent event, pending flag or inference cannot authorize it. `actingSeat` must be unfinished and `handCounts[actingSeat] > 0`.
 
 The leaf algorithm is fixed: preserve the completed prefix; collect unfinished seats; sort by `handCounts[seat]` ascending; tie by `clockwiseDistance = (seat - actingSeat + 4) % 4` ascending; append to produce `predictedFinishOrder`; call the same `evaluateTeamUtility` table; return an immutable result. Absolute seat number, card identity, current trick strength, hidden assignment, particle weight, policy/baseline score, random, wall clock, rounding, partner reward and Task 3 CRN are prohibited. Same-state replay, team swap, partner view and seat rotation are required.
 
@@ -1065,8 +1073,8 @@ LeafEvaluationFailure:
   invalid-leaf-state:
     duplicate-finish | unknown-seat | negative-hand-count | non-finite-hand-count |
     fractional-hand-count | unsafe-hand-count | negative-zero-hand-count |
-    missing-hand-count | unknown-hand-count | finish-hand-count-mismatch | terminal-state
-  rotation-tie-break-unproven: evidence
+    unfinished-zero-hand-count | missing-hand-count | unknown-hand-count |
+    finish-hand-count-mismatch | terminal-state
 ~~~
 
 Failure mapping is exact：
@@ -1090,9 +1098,32 @@ Failure mapping is exact：
 | hand count 为 NaN/Infinity | `{ kind: "invalid-leaf-state", reason: "non-finite-hand-count" }` |
 | hand count 为 fractional / unsafe integer / `-0` | 分别为 `fractional-hand-count` / `unsafe-hand-count` / `negative-zero-hand-count` |
 | 已完成 seat 的 hand count 非 0 | `{ kind: "invalid-leaf-state", reason: "finish-hand-count-mismatch" }` |
-| 固定相对 tie-break 无法由 canonical seat ring 证明 | `{ kind: "rotation-tie-break-unproven", evidence }` |
+| `actingSeat` 的 hand count 为 0 | `{ kind: "invalid-leaf-state", reason: "unfinished-zero-hand-count" }` |
+| 未完成 seat 的 hand count 为 0 | `{ kind: "invalid-leaf-state", reason: "unfinished-zero-hand-count" }` |
 
 All failures are typed discriminated-union values; no vague string, optional failure field or throw-based API is permitted. `unsupported-team-pair` is unreachable under the four-seat parity rule but remains as the existing union branch.
+
+The Task 2 leaf test matrix is exact and must use the real production API with no mock, skip, only or todo：
+
+| class | required cases | required assertion |
+| --- | --- | --- |
+| legal stable state | `finishOrder=[]` with all four counts > 0; prefix lengths 1, 2 and 3 with completed-seat counts 0; all unfinished counts > 0; unfinished positive-count `actingSeat`; completed and unfinished `perspectiveSeat` | success, finite utility, complete predicted order |
+| legal ordering | equal hand counts; seat rotation | relative `actingSeat` distance determines order; utility and relative order are rotation-invariant |
+| invalid state | finished count > 0; unfinished count = 0; `actingSeat` completed; `actingSeat` count = 0; prefix length 4 | exact `finish-hand-count-mismatch`, `unfinished-zero-hand-count`, `finished-seat` or `terminal-state` reason |
+| invalid shape/number | duplicate/unknown seat; unknown or missing hand-count key; negative, fractional, NaN, Infinity, unsafe integer and `-0` | exact frozen failure reason for each case |
+
+The matrix does not authorize success for an event-processing zero-count state. Rotation is a successful-path metamorphic/property test, not a production failure branch.
+
+The exact Task 2 RED/GREEN commands are：
+
+~~~text
+npx vitest run tests/ai/rollout/teamUtility.test.ts --exclude "**/.worktrees/**" --reporter=verbose
+npx vitest run tests/ai/rollout/leafEvaluation.test.ts --exclude "**/.worktrees/**" --reporter=verbose
+~~~
+
+Each command must first RED only because its target module or target behavior is absent, then GREEN
+with the same command after the minimal implementation. Import, fixture and syntax failures are not
+valid RED evidence. No test may use mock, skip, only or todo.
 
 ### Task 2 allowlist
 

@@ -523,6 +523,8 @@ request factory 还必须调用一个共享的、不导出的纯 public consiste
 
 `RolloutReplicateInput` 不携带 executable policy。Task 4 kernel 如需 policy，只能在内部由 `policyId` 构造固定的 `InternalRolloutPolicy`，不得由 detached/offline/shadow caller 注入。
 
+Task 4 rollout kernel MUST NOT call `evaluateNonTerminalLeaf` until the simulated action and every derived finish/trick/turn update have been applied atomically to the isolated rollout state. Frozen call order：应用模拟动作 → 更新手牌数 → 更新 `finishOrder` → 处理 trick/turn 变化 → 验证 stable leaf evaluation state → 调用 `evaluateNonTerminalLeaf`。Task 2 leaf 不接收 public ledger、recent events、pending finish seat、Room、replay state 或 raw scenario；本段只是 Task 4 的后续接口前置条件，本轮不实现 kernel。
+
 ### 3.3 CRN identity 与 policy
 
 candidate-dependent 的决策关联必须使用以下明确名称；它是 candidate-local result/trace association，不是通用 decision identity：
@@ -664,9 +666,11 @@ Task 2 的接口采用窄输入对象方案。`TeamUtilityInput` 只传入视角
 
 Team Utility 的 `perspectiveSeat` 必须是 canonical `PublicSeat`。`finishOrder` 必须是四座位按第 1 名至第 4 名排列的完整顺序，每个座位恰好出现一次；输入数组不可修改。视角队伍由 `perspectiveSeat` 与 `((perspectiveSeat + 2) % 4) as PublicSeat` 构成，按完成名次取两个 1-based position 后以升序 pair 查表。对手队伍 utility 是本方 utility 的相反数；搭档视角相同；不产生 zero、额外奖励、权重或 rounding。
 
-Non-terminal leaf 的 `finishOrder` 是真实完成顺序的有序前缀，长度严格为 `0 | 1 | 2 | 3`；长度为 4 的完整终局不得进入 `evaluateNonTerminalLeaf`，必须返回 `terminal-state` failure。前缀内座位必须 canonical 且唯一。`actingSeat` 必须是 canonical 且尚未出现在前缀中；由于窄接口不携带 current trick/history，当前 turn 与 public ledger 的一致性是 caller 的 precondition，不由该纯函数伪造或推断。`perspectiveSeat` 可以已完成或未完成。
+Stable leaf evaluation state 表示：当前 action 已完整应用；action 产生的 hand-count 变化已应用；如果某座位手牌归零，对应 finish-order 更新已经完成；current acting/turn seat 已推进到合法的未完成座位；play、finish、trick-clear、turn advance 等相关状态更新不存在待处理的中间步骤；leaf evaluation 不允许在上述处理过程的中间调用。游戏/rollout 提前终局是合法 leaf 输入语义；事件处理到一半的 transient state 不是 leaf evaluation 输入。
 
-`handCounts` 必须是覆盖四个 canonical seat key 的 `Readonly<Record<PublicSeat, number>>`，每个 count 必须 finite、nonnegative、safe integer，并拒绝 `-0`。已完成座位的 count 必须为 0。未完成座位 count 为 0 是允许的真实时序例外：`publicLedger.ts` 允许 play event 将 `handCountAfter` 设为 0，而对应 finish event 尚未应用；窄接口无法仅凭两个输入区分该合法瞬间与其他来源，因此 caller 必须提供已由 public event/ledger 证明的状态。
+Non-terminal leaf 的 `finishOrder` 是 stable state 中真实完成顺序的有序前缀，长度严格为 `0 | 1 | 2 | 3`；长度为 4 的完整终局不得进入 `evaluateNonTerminalLeaf`，必须返回 `terminal-state` failure。前缀内座位必须 canonical 且唯一。`actingSeat` 必须是 canonical 且尚未出现在前缀中；由于窄接口不携带 current trick/history，当前 turn 与 public ledger 的一致性是 caller 的 stable-state precondition，不由该纯函数伪造或推断。`perspectiveSeat` 可以已完成或未完成。
+
+`handCounts` 必须是覆盖四个 canonical seat key 的 `Readonly<Record<PublicSeat, number>>`，每个 count 必须 finite、nonnegative、safe integer，并拒绝 `-0`。稳定状态不变量严格为：`seat ∈ finishOrder → handCounts[seat] === 0`；`seat ∉ finishOrder → handCounts[seat] > 0`。因此 unfinished seat 为 0 必须返回 `unfinished-zero-hand-count`，不得通过 ledger、recent event、pending flag 或推测放行。`actingSeat` 必须不在 `finishOrder` 且 `handCounts[actingSeat] > 0`。
 
 固定 leaf 算法如下：复制真实 finish-order 前缀；收集全部未完成座位；按 `handCounts[seat]` 升序排列；相同 count 按 `clockwiseDistance = (seat - actingSeat + 4) % 4` 升序排列；将结果追加到前缀得到完整 `predictedFinishOrder`；调用同一个 `evaluateTeamUtility` truth table；返回不可变的 `predictedFinishOrder` 和 utility。该 tie-break 使用相对 acting seat 的环距离，不以绝对 seat number 作为独立 tie-break。不得使用 Card identity、current trick strength、hidden assignment、Particle weight、policy/baseline score、随机数、wall clock、rounding、搭档奖励或 Task 3 CRN。
 
@@ -691,7 +695,8 @@ Failure mapping 固定如下：
 | hand count 为 NaN/Infinity | `{ kind: "invalid-leaf-state", reason: "non-finite-hand-count" }` |
 | hand count 为 fractional / unsafe integer / `-0` | 分别为 `fractional-hand-count` / `unsafe-hand-count` / `negative-zero-hand-count` |
 | 已完成 seat 的 hand count 非 0 | `{ kind: "invalid-leaf-state", reason: "finish-hand-count-mismatch" }` |
-| 固定相对 tie-break 无法由 canonical seat ring 证明 | `{ kind: "rotation-tie-break-unproven", evidence }` |
+| `actingSeat` 的 hand count 为 0 | `{ kind: "invalid-leaf-state", reason: "unfinished-zero-hand-count" }` |
+| 未完成 seat 的 hand count 为 0 | `{ kind: "invalid-leaf-state", reason: "unfinished-zero-hand-count" }` |
 
 所有失败均为 typed discriminated union；不得新增模糊字符串、optional failure field 或 throw-based API。`unsupported-team-pair` 在四座位 parity 规则下应不可达，但保留为现有 union 分支。
 
@@ -720,7 +725,11 @@ terminal truth table：
 
 utility 严格属于 `[-3,+3]` 且不包含 zero。非法、重复或缺失名次失败。双方交换使 utility 变号；整体旋转保持团队语义；搭档座位互换不改变团队语义，不额外叠加搭档奖励。
 
-非 terminal leaf 先保留已完成玩家真实 finish order，再对未完成玩家按剩余手牌数升序排列；相同手牌数按相对当前 acting/turn seat 的顺时针距离升序。不得用绝对 seat number。若仓库实际轮转规则证明该 tie-break 不能旋转等变，Task 2 必须以证据停止冻结该细节，提出保持旋转等变性的最小替代，而不是退化为绝对 seat number。
+非 terminal leaf 先保留已完成玩家真实 finish order，再对未完成玩家按剩余手牌数升序排列；相同手牌数按相对当前 acting/turn seat 的顺时针距离升序。不得用绝对 seat number。对于经过验证的 canonical `PublicSeat` 和 `actingSeat`，`clockwiseDistance = (seat - actingSeat + 4) % 4` 始终可以确定性计算；旋转一致性由成功路径测试验证，不产生额外 production failure。
+
+Task 2 RED/GREEN 测试矩阵冻结如下：Team Utility focused command 为 `npx vitest run tests/ai/rollout/teamUtility.test.ts --exclude "**/.worktrees/**" --reporter=verbose`，RED 只能因目标模块或 `evaluateTeamUtility` 行为尚不存在而失败；leaf focused command 为 `npx vitest run tests/ai/rollout/leafEvaluation.test.ts --exclude "**/.worktrees/**" --reporter=verbose`，RED 只能因目标模块或 `evaluateNonTerminalLeaf` 行为尚不存在而失败。GREEN 必须复用相同命令。两组测试均调用真实 production API，不使用 mock、skip、only 或 todo。
+
+Leaf 合法状态必须覆盖：`finishOrder=[]` 且四个 hand count 均大于 0；长度为 1、2、3 且前缀内 seat count 为 0；所有未完成 seat count 均大于 0；`actingSeat` 未完成且 count 大于 0；已完成和未完成两种 `perspectiveSeat`；相同 hand count 按相对 `actingSeat` 距离排序；seat rotation 保持 utility 和相对排序。Leaf 非法状态必须覆盖：已完成 seat count 大于 0、未完成 seat count 等于 0、`actingSeat` 已完成、`actingSeat` count 为 0、长度为 4、duplicate/unknown seat、unknown hand-count key、missing hand-count key，以及 negative/fractional/NaN/Infinity/unsafe integer/`-0`；每项断言本节冻结的精确 failure reason。不得将事件处理中间状态判为 success；旋转只作为成功路径的 metamorphic/property test。
 
 ### 3.5 Typed success/failure unions
 
@@ -735,8 +744,7 @@ type TeamUtilityFailure =
 type LeafEvaluationFailure =
   | { kind: "invalid-perspective-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }
   | { kind: "invalid-acting-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" | "finished-seat" }
-  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" | "non-finite-hand-count" | "fractional-hand-count" | "unsafe-hand-count" | "negative-zero-hand-count" | "missing-hand-count" | "unknown-hand-count" | "finish-hand-count-mismatch" | "terminal-state" }
-  | { kind: "rotation-tie-break-unproven"; evidence: string };
+  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" | "non-finite-hand-count" | "fractional-hand-count" | "unsafe-hand-count" | "negative-zero-hand-count" | "unfinished-zero-hand-count" | "missing-hand-count" | "unknown-hand-count" | "finish-hand-count-mismatch" | "terminal-state" };
 
 type RolloutPolicyFailure =
   | { kind: "no-legal-action"; actingSeat: PublicSeat }
