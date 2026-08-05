@@ -1,5 +1,6 @@
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import * as ts from "typescript";
 import { createDeck } from "../../../src/engine/cards";
@@ -2048,6 +2049,20 @@ describe("D2F ParticleBank bridge", () => {
     });
     expect(overflow.ok).toBe(false);
     if (!overflow.ok) expect(overflow.failure).toEqual({ kind: "invalid-budget", field: "maxWorkUnits" });
+
+    const semanticInvalidCases = [
+      ["replicateCountPerScenario", "maxReplicateCountPerScenario"],
+      ["maxPliesPerReplicate", "maxPliesPerReplicate"],
+      ["maxPolicyActionEvaluationsPerPly", "maxPolicyActionEvaluationsPerPly"],
+      ["maxWorkUnits", "maxWorkUnits"],
+    ] as const;
+    for (const [budgetField, limitField] of semanticInvalidCases) {
+      const result = validateRolloutBudget({
+        budget: { ...input.budget, [budgetField]: input.limits[limitField] + 1 },
+        limits: input.limits,
+      });
+      expect(result).toEqual({ ok: false, failure: { kind: "invalid-budget", field: budgetField } });
+    }
   });
 
   test("rejects true formal execution and keeps result failures discriminated", () => {
@@ -2662,67 +2677,131 @@ describe("D2F ParticleBank bridge", () => {
     expect(contractsImportForbiddenBoundary).toBe(false);
   });
 
-  test("accepts valid early completion as incomplete coverage", () => {
+  test("enforces complete replicate coverage while allowing early work-unit completion", () => {
     const request = makeRequestInput();
     const assembly = makeResultAssemblyInput();
-    const incompleteAssembly = {
+    const earlyCompletionAssembly = {
       ...assembly,
       candidateSummaries: assembly.candidateSummaries.map((summary) => ({
         ...summary,
-        completedReplicateCount: summary.completedReplicateCount - 1,
+        workUnitCount: 3,
       })),
       aggregateDiagnostics: {
         ...assembly.aggregateDiagnostics,
-        completedReplicateCount: assembly.aggregateDiagnostics.completedReplicateCount - 1,
+        workUnitCount: 3,
       },
     };
 
-    const result = createRolloutResult(request, incompleteAssembly);
-
+    const result = createRolloutResult(request, earlyCompletionAssembly);
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value.aggregateDiagnostics.completedReplicateCount).toBe(1);
+
+    const invalidAssemblies = [
+      ["incomplete completed replicate count", {
+        ...earlyCompletionAssembly,
+        candidateSummaries: [{ ...earlyCompletionAssembly.candidateSummaries[0]!, completedReplicateCount: 1 }],
+        aggregateDiagnostics: { ...earlyCompletionAssembly.aggregateDiagnostics, completedReplicateCount: 1 },
+      }],
+      ["completed replicate count above expected", {
+        ...earlyCompletionAssembly,
+        candidateSummaries: [{ ...earlyCompletionAssembly.candidateSummaries[0]!, completedReplicateCount: 3 }],
+        aggregateDiagnostics: { ...earlyCompletionAssembly.aggregateDiagnostics, completedReplicateCount: 3 },
+      }],
+      ["candidate and aggregate completed count mismatch", {
+        ...earlyCompletionAssembly,
+        aggregateDiagnostics: { ...earlyCompletionAssembly.aggregateDiagnostics, completedReplicateCount: 1 },
+      }],
+      ["forged aggregate completed sum", {
+        ...earlyCompletionAssembly,
+        candidateSummaries: [{ ...earlyCompletionAssembly.candidateSummaries[0]!, completedReplicateCount: 1 }],
+        aggregateDiagnostics: { ...earlyCompletionAssembly.aggregateDiagnostics, completedReplicateCount: 2 },
+      }],
+      ...([-1, 1.5, -0, Number.MAX_SAFE_INTEGER + 1] as const).map((value) => [
+        `noncanonical completed replicate count ${String(value)}`,
+        {
+          ...earlyCompletionAssembly,
+          candidateSummaries: [{ ...earlyCompletionAssembly.candidateSummaries[0]!, completedReplicateCount: value }],
+          aggregateDiagnostics: { ...earlyCompletionAssembly.aggregateDiagnostics, completedReplicateCount: value },
+        },
+      ] as const),
+    ] as const;
+
+    for (const [label, invalidAssembly] of invalidAssemblies) {
+      let invalidResult: RolloutContractResult<RolloutResult> | undefined;
+      expect(() => { invalidResult = createRolloutResult(request, invalidAssembly); }, label).not.toThrow();
+      expect(invalidResult, label).toEqual({ ok: false, failure: { kind: "invalid-request", field: expect.any(String) } });
+      expect(invalidResult, label).not.toHaveProperty("value");
+    }
   });
 
   test("rejects a public event seat encoded as negative zero before hash normalization", () => {
     const sourceInput = makeAntiTributeSourceInput();
     const validRootIdentity = replayRoot(sourceInput);
+    const { publicPayloadHash: _canonicalHash, ...zeroDraft } = sourceInput.publicHistoryEvents[0]!;
+    const canonicalZeroEvent = finalizePublicActionEvent({ ...zeroDraft, seat: 0 as PublicSeat });
     const hostileEvent = {
       ...sourceInput.publicHistoryEvents[0]!,
       seat: -0 as PublicSeat,
+      publicPayloadHash: canonicalZeroEvent.publicPayloadHash,
     };
     const hostileSourceInput = {
       ...sourceInput,
       publicHistoryEvents: [hostileEvent],
     };
     const request = makeRequestInput();
-    const result = createRolloutRequest({
-      ...request,
-      rootIdentity: validRootIdentity,
-      scenarioSourceInput: hostileSourceInput,
-    });
+    const validZeroResult = createRolloutRequest({ ...request, rootIdentity: validRootIdentity, scenarioSourceInput: sourceInput });
+    expect(validZeroResult.ok).toBe(true);
+    expect(Object.is(hostileEvent.seat, -0)).toBe(true);
+    const contractsSource = readFileSync(path.resolve(process.cwd(), "src/ai/rollout/contracts.ts"), "utf8");
+    const semanticValidationIndex = contractsSource.indexOf("if (!isPublicEventSemanticShape");
+    const hashVerificationIndex = contractsSource.indexOf("verifyPublicActionEventHash(event);");
+    expect(semanticValidationIndex).toBeGreaterThanOrEqual(0);
+    expect(hashVerificationIndex).toBeGreaterThan(semanticValidationIndex);
 
+    let result: RolloutContractResult<RolloutRequest> | undefined;
+    expect(() => {
+      result = createRolloutRequest({
+        ...request,
+        rootIdentity: validRootIdentity,
+        scenarioSourceInput: hostileSourceInput,
+      });
+    }).not.toThrow();
     expect(result).toEqual({
       ok: false,
-      failure: { kind: "invalid-request", field: expect.any(String) },
+      failure: { kind: "invalid-request", field: "scenarioSourceInput" },
     });
+    expect(result).not.toHaveProperty("value");
   });
 
   test("uses invalid-request for malformed budget envelopes", () => {
     const request = makeRequestInput();
-    const { budget: _budget, ...missingBudget } = request;
-    const missingBudgetResult = createRolloutRequest(missingBudget);
-    expect(missingBudgetResult).toEqual({
-      ok: false,
-      failure: { kind: "invalid-request", field: "budget" },
-    });
+    const expectInvalidRequest = (input: unknown, label: string): void => {
+      let result: RolloutContractResult<RolloutRequest> | undefined;
+      expect(() => { result = createRolloutRequest(input as never); }, label).not.toThrow();
+      expect(result, label).toEqual({ ok: false, failure: { kind: "invalid-request", field: "budget" } });
+      expect(result, label).not.toHaveProperty("value");
+    };
 
-    const malformedBudgetResult = createRolloutRequest({
-      ...request,
-      budget: { ...request.budget, callback: () => undefined },
+    const { budget: _budget, ...missingBudget } = request;
+    expectInvalidRequest(missingBudget, "missing budget");
+    expectInvalidRequest({ ...request, budget: null }, "non-object budget");
+    expectInvalidRequest({ ...request, budget: { ...request.budget, callback: () => undefined } }, "extra budget key");
+    expectInvalidRequest({ ...request, budget: { ...request.budget, [Symbol("budget")]: 1 } }, "symbol budget key");
+    const { maxWorkUnits: _missingField, ...missingFieldBudget } = request.budget;
+    expectInvalidRequest({ ...request, budget: missingFieldBudget }, "missing budget field");
+    expectInvalidRequest({ ...request, budget: Object.assign(Object.create({ inheritedBudget: 1 }), request.budget) }, "custom budget prototype");
+
+    let getterCallCount = 0;
+    const accessorBudget = { ...request.budget } as Record<string, unknown>;
+    Object.defineProperty(accessorBudget, "maxWorkUnits", {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        getterCallCount += 1;
+        return request.budget.maxWorkUnits;
+      },
     });
-    expect(malformedBudgetResult).toEqual({
-      ok: false,
-      failure: { kind: "invalid-request", field: "budget" },
-    });
+    expectInvalidRequest({ ...request, budget: accessorBudget }, "accessor budget field");
+    expect(getterCallCount).toBe(0);
   });
+
 });

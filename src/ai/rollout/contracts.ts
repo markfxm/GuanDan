@@ -742,7 +742,8 @@ function createRolloutResultUnchecked(requestInput: unknown, assemblyInput: unkn
   const evidenceRequirements = requestResult.value.evidenceRequirements;
   if (aggregate.effectiveSampleSize < evidenceRequirements.minimumEffectiveSampleSize
     || aggregate.acceptedScenarioCount < evidenceRequirements.minimumAcceptedScenarioCount
-    || aggregate.completedReplicateCount < evidenceRequirements.minimumCompletedReplicateCount) return invalid("aggregateDiagnostics");
+    || aggregate.completedReplicateCount < evidenceRequirements.minimumCompletedReplicateCount
+    || (evidenceRequirements.requireCompleteCoverage && aggregate.completedReplicateCount !== aggregate.expectedCompletedReplicateCount)) return invalid("aggregateDiagnostics");
   return {
     ok: true,
     value: deepFreeze({
@@ -767,7 +768,7 @@ function isCandidateSummary(value: unknown): value is CandidateRolloutSummary {
   }
   if (value.acceptedScenarioCount < 1 || value.replicateCountPerScenario < 1) return false;
   const total = safeProduct([value.acceptedScenarioCount, value.replicateCountPerScenario]);
-  return total !== undefined && value.expectedReplicateCount === total && value.completedReplicateCount <= total;
+  return total !== undefined && value.expectedReplicateCount === total && value.completedReplicateCount === total;
 }
 
 function isAggregateDiagnostics(value: unknown, candidateCount: number): value is RolloutAggregateDiagnostics {
@@ -779,7 +780,7 @@ function isAggregateDiagnostics(value: unknown, candidateCount: number): value i
   const expected = total === undefined ? undefined : safeProduct([candidateCount, total]);
   return total !== undefined
     && expected !== undefined
-    && value.completedReplicateCount <= expected
+    && value.completedReplicateCount === expected
     && value.expectedCompletedReplicateCount === expected;
 }
 
@@ -831,9 +832,9 @@ function clonePublicHistoryEvents(value: unknown): readonly PublicActionEvent[] 
     for (let index = 0; index < value.length; index += 1) {
       const event = getOwnDataProperty(value, String(index));
       if (!isPlainDataGraph(event)) return undefined;
+      if (!isPublicEventSemanticShape(event as PublicActionEvent)) throw new TypeError("EVENT_SCHEMA_INVALID");
       assertFinalizedPublicActionEvent(event);
       verifyPublicActionEventHash(event);
-      if (!isPublicEventSemanticShape(event)) throw new TypeError("EVENT_SCHEMA_INVALID");
       events.push(structuredClone(event) as PublicActionEvent);
     }
   } catch {
