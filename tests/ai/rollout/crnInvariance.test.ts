@@ -208,6 +208,7 @@ describe("D2F keyed CRN invariance and validation", () => {
       ["nonce-abc", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
       ["object-address-abc", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
       ["temporary-counter", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["public-pass-123", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
     ] as const) expect(failure(createUnpairedSemanticKey(eventKind))).toEqual(expected);
   });
 

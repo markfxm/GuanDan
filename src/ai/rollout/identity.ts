@@ -26,7 +26,7 @@ const COORDINATE_KEYS = [
 const EVENT_KIND_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const EXPLICIT_CANDIDATE_TOKEN_PATTERN = /(?:^|[^a-z0-9])candidate(?:id|index|position|[-_:](?:id|index|position|[0-9]+))(?=$|[^a-z0-9])/i;
 const UNSTABLE_EVENT_KIND_PATTERN = /(?:^|-)candidate(?:-|$)|(?:^|-)worker(?:-|$)|(?:^|-)counter(?:-|$)|(?:^|-)index(?:-|$)|(?:^|-)position(?:-|$)|(?:^|-)random(?:-|$)|(?:^|-)nonce(?:-|$)|(?:^|-)temp(?:-|$)|(?:^|-)temporary(?:-|$)|(?:^|-)object(?:-|$)|(?:^|-)address(?:-|$)|(?:^|-)process(?:-|$)|(?:^|-)pid(?:-|$)/;
-const RANDOM_SUFFIX_PATTERN = /-(?:[0-9a-f]{8,}|[a-z0-9]{16,})$/;
+const RANDOM_SUFFIX_PATTERN = /-(?:[0-9]+|[0-9a-f]{8,}|[a-z0-9]{16,})$/;
 
 type CoordinateEnvelope = Readonly<{
   rootIdentity: unknown;
