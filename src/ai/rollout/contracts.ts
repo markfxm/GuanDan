@@ -147,13 +147,27 @@ export type RolloutPolicyDecisionContext = Readonly<{
 
 export type TeamUtility = -3 | -2 | -1 | 1 | 2 | 3;
 
+export type TeamUtilityInput = Readonly<{
+  perspectiveSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+}>;
+
+export type LeafEvaluationInput = Readonly<{
+  perspectiveSeat: PublicSeat;
+  actingSeat: PublicSeat;
+  finishOrder: readonly PublicSeat[];
+  handCounts: Readonly<Record<PublicSeat, number>>;
+}>;
+
 export type TeamUtilityFailure =
+  | { kind: "invalid-perspective-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }
   | { kind: "invalid-finish-order"; reason: "duplicate-seat" | "missing-seat" | "unknown-seat" }
   | { kind: "unsupported-team-pair"; teamSeats: readonly PublicSeat[] };
 
 export type LeafEvaluationFailure =
-  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" }
-  | { kind: "rotation-tie-break-unproven"; evidence: string };
+  | { kind: "invalid-perspective-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }
+  | { kind: "invalid-acting-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" | "finished-seat" }
+  | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" | "non-finite-hand-count" | "fractional-hand-count" | "unsafe-hand-count" | "negative-zero-hand-count" | "unfinished-zero-hand-count" | "missing-hand-count" | "unknown-hand-count" | "finish-hand-count-mismatch" | "terminal-state" };
 
 export type RolloutPolicyFailure =
   | { kind: "no-legal-action"; actingSeat: PublicSeat }
