@@ -545,82 +545,276 @@ declare function canonicalCandidateDecisionAssociationIdentity(
 
 不得保留或实现通用名称 `canonicalDecisionIdentity`；旧名称只可在 migration/prohibition 文本中出现。该 association identity 不得被 `deriveRandomDomain`、`CrnView`、`CrnCoordinate`、random domain、semantic key 或 deterministic keyed value 导入；AST/symbol gate 必须检查此隔离。Task 3 的 CRN 只使用 candidate-free `CrnCoordinate`。
 
-随机坐标唯一为：
+#### Frozen Task 3 interface and allowlist
+
+Task 3 的 exact allowlist 为：
 
 ```text
-root identity
-+ canonical scenario identity
-+ replicate identity
-+ ply/decision ordinal
-+ acting seat
-+ random domain
-+ semantic key
--> deterministic independent stream/value
+src/ai/rollout/crn.ts
+src/ai/rollout/identity.ts
+src/ai/rollout/contracts.ts       # only the exact CRN type narrowing below
+tests/ai/rollout/crnIdentity.test.ts
+tests/ai/rollout/crnInvariance.test.ts
 ```
 
-因此接口只能是候选无关的：
+`contracts.ts` 的最小修订只把 `CanonicalRandomDomainLabel`、`CanonicalRandomDomain`、`CanonicalSemanticKey` 和 validated `CrnCoordinate`/`CrnView.value` 收窄为 branded CRN types；不得改变 Task 1、Task 2 的字段、factory、validator、failure behavior 或 public result behavior。不得修改 `src/ai/rollout/teamUtility.ts`、`src/ai/rollout/leafEvaluation.ts`、任何 Particle production、Room、planning、package、lock 或 config。
+
+三份文档使用以下完全一致、可编译的 TypeScript declarations：
 
 ```ts
-type CrnCoordinate = Readonly<{
-  rootIdentity: string;
-  scenarioIdentity: string;
-  replicateIdentity: string;
+export type CanonicalRandomDomainLabel = string & {
+  readonly __canonicalRandomDomainLabel: unique symbol;
+};
+
+/** 64 lowercase hex characters representing the 32-byte phase-1 digest. */
+export type CanonicalRandomDomain = string & {
+  readonly __canonicalRandomDomainDigest: unique symbol;
+};
+
+export type CanonicalSemanticKey = string & {
+  readonly __canonicalSemanticKey: unique symbol;
+};
+
+export type CrnCoordinate = Readonly<{
+  rootIdentity: RootIdentity;
+  scenarioIdentity: CanonicalScenarioIdentity;
+  replicateIdentity: CanonicalReplicateIdentity;
   ply: number;
   actingSeat: PublicSeat;
-  randomDomain: string;
+  randomDomain: CanonicalRandomDomainLabel;
+}> & {
+  readonly __validatedCrnCoordinate: unique symbol;
+};
+
+export interface CrnView {
+  value(semanticKey: CanonicalSemanticKey): number;
+}
+
+export type CrnFailure =
+  | Readonly<{ kind: "malformed-coordinate-envelope"; field: "coordinate" | "coordinate.rootIdentity" | "coordinate.scenarioIdentity" | "coordinate.replicateIdentity" | "coordinate.ply" | "coordinate.actingSeat" | "coordinate.randomDomain" | "view-input" | "view-input.coordinate" | "view-input.randomDomain" }>
+  | Readonly<{ kind: "invalid-root-identity"; reason: "empty" | "wrong-length" | "uppercase-hex" | "non-hex" }>
+  | Readonly<{ kind: "invalid-scenario-identity"; reason: "empty" | "wrong-length" | "uppercase-hex" | "non-hex" }>
+  | Readonly<{ kind: "invalid-replicate-identity"; reason: "empty" | "wrong-length" | "uppercase-hex" | "non-hex" }>
+  | Readonly<{ kind: "invalid-decision-identity"; reason: "non-integer" | "negative" | "negative-zero" | "unsafe-integer" | "non-finite" }>
+  | Readonly<{ kind: "invalid-acting-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }>
+  | Readonly<{ kind: "invalid-random-domain-label"; reason: "non-string" | "empty" | "too-long" | "non-printable-ascii" | "candidate-data" }>
+  | Readonly<{ kind: "invalid-semantic-key"; reason: "non-string" | "empty" | "too-long" | "non-printable-ascii" | "candidate-data" }>
+  | Readonly<{ kind: "candidate-identity-contamination"; location: "coordinate" | "random-domain-label" | "semantic-key" | "canonical-bytes" | "view-state" | "dependency" }>
+  | Readonly<{ kind: "invalid-unpaired-event-key"; reason: "missing-prefix" | "empty-event-kind" | "invalid-event-kind" | "candidate-data" }>
+  | Readonly<{ kind: "canonical-encoding-failure"; field: "prefix" | "tag" | "length" | "payload" }>
+  | Readonly<{ kind: "arithmetic-range-failure"; field: "ply" | "tlv-length" | "uint53" | "value" }>;
+
+export type CanonicalRandomDomainLabelResult =
+  | Readonly<{ ok: true; value: CanonicalRandomDomainLabel }>
+  | Readonly<{ ok: false; failure: CrnFailure }>;
+
+export type CanonicalSemanticKeyResult =
+  | Readonly<{ ok: true; value: CanonicalSemanticKey }>
+  | Readonly<{ ok: false; failure: CrnFailure }>;
+
+export type CrnCoordinateCreationResult =
+  | Readonly<{ ok: true; value: CrnCoordinate }>
+  | Readonly<{ ok: false; failure: CrnFailure }>;
+
+export type CrnViewCreationResult =
+  | Readonly<{ ok: true; view: CrnView }>
+  | Readonly<{ ok: false; failure: CrnFailure }>;
+
+export type CrnViewInput = Readonly<{
+  coordinate: CrnCoordinate;
+  randomDomain: CanonicalRandomDomain;
 }>;
 
-declare function deriveRandomDomain(coordinate: CrnCoordinate): string;
+export function createCanonicalRandomDomainLabel(
+  input: unknown,
+): CanonicalRandomDomainLabelResult;
 
-type CrnView = Readonly<{
-  value(semanticKey: string): number;
-}>;
+export function createCanonicalSemanticKey(
+  input: unknown,
+): CanonicalSemanticKeyResult;
 
-type RolloutPolicyDecisionContext = Readonly<{
-  replicateIdentity: string;
-  ply: number;
-  actingSeat: PublicSeat;
-}>;
+export function createUnpairedSemanticKey(
+  eventKind: unknown,
+): CanonicalSemanticKeyResult;
 
-type InternalRolloutPolicy = Readonly<{
-  chooseAction(
-    observation: SeatLocalObservation,
-    context: RolloutPolicyDecisionContext,
-    crn: CrnView,
-  ): RolloutPolicyResult;
-}>;
+export function createCrnCoordinate(
+  input: unknown,
+): CrnCoordinateCreationResult;
 
-type InternalRolloutPolicyFactoryResult =
-  | { ok: true; policy: InternalRolloutPolicy }
-  | { ok: false; failure: { kind: "unsupported-policy-id" } };
+export function deriveRandomDomain(
+  coordinate: CrnCoordinate,
+): CanonicalRandomDomain;
 
-declare function createInternalRolloutPolicy(
-  policyId: RolloutPolicyId,
-): InternalRolloutPolicyFactoryResult;
+export function createCrnView(
+  input: unknown,
+): CrnViewCreationResult;
+
+export function canonicalCrnDomainBytes(
+  coordinate: CrnCoordinate,
+): Uint8Array;
+
+export function canonicalCrnValueBytes(
+  randomDomain: CanonicalRandomDomain,
+  semanticKey: CanonicalSemanticKey,
+): Uint8Array;
 ```
 
-`createInternalRolloutPolicy` 只能使用穷尽式 literal mapping 或 exhaustive `switch` 创建仓库内固定、已审查的 policy。它不接受 caller function、class、factory、registry entry、模块路径或动态注册；未知 id 必须 typed-fail 或由穷尽检查成为不可达。`InternalRolloutPolicy` 只能接收 `SeatLocalObservation`、`RolloutPolicyDecisionContext` 和 `CrnView`，不得读取 Room/RoomState、对手完整手牌、`RolloutScenario.privateState`、raw ParticleBank scenario/record/weight/seed、ParticleBank internals/source、HandPlanner、正式 `decideAiAction`、wall clock、`Math.random()`、global mutable state、worker id 或对象地址。
-
-`policyId` 必须进入独立的 evaluation/rollout configuration identity、configuration provenance、`RolloutResult` 或 aggregate diagnostics 中允许公开的 policy provenance，以及 offline/shadow evidence 的 configuration record。它不得进入 `canonicalReplayContextIdentity`、`rootIdentity`、`rootDigest`、ParticleBank snapshot identity、scenario identity、replicate identity、ply/decision identity、acting-seat identity、`randomDomain`、`semanticKey`、`CrnCoordinate` 或 CRN keyed value。root identity 描述同一个动作前游戏事实；`policyId` 描述评估配置，不是游戏事实。相同 root/scenario/replicate 下，不同编译内 policy 必须得到相同 CRN coordinates，以支持后续 policy ablation 和公平对照；`candidateId` 继续不得进入 CRN random coordinate。
-
-`CrnView` 没有共享 `next()` cursor；每次查询使用 semantic key。相同 scenario/replicate/ply/seat/domain/semantic key 在所有 candidate 中返回相同值。policy v1 枚举当前 seat-local legal actions，以 `policy-action:${canonicalActionIdentity(action)}` 查询 keyed value，按 value 降序、canonical action identity 升序选取；共同合法动作因此保留同一优先级。`replicateIdentity` 由 `replicateOrdinal` 的 canonical encoding 产生，改变 replicate 的独立 keyed stream，因此 replicateCount 有实际证据意义。candidate 数组位置和 candidateId 均不进入坐标。
-
-CRN 的 deterministic value 只由下列完整链产生：
+The only valid creation chain is:
 
 ```text
-root identity
-+ canonical scenario identity
-+ replicate identity
-+ ply/decision ordinal
-+ acting seat
-+ random domain
-+ semantic key
--> deterministic keyed value
+raw domain label
+  -> createCanonicalRandomDomainLabel
+  -> CanonicalRandomDomainLabel
+raw semantic key
+  -> createCanonicalSemanticKey / createUnpairedSemanticKey
+  -> CanonicalSemanticKey
+unknown coordinate envelope
+  -> createCrnCoordinate
+  -> CrnCoordinate
+CrnCoordinate
+  -> deriveRandomDomain
+  -> CanonicalRandomDomain (64 lowercase hex digest)
+  -> createCrnView({ coordinate, randomDomain })
+  -> CrnView.value(CanonicalSemanticKey)
 ```
 
-`randomDomain` 和 `semanticKey` 都必须使用 canonical encoding；它们不得包含 candidateId、candidate 数组位置、worker id、对象地址、Map 插入顺序、localeCompare 结果或绝对 seat number。相同坐标重复查询同一 semantic key 明确复用同一个值；需要独立随机事件必须使用不同的 canonical semantic key，碰撞测试必须区分“有意复用”与“意外碰撞”。有对应候选事件的随机事件使用相同 domain/key；candidate 特有且没有可比较对应物的事件不允许偷偷取得独有 random draw：若它能被描述为公共语义事件，使用固定的 `unpaired:<event-kind>` domain 和不含 candidate identity 的状态/ply semantic key；否则返回 typed kernel failure。`CrnView.value` 只返回有限的 normalized value（例如 `[0,1)`），没有 raw seed、seed getter、tape 或 draw cursor；keyed-value 测试必须证明无法反向暴露 raw seed。
+All factory/validation functions return typed failure and never throw. `CrnView.value()` is synchronous, accepts only an already branded key, returns only a finite number, and never returns a failure union. It does not retain caller objects, call accessors, mutate state, record calls, expose bytes/digests/seed/tape/cursor, or use a shared mutable RNG.
+
+`RootIdentity`, `CanonicalScenarioIdentity` and `CanonicalReplicateIdentity` are the existing 64-lowercase-hex string identities. `createCrnCoordinate` requires each to be exactly 64 lowercase hexadecimal characters and encodes each as 32 raw bytes. `ply` is a canonical nonnegative safe integer; `-0`, negative, fractional, unsafe, `NaN` and infinities fail. `PublicSeat` is the existing canonical game identity `0 | 1 | 2 | 3`, encoded as one byte; it is not an array position and is not normalized relative to another seat. Candidate array position, Map order, worker id, object address, `localeCompare` and temporary indices remain forbidden.
+
+#### Domain and semantic-key grammar
+
+`createCanonicalRandomDomainLabel` accepts only a primitive string with 1..128 ASCII bytes, every byte in `0x21..0x7e`. This excludes whitespace, control characters, NUL, Unicode, Unicode surrogates, normalization-dependent text and leading/trailing spaces. `createCanonicalSemanticKey` accepts only a primitive string with 1..256 ASCII bytes using the same byte rule. There is no implicit Unicode normalization or locale conversion.
+
+The only canonical unpaired event key is `unpaired:<event-kind>`, where `<event-kind>` matches the full ASCII grammar `[a-z0-9]+(?:-[a-z0-9]+)*`, is non-empty, contains no candidate id/index/position, and fits the semantic-key byte limit. `createUnpairedSemanticKey` constructs exactly this form; empty, uppercase, whitespace, underscore, slash, colon, random suffix, counter, object address, candidate id and candidate position fail with `invalid-unpaired-event-key`. A candidate-specific event with a comparable counterpart reuses the paired event's domain/key. A candidate-specific event without a comparable counterpart uses `unpaired:<event-kind>` only when the event kind is derived from stable candidate-free public semantics; otherwise the kernel returns its frozen typed failure and does not draw a private random value.
+
+The factories reject forbidden candidate fields before reading values. A raw label/key that is a canonical candidate identity or contains an explicit candidate-id/index/position token returns `candidate-identity-contamination`; the compiler/symbol gate is the authoritative check for candidate identity flowing through a call graph, so this rule is not inferred from arbitrary candidate-free text. No `candidateId`, `CanonicalCandidateDecisionAssociationIdentity` or `canonicalCandidateDecisionAssociationIdentity` may enter any CRN symbol or bytes.
+
+#### Canonical encoding v1
+
+Task 3 uses two domain-separated SHA-256 phases. The existing `sha256Bytes(input: Uint8Array): string` from `src/game/publicEventHash.ts` is reused: it is synchronous, pure TypeScript, browser-compatible, implements standard FIPS 180-4 SHA-256, accepts bytes and returns exactly 64 lowercase hex characters representing a fixed 32-byte digest. `identity.ts` hex-decodes that public result when raw digest bytes are required. No `node:crypto`, `crypto`, Web Crypto async API, third-party dependency or Particle production export is permitted. The existing private `CanonicalWriter` is not reused because it is not exported and uses string/JSON-era semantics; `identity.ts` owns a private `CanonicalByteWriter` with only the TLV operation below and no object enumeration.
+
+Every TLV field is exactly:
+
+```text
+tag:     1 byte unsigned
+length:  4 bytes unsigned big-endian
+payload: exactly length bytes
+```
+
+Tags are unique within each phase. The writer rejects invalid tags, lengths above `0xffffffff`, payload length mismatch, and any non-canonical payload. It never uses bare string concatenation, delimiter-only concatenation, `JSON.stringify`, object/Map enumeration, locale encoding or decimal-string integer encoding.
+
+Phase 1 canonical domain bytes are:
+
+```text
+ASCII("D2F-CRN-DOMAIN-V1")
++ 0x00
++ TLV(0x01, rootIdentity as 32 raw bytes)
++ TLV(0x02, scenarioIdentity as 32 raw bytes)
++ TLV(0x03, replicateIdentity as 32 raw bytes)
++ TLV(0x04, ply as 8-byte unsigned big-endian)
++ TLV(0x05, actingSeat as one byte 0x00..0x03)
++ TLV(0x06, random-domain label as validated ASCII bytes)
+```
+
+`deriveRandomDomain(coordinate)` returns `sha256Bytes(canonicalCrnDomainBytes(coordinate))` as a 64-lowercase-hex `CanonicalRandomDomain` digest. The exact coordinate order and tags are fixed:
+
+| order | tag | field | payload encoding |
+| ---: | ---: | --- | --- |
+| 1 | `0x01` | `rootIdentity` | exactly 64 lowercase hex characters parsed to 32 raw bytes |
+| 2 | `0x02` | `scenarioIdentity` | exactly 64 lowercase hex characters parsed to 32 raw bytes |
+| 3 | `0x03` | `replicateIdentity` | exactly 64 lowercase hex characters parsed to 32 raw bytes |
+| 4 | `0x04` | `ply` | canonical nonnegative safe integer as 8-byte unsigned big-endian |
+| 5 | `0x05` | `actingSeat` | `PublicSeat` as one byte `0x00..0x03` |
+| 6 | `0x06` | `randomDomain` label | validated printable ASCII bytes |
+
+Phase 2 canonical value bytes are:
+
+```text
+ASCII("D2F-CRN-VALUE-V1")
++ 0x00
++ TLV(0x01, domain digest as 32 raw bytes)
++ TLV(0x02, semantic key as validated ASCII bytes)
+```
+
+`canonicalCrnValueBytes` requires a 64-lowercase-hex `CanonicalRandomDomain` digest and a branded key. A value digest is `sha256Bytes(canonicalCrnValueBytes(randomDomain, semanticKey))`. No root material, candidate data, raw bytes, digest, seed, tape or cursor reaches diagnostics.
+
+The fixed high-53 conversion is:
+
+```text
+digest = SHA-256(value canonical bytes)
+uint64 = first 8 digest bytes interpreted unsigned big-endian
+u53 = uint64 >> 11
+value = Number(u53) / 9007199254740992
+```
+
+`9007199254740992` is exactly `2^53`. BigInt may be used only for exact bytes-to-uint64 and right shift; `u53` is then safely converted to Number. The implementation does not use low 53 bits, rounding, epsilon, decimal-string conversion or a path that can produce `1`; it guarantees `Number.isFinite(value)` and `0 <= value < 1`.
+
+#### Failure mapping and atomicity
+
+The `CrnFailure` union above is the only CRN validation failure union. Missing/extra keys, symbol keys, accessors/getters, callback/function values, custom/inherited prototypes, sparse arrays, cycles, malformed coordinate envelopes and thrown reflection traps return `malformed-coordinate-envelope` with the exact field where the envelope failed. Invalid 64-hex identities map to their corresponding `invalid-*-identity`; invalid `ply` maps to `invalid-decision-identity`; invalid seat maps to `invalid-acting-seat`; invalid label/key maps to `invalid-random-domain-label`/`invalid-semantic-key`; bad unpaired grammar maps to `invalid-unpaired-event-key`; TLV/payload construction maps to `canonical-encoding-failure`; safe-integer/length/53-bit overflow maps to `arithmetic-range-failure`; candidate data maps to `candidate-identity-contamination`. No failure contains root material, scenario, candidate, raw bytes, digest, seed, tape or cursor.
+
+Any factory failure returns no partial coordinate, domain, key, view or value. Successful coordinate/key/view graphs are frozen or immutable projections and caller mutation cannot affect replay. `CrnView.value` is a pure function of the frozen coordinate and branded semantic key; repeated `A, B, A`, `A -> B` versus `B -> A`, candidate order, scenario scheduling and worker completion order are bit-identical. Different coordinates or keys need not have mathematically distinct hash values; tests assert different canonical bytes and assert concrete digest/value only for fixed vectors.
+
+#### Frozen known vectors
+
+The following vectors were generated by an independent Node `crypto.createHash("sha256")` oracle. The oracle is documentation-only and is not production code. Both vectors use the same candidate-free coordinate:
+
+```text
+rootIdentity      = 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+scenarioIdentity  = ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100
+replicateIdentity = 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+ply               = 7
+actingSeat        = 2
+randomDomain      = policy-action-v1
+```
+
+Paired event vector:
+
+```text
+semanticKey              = policy-action:play:single:H7-1
+domain canonical bytes  = 4432462d43524e2d444f4d41494e2d563100010000002000112233445566778899aabbccddeeff00112233445566778899aabbccddeeff0200000020ffeeddccbbaa99887766554433221100ffeeddccbbaa9988776655443322110003000000200123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef040000000800000000000000070500000001020600000010706f6c6963792d616374696f6e2d7631
+domain SHA-256          = c87b90a3b86958c2c1528fb5665592eadce5f733559cd5a4bf85559a59cfaf15
+value canonical bytes   = 4432462d43524e2d56414c55452d5631000100000020c87b90a3b86958c2c1528fb5665592eadce5f733559cd5a4bf85559a59cfaf15020000001e706f6c6963792d616374696f6e3a706c61793a73696e676c653a48372d31
+value SHA-256           = 0351802e83a610421ad1681cb92d729197bc31765b11cf72d85d25d10eabf3b8
+first 8 bytes           = 0351802e83a61042
+u53                     = 116754488521922
+JavaScript number       = 0.012962352138537137
+```
+
+合法 unpaired event vector:
+
+```text
+semanticKey              = unpaired:public-pass
+domain canonical bytes  = 4432462d43524e2d444f4d41494e2d563100010000002000112233445566778899aabbccddeeff00112233445566778899aabbccddeeff0200000020ffeeddccbbaa99887766554433221100ffeeddccbbaa9988776655443322110003000000200123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef040000000800000000000000070500000001020600000010706f6c6963792d616374696f6e2d7631
+domain SHA-256          = c87b90a3b86958c2c1528fb5665592eadce5f733559cd5a4bf85559a59cfaf15
+value canonical bytes   = 4432462d43524e2d56414c55452d5631000100000020c87b90a3b86958c2c1528fb5665592eadce5f733559cd5a4bf85559a59cfaf150200000014756e7061697265643a7075626c69632d70617373
+value SHA-256           = 2a564ad3f684e2f5ca38184d2aa0e71bc2157e2658e3429719d2e190c2747283
+first 8 bytes           = 2a564ad3f684e2f5
+u53                     = 1489603550695580
+JavaScript number       = 0.16537921595456195
+```
+
+Boundary-separation vectors use the same prefix and TLV rules. Their value canonical bytes are distinct for `("ab", "c")` versus `("a", "bc")`, and for `randomDomain="x", semanticKey="y:z"` versus `randomDomain="x:y", semanticKey="z"`; the tests assert byte inequality, not hash uniqueness. The independent oracle produced:
+
+```text
+("ab", "c")   value bytes = 4432462d43524e2d56414c55452d56310001000000203d1571b8edbf823789c3bb440b98388d2448cb8b15b56025a8ba2d04e4d25e96020000000163
+("a", "bc")   value bytes = 4432462d43524e2d56414c55452d56310001000000209c5bc616973ab50bb7ae1ea133dc9333e41d916c2bad2f1ee1fa54d4ff9f389f02000000026263
+("x", "y:z")   value bytes = 4432462d43524e2d56414c55452d56310001000000207ccad33be63bbbe2df49bf4529a7ff06a1288a1debaeafca4dee1aa083f364cb0200000003793a7a
+("x:y", "z")   value bytes = 4432462d43524e2d56414c55452d5631000100000020f65c7cf19deccc6adbaee964af36d06eb9dcbc08dad9a6621314fb385f4ed5d302000000017a
+```
 
 固定的 `d2f-lightweight-v1` policy 只接收当前 acting seat 的 `SeatLocalObservation`、`RolloutPolicyDecisionContext` 和 `CrnView`：自己的 hand、公开 history、public hand counts、公开 last play、公开 finish order 和 game rank。不得读取 Room、原始对手手牌、其他座位的完整 privateState 或 ParticleScenario。
+
+#### Task 3 RED/GREEN test gate
+
+Task 3 RED 只能先创建 `crnIdentity.test.ts` 与 `crnInvariance.test.ts`，并且必须被收集且至少一个行为断言因 CRN production entry 尚不存在而失败；0 tests collected、module-resolution failure 或 fixture failure 不是有效 RED。GREEN 必须使用同一条 focused command：
+
+```text
+npx vitest run tests/ai/rollout/crnIdentity.test.ts tests/ai/rollout/crnInvariance.test.ts --exclude "**/.worktrees/**" --reporter=verbose
+```
+
+两组测试必须覆盖 known bytes/digests/high-53 values、repeated-key stability、A→B→A 与逆序调用不变、等价独立 view、candidate/scenario/worker completion-order 不变、root/scenario/replicate/ply/acting-seat/domain/key identity 变化、paired candidate-independent equal value、合法 unpaired grammar、candidateId structural exclusion、无共享 cursor/tape、tuple boundary、hostile input、no throw/no partial/no secret diagnostics 和 Node 22/browser determinism。不得把不同 hash 必然不同作为数学断言，只断言 canonical bytes 不同并对固定 vectors 断言具体 digest/value；不得使用 `skip`、`only` 或 `todo`。
 
 ### 3.4 Team Utility 与 leaf evaluation
 
