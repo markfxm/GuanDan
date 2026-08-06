@@ -173,6 +173,8 @@ export type CanonicalSemanticKey = string & {
   readonly __canonicalSemanticKey: unique symbol;
 };
 
+declare const validatedCrnCoordinateBrand: unique symbol;
+
 export type CrnCoordinate = Readonly<{
   rootIdentity: RootIdentity;
   scenarioIdentity: CanonicalScenarioIdentity;
@@ -181,7 +183,7 @@ export type CrnCoordinate = Readonly<{
   actingSeat: PublicSeat;
   randomDomain: CanonicalRandomDomainLabel;
 }> & {
-  readonly __validatedCrnCoordinate: unique symbol;
+  readonly [validatedCrnCoordinateBrand]: true;
 };
 
 export interface CrnView {
@@ -995,6 +997,7 @@ The complete Task 3 code/test allowlist is exactly:
 src/ai/rollout/crn.ts
 src/ai/rollout/identity.ts
 src/ai/rollout/contracts.ts       # only the exact CRN type narrowing below
+tests/ai/rollout/particleBankRolloutBoundary.test.ts  # only the existing Compiler API Gate remediation
 tests/ai/rollout/crnIdentity.test.ts
 tests/ai/rollout/crnInvariance.test.ts
 ~~~
@@ -1038,15 +1041,104 @@ export type CrnViewInput = Readonly<{
   randomDomain: CanonicalRandomDomain;
 }>;
 
-export function createCanonicalRandomDomainLabel(input: unknown): CanonicalRandomDomainLabelResult;
-export function createCanonicalSemanticKey(input: unknown): CanonicalSemanticKeyResult;
-export function createUnpairedSemanticKey(eventKind: unknown): CanonicalSemanticKeyResult;
-export function createCrnCoordinate(input: unknown): CrnCoordinateCreationResult;
-export function deriveRandomDomain(coordinate: CrnCoordinate): CanonicalRandomDomain;
-export function createCrnView(input: unknown): CrnViewCreationResult;
-export function canonicalCrnDomainBytes(coordinate: CrnCoordinate): Uint8Array;
-export function canonicalCrnValueBytes(randomDomain: CanonicalRandomDomain, semanticKey: CanonicalSemanticKey): Uint8Array;
+export function createCanonicalRandomDomainLabel(
+  input: unknown,
+): CanonicalRandomDomainLabelResult;
+
+export function createCanonicalSemanticKey(
+  input: unknown,
+): CanonicalSemanticKeyResult;
+
+export function createUnpairedSemanticKey(
+  eventKind: unknown,
+): CanonicalSemanticKeyResult;
+
+export function createCrnCoordinate(
+  input: unknown,
+): CrnCoordinateCreationResult;
+
+export function deriveRandomDomain(
+  coordinate: CrnCoordinate,
+): CanonicalRandomDomain;
+
+export function createCrnView(
+  input: unknown,
+): CrnViewCreationResult;
+
+export function canonicalCrnDomainBytes(
+  coordinate: CrnCoordinate,
+): Uint8Array;
+
+export function canonicalCrnValueBytes(
+  randomDomain: CanonicalRandomDomain,
+  semanticKey: CanonicalSemanticKey,
+): Uint8Array;
 ~~~
+
+### CrnCoordinate brand and runtime shape compatibility freeze
+
+The `validatedCrnCoordinateBrand` declaration is module-private: it is declared in
+`src/ai/rollout/contracts.ts` without `export`, is not re-exported by a barrel, and has no public
+brand factory. Callers cannot import the symbol or construct the brand through a normal runtime
+property. The brand is a compile-time-only phantom property; it is not a string field and must not
+be written as `__validatedCrnCoordinate` or any other runtime key.
+
+The next code round assigns one responsibility to each allowlisted path: `contracts.ts` adds only
+the module-private phantom brand; `identity.ts` performs the internal `CrnCoordinate` narrowing
+only after validation, copying and freezing; `crn.ts` changes only if type adaptation is required
+and never changes the algorithm or known vectors; `particleBankRolloutBoundary.test.ts` corrects
+the existing Compiler API Gate; and `crnIdentity.test.ts`/`crnInvariance.test.ts` verify
+compile-time brand use, six runtime keys and known-vector invariance. Task 1/2 production behavior
+and interfaces remain unchanged.
+
+`createCrnCoordinate` must validate the complete unknown envelope, copy the six validated values,
+freeze the resulting plain data object, and only then internally narrow that object to
+`CrnCoordinate`. A successful runtime coordinate has exactly these six own string keys, in this
+order:
+
+~~~text
+rootIdentity
+scenarioIdentity
+replicateIdentity
+ply
+actingSeat
+randomDomain
+~~~
+
+`Reflect.ownKeys(coordinate)` must equal those six keys; it must contain no brand symbol or seventh
+key. The object has no accessor, custom prototype, enumerable brand, inherited coordinate field or
+mutable nested value. The brand is absent from spread, clone, serialization, `canonicalCrnDomainBytes`,
+value bytes, both SHA-256 digests, `CrnView` state and diagnostics.
+
+The old Compiler API Gate in
+`tests/ai/rollout/particleBankRolloutBoundary.test.ts` currently calls
+`checker.getDeclaredTypeOfSymbol(...).getProperties().map(symbol => symbol.name)` and requires
+exactly the six string names above. That is the confirmed compatibility conflict: adding a
+string-named brand makes the old assertion observe seven properties. The next code remediation
+must replace the meaning of that assertion, not weaken it to “at least six”. The corrected Gate
+must prove all of the following independently:
+
+1. The declared `CrnCoordinate` has exactly six public/runtime string-named data fields with the
+   names and order above.
+2. The declared type contains the one computed property keyed by the module-private
+   `unique symbol` `validatedCrnCoordinateBrand`, with no other string, number or symbol property.
+3. TypeScript Compiler API symbol resolution proves `validatedCrnCoordinateBrand` is not exported;
+   a text-only search or a string-named phantom field is not sufficient.
+4. A successful `createCrnCoordinate` result has exactly six string keys at runtime, is frozen and
+   has no accessor or custom prototype.
+
+The brand is therefore required for factory-validated compile-time use but contributes no runtime
+field and no CRN identity material. The candidate-exclusion AST/symbol Gate remains unchanged and
+must still reject `candidateId`, `CanonicalCandidateDecisionAssociationIdentity`,
+`canonicalCandidateDecisionAssociationIdentity`, candidate array position, worker identity,
+completion order, mutable counters, object address and random suffixes.
+
+The next code round has a valid RED/GREEN sequence. RED must fail because the current unbranded
+`CrnCoordinate` lacks the brand-presence assertion; adding the brand without correcting the old
+six-property Gate must fail that old Gate with the observed seventh-property result. Neither
+module resolution, a missing fixture nor zero collected tests is valid RED. GREEN must pass the
+corrected brand/runtime Gate and prove that both frozen known vectors retain their existing
+canonical bytes, SHA-256 digests, `u53` values and JavaScript number literals.
 
 The creation chain is fixed and has no alternate seed path:
 
