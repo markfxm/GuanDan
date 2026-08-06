@@ -184,12 +184,14 @@ describe("D2F keyed CRN invariance and validation", () => {
       [" ", { kind: "invalid-random-domain-label", reason: "non-printable-ascii" }],
       ["a".repeat(129), { kind: "invalid-random-domain-label", reason: "too-long" }],
       ["é", { kind: "invalid-random-domain-label", reason: "non-printable-ascii" }],
+      ["policy:candidateId:candidate-a", { kind: "candidate-identity-contamination", location: "random-domain-label" }],
     ] as const) expect(failure(createCanonicalRandomDomainLabel(input))).toEqual(expected);
 
     for (const [input, expected] of [
       ["", { kind: "invalid-semantic-key", reason: "empty" }],
       ["\u0000", { kind: "invalid-semantic-key", reason: "non-printable-ascii" }],
       ["a".repeat(257), { kind: "invalid-semantic-key", reason: "too-long" }],
+      ["policy-action:candidate-index:0", { kind: "candidate-identity-contamination", location: "semantic-key" }],
     ] as const) expect(failure(createCanonicalSemanticKey(input))).toEqual(expected);
 
     for (const [eventKind, expected] of [
@@ -201,7 +203,18 @@ describe("D2F keyed CRN invariance and validation", () => {
       ["worker-1", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
       ["counter-2", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
       ["index-3", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["candidate-id", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["random-suffix", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["nonce-abc", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["object-address-abc", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["temporary-counter", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
     ] as const) expect(failure(createUnpairedSemanticKey(eventKind))).toEqual(expected);
+  });
+
+  test("rejects a digest unrelated to the validated coordinate", () => {
+    const current = coordinate();
+    const result = createCrnView({ coordinate: current, randomDomain: "00".repeat(32) as CanonicalRandomDomain });
+    expect(result).toEqual({ ok: false, failure: { kind: "canonical-encoding-failure", field: "payload" } });
   });
 
   test.each([

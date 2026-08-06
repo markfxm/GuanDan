@@ -24,7 +24,9 @@ const COORDINATE_KEYS = [
   "randomDomain",
 ] as const;
 const EVENT_KIND_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const UNSTABLE_EVENT_KIND_PATTERN = /^(?:candidate|worker|counter|index)-(?:id|index|position|[0-9]+)$/;
+const EXPLICIT_CANDIDATE_TOKEN_PATTERN = /(?:^|[^a-z0-9])candidate(?:id|index|position|[-_:](?:id|index|position|[0-9]+))(?=$|[^a-z0-9])/i;
+const UNSTABLE_EVENT_KIND_PATTERN = /(?:^|-)candidate(?:-|$)|(?:^|-)worker(?:-|$)|(?:^|-)counter(?:-|$)|(?:^|-)index(?:-|$)|(?:^|-)position(?:-|$)|(?:^|-)random(?:-|$)|(?:^|-)nonce(?:-|$)|(?:^|-)temp(?:-|$)|(?:^|-)temporary(?:-|$)|(?:^|-)object(?:-|$)|(?:^|-)address(?:-|$)|(?:^|-)process(?:-|$)|(?:^|-)pid(?:-|$)/;
+const RANDOM_SUFFIX_PATTERN = /-(?:[0-9a-f]{8,}|[a-z0-9]{16,})$/;
 
 type CoordinateEnvelope = Readonly<{
   rootIdentity: unknown;
@@ -58,6 +60,9 @@ function validateAsciiString(
   kind: "random-domain-label" | "semantic-key",
 ): string | CrnFailure {
   if (typeof input !== "string") return { kind: `invalid-${kind}`, reason: "non-string" } as CrnFailure;
+  if (EXPLICIT_CANDIDATE_TOKEN_PATTERN.test(input)) {
+    return { kind: "candidate-identity-contamination", location: kind === "random-domain-label" ? "random-domain-label" : "semantic-key" };
+  }
   if (input.length === 0) return { kind: `invalid-${kind}`, reason: "empty" } as CrnFailure;
   if (!isPrintableAscii(input)) return { kind: `invalid-${kind}`, reason: "non-printable-ascii" } as CrnFailure;
   if (input.length > maximumBytes) return { kind: `invalid-${kind}`, reason: "too-long" } as CrnFailure;
@@ -83,7 +88,7 @@ export function createUnpairedSemanticKey(eventKind: unknown): CanonicalSemantic
       reason: eventKind === "" ? "empty-event-kind" : "invalid-event-kind",
     });
   }
-  if (UNSTABLE_EVENT_KIND_PATTERN.test(eventKind)) {
+  if (UNSTABLE_EVENT_KIND_PATTERN.test(eventKind) || RANDOM_SUFFIX_PATTERN.test(eventKind)) {
     return failed({ kind: "invalid-unpaired-event-key", reason: "candidate-data" });
   }
   if (!isPrintableAscii(eventKind) || !EVENT_KIND_PATTERN.test(eventKind)) {

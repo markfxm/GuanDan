@@ -9,6 +9,7 @@ import type {
 import {
   canonicalCrnValueBytes,
   createCrnCoordinate,
+  deriveRandomDomain,
 } from "./identity";
 
 type ViewEnvelope = Readonly<{
@@ -74,6 +75,9 @@ export function createCrnView(input: unknown): CrnViewCreationResult {
   const coordinate = createCrnCoordinate(envelope.coordinate);
   if (!coordinate.ok) return coordinate;
   if (!isCanonicalDigest(envelope.randomDomain)) {
+    return failed({ kind: "canonical-encoding-failure", field: "payload" });
+  }
+  if (deriveRandomDomain(coordinate.value) !== envelope.randomDomain) {
     return failed({ kind: "canonical-encoding-failure", field: "payload" });
   }
   const randomDomain = envelope.randomDomain;
