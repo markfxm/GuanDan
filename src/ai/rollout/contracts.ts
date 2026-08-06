@@ -16,8 +16,15 @@ export type CanonicalCandidateIdentity = string;
 export type CanonicalScenarioIdentity = string;
 export type CanonicalReplicateIdentity = string;
 export type CanonicalCandidateDecisionAssociationIdentity = string;
-export type CanonicalRandomDomain = string;
-export type CanonicalSemanticKey = string;
+export type CanonicalRandomDomainLabel = string & {
+  readonly __canonicalRandomDomainLabel: unique symbol;
+};
+export type CanonicalRandomDomain = string & {
+  readonly __canonicalRandomDomainDigest: unique symbol;
+};
+export type CanonicalSemanticKey = string & {
+  readonly __canonicalSemanticKey: unique symbol;
+};
 export type RootIdentity = string;
 export type RootDigest = string;
 export type RolloutReplayContextIdentity = string;
@@ -129,15 +136,48 @@ export type RolloutReplicateInput = Readonly<{
 }>;
 
 export type CrnCoordinate = Readonly<{
-  rootIdentity: string;
-  scenarioIdentity: string;
-  replicateIdentity: string;
+  rootIdentity: RootIdentity;
+  scenarioIdentity: CanonicalScenarioIdentity;
+  replicateIdentity: CanonicalReplicateIdentity;
   ply: number;
   actingSeat: PublicSeat;
-  randomDomain: string;
+  randomDomain: CanonicalRandomDomainLabel;
 }>;
 
-export type CrnView = Readonly<{ value(semanticKey: string): number }>;
+export interface CrnView {
+  value(semanticKey: CanonicalSemanticKey): number;
+}
+
+export type CrnFailure =
+  | Readonly<{ kind: "malformed-coordinate-envelope"; field: "coordinate" | "coordinate.rootIdentity" | "coordinate.scenarioIdentity" | "coordinate.replicateIdentity" | "coordinate.ply" | "coordinate.actingSeat" | "coordinate.randomDomain" | "view-input" | "view-input.coordinate" | "view-input.randomDomain" }>
+  | Readonly<{ kind: "invalid-root-identity"; reason: "empty" | "wrong-length" | "uppercase-hex" | "non-hex" }>
+  | Readonly<{ kind: "invalid-scenario-identity"; reason: "empty" | "wrong-length" | "uppercase-hex" | "non-hex" }>
+  | Readonly<{ kind: "invalid-replicate-identity"; reason: "empty" | "wrong-length" | "uppercase-hex" | "non-hex" }>
+  | Readonly<{ kind: "invalid-decision-identity"; reason: "non-integer" | "negative" | "negative-zero" | "unsafe-integer" | "non-finite" }>
+  | Readonly<{ kind: "invalid-acting-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }>
+  | Readonly<{ kind: "invalid-random-domain-label"; reason: "non-string" | "empty" | "too-long" | "non-printable-ascii" | "candidate-data" }>
+  | Readonly<{ kind: "invalid-semantic-key"; reason: "non-string" | "empty" | "too-long" | "non-printable-ascii" | "candidate-data" }>
+  | Readonly<{ kind: "candidate-identity-contamination"; location: "coordinate" | "random-domain-label" | "semantic-key" | "canonical-bytes" | "view-state" | "dependency" }>
+  | Readonly<{ kind: "invalid-unpaired-event-key"; reason: "missing-prefix" | "empty-event-kind" | "invalid-event-kind" | "candidate-data" }>
+  | Readonly<{ kind: "canonical-encoding-failure"; field: "prefix" | "tag" | "length" | "payload" }>
+  | Readonly<{ kind: "arithmetic-range-failure"; field: "ply" | "tlv-length" | "uint53" | "value" }>;
+
+export type CanonicalRandomDomainLabelResult =
+  | Readonly<{ ok: true; value: CanonicalRandomDomainLabel }>
+  | Readonly<{ ok: false; failure: CrnFailure }>;
+export type CanonicalSemanticKeyResult =
+  | Readonly<{ ok: true; value: CanonicalSemanticKey }>
+  | Readonly<{ ok: false; failure: CrnFailure }>;
+export type CrnCoordinateCreationResult =
+  | Readonly<{ ok: true; value: CrnCoordinate }>
+  | Readonly<{ ok: false; failure: CrnFailure }>;
+export type CrnViewCreationResult =
+  | Readonly<{ ok: true; view: CrnView }>
+  | Readonly<{ ok: false; failure: CrnFailure }>;
+export type CrnViewInput = Readonly<{
+  coordinate: CrnCoordinate;
+  randomDomain: CanonicalRandomDomain;
+}>;
 
 export type RolloutPolicyDecisionContext = Readonly<{
   replicateIdentity: string;
