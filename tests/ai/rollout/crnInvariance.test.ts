@@ -292,6 +292,65 @@ describe("D2F keyed CRN invariance and validation", () => {
     expect(Number.isFinite(valueFromDigest("ff".repeat(32)))).toBe(true);
   });
 
+  test("requires a private unique-symbol coordinate brand without a runtime field", () => {
+    const current = coordinate();
+    const runtimeKeys = [
+      "rootIdentity",
+      "scenarioIdentity",
+      "replicateIdentity",
+      "ply",
+      "actingSeat",
+      "randomDomain",
+    ];
+    expect(Reflect.ownKeys(current)).toEqual(runtimeKeys);
+    expect(Object.getOwnPropertySymbols(current)).toEqual([]);
+    expect(Object.isFrozen(current)).toBe(true);
+
+    const contractsFile = resolve(__dirname, "../../../src/ai/rollout/contracts.ts");
+    const program = ts.createProgram([contractsFile], {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
+      strict: true,
+    });
+    const source = program.getSourceFile(contractsFile);
+    if (source === undefined) throw new Error("contracts source missing");
+    const checker = program.getTypeChecker();
+    const moduleSymbol = checker.getSymbolAtLocation(source);
+    if (moduleSymbol === undefined) throw new Error("contracts module symbol missing");
+    const coordinateExport = checker.getExportsOfModule(moduleSymbol).find((symbol) => symbol.name === "CrnCoordinate");
+    if (coordinateExport === undefined) throw new Error("CrnCoordinate export missing");
+
+    const coordinateType = checker.getDeclaredTypeOfSymbol(coordinateExport);
+    const properties = coordinateType.getProperties();
+    const computedProperties = properties.filter((property) => property.declarations?.some((declaration) => (
+      ts.isPropertySignature(declaration) && ts.isComputedPropertyName(declaration.name)
+    )));
+    const publicProperties = properties.filter((property) => !computedProperties.includes(property));
+    expect(publicProperties.map((property) => property.name)).toEqual(runtimeKeys);
+    expect(computedProperties).toHaveLength(1);
+
+    const brandProperty = computedProperties[0]!;
+    const brandDeclaration = brandProperty.declarations?.find((declaration): declaration is ts.PropertySignature => (
+      ts.isPropertySignature(declaration) && ts.isComputedPropertyName(declaration.name)
+    ));
+    if (brandDeclaration === undefined || !ts.isComputedPropertyName(brandDeclaration.name)) {
+      throw new Error("computed coordinate brand declaration missing");
+    }
+    const brandSymbol = checker.getSymbolAtLocation(brandDeclaration.name.expression);
+    if (brandSymbol === undefined) throw new Error("coordinate brand symbol missing");
+    const brandType = checker.getTypeOfSymbolAtLocation(brandSymbol, brandDeclaration.name.expression);
+    expect((brandType.flags & ts.TypeFlags.UniqueESSymbol) !== 0).toBe(true);
+    expect(checker.typeToString(checker.getTypeOfSymbolAtLocation(brandProperty, brandDeclaration))).toBe("true");
+    const brandVariable = brandSymbol.declarations?.find((declaration): declaration is ts.VariableDeclaration => ts.isVariableDeclaration(declaration));
+    if (brandVariable === undefined || !ts.isVariableStatement(brandVariable.parent.parent)) {
+      throw new Error("coordinate brand variable declaration missing");
+    }
+    expect(brandVariable.parent.parent.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false).toBe(false);
+    const exportedSymbols = new Set(checker.getExportsOfModule(moduleSymbol));
+    expect(exportedSymbols.has(brandSymbol)).toBe(false);
+  });
+
   test("uses Compiler API symbol resolution for the candidate exclusion gate", () => {
     const root = resolve(__dirname, "../../../src/ai/rollout");
     const files = [resolve(root, "identity.ts"), resolve(root, "crn.ts")];

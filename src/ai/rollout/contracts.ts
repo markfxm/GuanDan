@@ -135,6 +135,8 @@ export type RolloutReplicateInput = Readonly<{
   validatedBudget: ValidatedRolloutBudget;
 }>;
 
+declare const validatedCrnCoordinateBrand: unique symbol;
+
 export type CrnCoordinate = Readonly<{
   rootIdentity: RootIdentity;
   scenarioIdentity: CanonicalScenarioIdentity;
@@ -142,7 +144,9 @@ export type CrnCoordinate = Readonly<{
   ply: number;
   actingSeat: PublicSeat;
   randomDomain: CanonicalRandomDomainLabel;
-}>;
+}> & {
+  readonly [validatedCrnCoordinateBrand]: true;
+};
 
 export interface CrnView {
   value(semanticKey: CanonicalSemanticKey): number;

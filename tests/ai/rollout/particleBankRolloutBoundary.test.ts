@@ -32,6 +32,7 @@ import {
 } from "../../../src/ai/rollout/contracts";
 import * as rolloutContracts from "../../../src/ai/rollout/contracts";
 import { createParticleScenarioSource } from "../../../src/ai/rollout/particleScenarioSource";
+import { canonicalCrnDomainBytes, createCrnCoordinate } from "../../../src/ai/rollout/identity";
 import type {
   RolloutAction,
   RolloutCandidate,
@@ -2549,9 +2550,51 @@ describe("D2F ParticleBank bridge", () => {
     const crnCoordinateExport = contractsExports.find((symbol) => symbol.name === "CrnCoordinate");
     if (crnCoordinateExport === undefined) throw new Error("CRN_COORDINATE_SYMBOL_MISSING");
     const crnCoordinateSymbol: ts.Symbol = crnCoordinateExport;
-    const crnMembers = checker.getDeclaredTypeOfSymbol(resolveSymbol(crnCoordinateSymbol)).getProperties().map((symbol) => symbol.name);
-    expect(crnMembers).toEqual(["rootIdentity", "scenarioIdentity", "replicateIdentity", "ply", "actingSeat", "randomDomain"]);
-    expect(crnMembers).not.toContain("candidateIdentity");
+    const crnProperties = checker.getDeclaredTypeOfSymbol(resolveSymbol(crnCoordinateSymbol)).getProperties();
+    const computedCrnProperties = crnProperties.filter((property) => property.declarations?.some((declaration) => (
+      ts.isPropertySignature(declaration) && ts.isComputedPropertyName(declaration.name)
+    )));
+    const publicCrnProperties = crnProperties.filter((property) => !computedCrnProperties.includes(property));
+    expect(publicCrnProperties.map((property) => property.name)).toEqual(["rootIdentity", "scenarioIdentity", "replicateIdentity", "ply", "actingSeat", "randomDomain"]);
+    expect(publicCrnProperties.some((property) => property.name === "candidateIdentity")).toBe(false);
+    expect(computedCrnProperties).toHaveLength(1);
+    const brandProperty = computedCrnProperties[0]!;
+    const brandDeclaration = brandProperty.declarations?.find((declaration): declaration is ts.PropertySignature => (
+      ts.isPropertySignature(declaration) && ts.isComputedPropertyName(declaration.name)
+    ));
+    if (brandDeclaration === undefined || !ts.isComputedPropertyName(brandDeclaration.name)) throw new Error("CRN_BRAND_DECLARATION_MISSING");
+    const brandSymbol = checker.getSymbolAtLocation(brandDeclaration.name.expression);
+    if (brandSymbol === undefined) throw new Error("CRN_BRAND_SYMBOL_MISSING");
+    const brandType = checker.getTypeOfSymbolAtLocation(brandSymbol, brandDeclaration.name.expression);
+    expect((brandType.flags & ts.TypeFlags.UniqueESSymbol) !== 0).toBe(true);
+    expect(checker.typeToString(checker.getTypeOfSymbolAtLocation(brandProperty, brandDeclaration))).toBe("true");
+    const brandVariable = brandSymbol.declarations?.find((declaration): declaration is ts.VariableDeclaration => ts.isVariableDeclaration(declaration));
+    if (brandVariable === undefined || !ts.isVariableStatement(brandVariable.parent.parent)) throw new Error("CRN_BRAND_VARIABLE_MISSING");
+    expect(brandVariable.parent.parent.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false).toBe(false);
+    expect(checker.getExportsOfModule(contractsModule).some((symbol) => resolveSymbol(symbol) === resolveSymbol(brandSymbol))).toBe(false);
+
+    const runtimeCoordinate = createCrnCoordinate({
+      rootIdentity: "0".repeat(64),
+      scenarioIdentity: "1".repeat(64),
+      replicateIdentity: "2".repeat(64),
+      ply: 0,
+      actingSeat: 0,
+      randomDomain: "compiler-gate",
+    });
+    expect(runtimeCoordinate.ok).toBe(true);
+    if (!runtimeCoordinate.ok) return;
+    expect(Reflect.ownKeys(runtimeCoordinate.value)).toEqual([
+      "rootIdentity",
+      "scenarioIdentity",
+      "replicateIdentity",
+      "ply",
+      "actingSeat",
+      "randomDomain",
+    ]);
+    expect(Object.getOwnPropertySymbols(runtimeCoordinate.value)).toEqual([]);
+    expect(Object.isFrozen(runtimeCoordinate.value)).toBe(true);
+    expect(Object.getPrototypeOf(runtimeCoordinate.value)).toBe(Object.prototype);
+    expect(new TextDecoder().decode(canonicalCrnDomainBytes(runtimeCoordinate.value))).not.toContain("validatedCrnCoordinateBrand");
     const sourceFilePath = sourcePath(sourceFile);
     const privateSymbols = new Set(checker.getExportsOfModule(privateModule).map(resolveSymbol));
     const bridgeSymbols = new Set(checker.getExportsOfModule(bridgeModule).map(resolveSymbol));
