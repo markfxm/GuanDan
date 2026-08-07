@@ -196,9 +196,15 @@ describe("D2F keyed CRN invariance and validation", () => {
 
     for (const [eventKind, expected] of [
       ["", { kind: "invalid-unpaired-event-key", reason: "empty-event-kind" }],
+      ["-phase", { kind: "invalid-unpaired-event-key", reason: "invalid-event-kind" }],
+      ["phase-", { kind: "invalid-unpaired-event-key", reason: "invalid-event-kind" }],
+      ["phase--2", { kind: "invalid-unpaired-event-key", reason: "invalid-event-kind" }],
       ["Public-Pass", { kind: "invalid-unpaired-event-key", reason: "invalid-event-kind" }],
       ["public_pass", { kind: "invalid-unpaired-event-key", reason: "invalid-event-kind" }],
       ["public/pass", { kind: "invalid-unpaired-event-key", reason: "invalid-event-kind" }],
+      ["phase 2", { kind: "invalid-unpaired-event-key", reason: "invalid-event-kind" }],
+      ["phase:2", { kind: "invalid-unpaired-event-key", reason: "invalid-event-kind" }],
+      ["非ASCII", { kind: "invalid-unpaired-event-key", reason: "invalid-event-kind" }],
       ["candidate-0", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
       ["worker-1", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
       ["counter-2", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
@@ -208,8 +214,30 @@ describe("D2F keyed CRN invariance and validation", () => {
       ["nonce-abc", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
       ["object-address-abc", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
       ["temporary-counter", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
-      ["public-pass-123", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["candidate-123", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["worker-2", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["counter-7", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["index-4", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["position-3", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["random-123", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["object-9", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
+      ["temporary-1", { kind: "invalid-unpaired-event-key", reason: "candidate-data" }],
     ] as const) expect(failure(createUnpairedSemanticKey(eventKind))).toEqual(expected);
+  });
+
+  test.each([
+    "a",
+    "phase-2",
+    "round-1",
+    "public-pass",
+    "public-pass-123",
+    "tribute-phase-2",
+    "protocol-v1",
+    "a0-b1-c2",
+  ] as const)("accepts stable grammar-valid numeric event kinds: %s", (eventKind) => {
+    const result = createUnpairedSemanticKey(eventKind);
+    expect(result).toEqual({ ok: true, value: `unpaired:${eventKind}` });
+    expect(Object.isFrozen(result)).toBe(true);
   });
 
   test("rejects a digest unrelated to the validated coordinate", () => {
