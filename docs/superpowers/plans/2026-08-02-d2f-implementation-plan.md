@@ -1234,11 +1234,46 @@ src/ai/rollout/stateConservation.ts
 tests/ai/rollout/policy.test.ts
 tests/ai/rollout/kernel.test.ts
 tests/ai/rollout/rolloutPrivacyAst.test.ts
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
 ~~~
 
 Task 4 rollout kernel MUST NOT call `evaluateNonTerminalLeaf` until the simulated action and every derived finish/trick/turn update have been applied atomically to the isolated rollout state. Frozen call order：应用模拟动作 → 更新手牌数 → 更新 `finishOrder` → 处理 trick/turn 变化 → 验证 stable leaf evaluation state → 调用 `evaluateNonTerminalLeaf`。Task 2 leaf 不接收 public ledger、recent events、pending finish seat、Room、replay state 或 raw scenario；本段只是 Task 4 的后续接口前置条件，本轮不实现 kernel。
 
 ### TDD actions
+
+Task 4 的 isolated private rollout boundary 统一冻结为：
+
+~~~text
+particleBankInternals.ts
+  -> particleBankRolloutAccess.ts
+  -> particleScenarioSource.ts
+  -> kernel.ts isolated state
+  -> seat-local observation
+  -> policy.ts
+~~~
+
+职责固定如下：`particleBankRolloutAccess.ts` 是唯一 ParticleBank internals reader，不进入 public barrel，验证 private records/scenario/weights/ESS 并返回隔离 projection；`particleScenarioSource.ts` 是唯一 private bridge caller，完成 private replay 与 public consistency 二次验证并产生冻结、隔离的 `RolloutScenario`；`kernel.ts` 只能消费 source 已产生的 `RolloutScenario`、`RolloutReplicateInput` 和 isolated `privateState`，不得导入 bridge/internals、读取 ParticleBank handle/WeakMap/raw records、把 private state 传给 policy/diagnostics，且必须先 clone/isolate 再模拟；`policy.ts` 不得获得 `RolloutScenario`、`privateState` 或四座位完整 hands，只能获得当前 acting seat 的 `SeatLocalObservation`、`RolloutPolicyDecisionContext` 和 `CrnView`，不得导入 kernel、particles、Room 或 planning private state。
+
+`tests/ai/rollout/particleBankRolloutBoundary.test.ts` 是本轮新增且仅新增的既有 Gate 修改文件。Gate 使用 TypeScript Compiler API 与 resolved symbols，精确允许 production contract symbol 出现在 `src/ai/rollout/contracts.ts`（声明）、`src/ai/rollout/particleScenarioSource.ts`（producer）和 `src/ai/rollout/kernel.ts`（isolated consumer）；Gate 文件不是 production consumer。consumer allowlist 必须是 exact set，不得用“rollout 目录全部允许”、basename 模糊匹配或文本 grep。Gate 必须继续证明 internals reader/bridge caller 唯一、kernel 只能消费 source 产生的 isolated contract、policy 不能获取 private contract、无 re-export/public barrel 泄漏，并保留 Task 1 的全部既有断言。
+因此 `policy.ts`、`stateConservation.ts`、`aggregation.ts`、`evaluation.ts`、`shadowObserver.ts`、`Room`、`planning` 和 public barrel 均不得直接消费 private scenario 或 isolated private contract；它们不在 exact consumer set。
+
+Task 4 正式七文件 allowlist 为：
+
+~~~text
+src/ai/rollout/policy.ts
+src/ai/rollout/kernel.ts
+src/ai/rollout/stateConservation.ts
+tests/ai/rollout/policy.test.ts
+tests/ai/rollout/kernel.test.ts
+tests/ai/rollout/rolloutPrivacyAst.test.ts
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+~~~
+
+旧 rescue-only 路径 `src/ai/rollout/rolloutPolicy.ts`、`src/ai/rollout/rolloutKernel.ts`、`tests/ai/rollout/rolloutKernel.test.ts` 和 `tests/ai/rollout/rolloutPolicyPrivacy.test.ts` 只可作为历史禁止说明，禁止恢复到正式 source 链。
+
+Task 4 关键接口继续冻结：`createInternalRolloutPolicy(policyId)` 是 exhaustive literal factory，只接受 `"d2f-lightweight-v1"`，拒绝 callback、closure、caller factory、dynamic registry；`policyId` 只进入 provenance/configuration，不进入 CRN coordinate/value。每个模拟决策重新构造 `root + scenario + replicate + ply + acting seat + random domain` 的 `CrnCoordinate`/`CrnView`，不得复用固定 `ply=0` 或 `actingSeat=0` 的 view，`candidateId` 不得进入 CRN。每个 ply 执行 `stable isolated state → acting seat-local observation → createCrnCoordinate → createCrnView → internal policy → apply legal action → update hand counts/finish/trick/turn → conservation check`。
+
+Task 4 的 RED/GREEN 必须覆盖 private boundary、policy factory、CRN ownership、privacy 和 state conservation；private boundary RED 可以由正式 `kernel.ts` 尚不存在或尚未被 exact Gate 识别触发，但不得把模块缺失作为全部行为 RED。policy factory 必须证明旧 `createFixedRolloutPolicy()` 不满足接口；CRN RED 必须用两个 ply 或不同 acting seat 揭示固定 view 的错误配对；privacy RED 必须拒绝 opponent hand、full hands、privateState、raw scenario、callback/factory/registry；state conservation RED 必须包含真实 duplicate/missing card、hand-count mismatch 和 finish mismatch。GREEN 保留所有既有 Task 1 Gate 断言。本轮 docs-only，不实施 Task 4 production 或 tests，Task 5–9 不提前开始。
 
 - [ ] 加入 it("maps the supported policy id to one fixed internal policy")，只调用 `createInternalRolloutPolicy("d2f-lightweight-v1")`，不得传 callback、factory 或 registry。
 - [ ] RED：npx vitest run tests/ai/rollout/policy.test.ts --exclude "**/.worktrees/**" --reporter=verbose；预期为 `InternalRolloutPolicy`/factory 或 keyed policy 不存在。

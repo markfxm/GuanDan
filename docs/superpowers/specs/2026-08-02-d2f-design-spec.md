@@ -1055,6 +1055,49 @@ type RolloutAggregationResult =
 
 所有失败均为真正的 discriminated union，不使用所有 `kind` 共享的模糊 `count?: number`。utility、leaf、policy、kernel、aggregation 在进入下一个阶段前必须检查 `ok`；任何失败都不返回部分排序。
 
+### 3.5.1 Task 4 Private Boundary Reconciliation Freeze
+
+Task 4 的 isolated private rollout boundary 统一冻结为：
+
+~~~text
+particleBankInternals.ts
+  -> particleBankRolloutAccess.ts
+  -> particleScenarioSource.ts
+  -> kernel.ts isolated state
+  -> seat-local observation
+  -> policy.ts
+~~~
+
+职责固定如下：
+
+- `particleBankRolloutAccess.ts` 是唯一读取 ParticleBank internals 的 production reader；它不进入 public barrel，负责 private records/scenario/weights/ESS 验证，并只返回隔离 projection。
+- `particleScenarioSource.ts` 是唯一调用 private bridge 的 production consumer；它完成 private replay 与 public consistency 二次验证，并产生冻结、隔离的 `RolloutScenario`。
+- `kernel.ts` 只能消费 `particleScenarioSource.ts` 已产生的 `RolloutScenario`、`RolloutReplicateInput` 和其中的 isolated `privateState`；它不得导入 `particleBankRolloutAccess.ts` 或 `particleBankInternals.ts`，不得读取 ParticleBank handle、WeakMap 或 raw private records，不得把 private state 传给 policy 或 diagnostics，且必须先 clone/isolate 再执行模拟。
+- `policy.ts` 不得获得 `RolloutScenario`、`privateState` 或四座位完整 hands；它只能获得当前 acting seat 的 `SeatLocalObservation`、`RolloutPolicyDecisionContext` 和 `CrnView`，不得导入 kernel、particles、Room 或 planning private state。
+
+现有 Compiler API Gate 的新语义保持 exact set：`tests/ai/rollout/particleBankRolloutBoundary.test.ts` 使用 TypeScript Compiler API 与 resolved symbols，精确允许 production contract symbol 出现在 `src/ai/rollout/contracts.ts`（声明）、`src/ai/rollout/particleScenarioSource.ts`（producer）和 `src/ai/rollout/kernel.ts`（isolated consumer）；Gate 文件本身不是 production consumer。Gate 不得使用“rollout 目录全部允许”、basename 模糊匹配或文本 grep 替代 symbol resolution。它必须继续证明 internals reader 唯一、bridge consumer 唯一、kernel 只能消费 source 产生的 isolated contract、policy 不能获得 private contract、无 re-export/public barrel 泄漏，并保留 Task 1 的全部既有断言。
+因此 `policy.ts`、`stateConservation.ts`、`aggregation.ts`、`evaluation.ts`、`shadowObserver.ts`、`Room`、`planning` 和 public barrel 均不得直接消费 private scenario 或 isolated private contract；它们不在 exact consumer set。
+
+Task 4 正式 code/test allowlist 精确为七个文件：
+
+~~~text
+src/ai/rollout/policy.ts
+src/ai/rollout/kernel.ts
+src/ai/rollout/stateConservation.ts
+tests/ai/rollout/policy.test.ts
+tests/ai/rollout/kernel.test.ts
+tests/ai/rollout/rolloutPrivacyAst.test.ts
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+~~~
+
+新增且仅新增的既有 Gate 修改文件是 `tests/ai/rollout/particleBankRolloutBoundary.test.ts`。历史 rescue-only 路径 `src/ai/rollout/rolloutPolicy.ts`、`src/ai/rollout/rolloutKernel.ts`、`tests/ai/rollout/rolloutKernel.test.ts` 和 `tests/ai/rollout/rolloutPolicyPrivacy.test.ts` 禁止恢复；它们不属于正式 source 链。
+
+Task 4 关键接口继续冻结：`createInternalRolloutPolicy(policyId)` 是 exhaustive literal factory，只接受 `"d2f-lightweight-v1"`，不接受 callback、closure、caller factory 或 dynamic registry；`policyId` 只进入 provenance/configuration，不进入 CRN coordinate/value。每个模拟决策都重新构造 `root + scenario + replicate + ply + acting seat + random domain` 的 `CrnCoordinate`/`CrnView`，不得复用固定 `ply=0` 或 `actingSeat=0` 的 view，也不得让 `candidateId` 进入 CRN。每个 ply 严格执行：`stable isolated state → acting seat-local observation → createCrnCoordinate → createCrnView → internal policy → apply legal action → update hand counts/finish/trick/turn → conservation check`。
+
+Task 4 RED/GREEN gate 必须先覆盖真实行为失败：private boundary RED（正式 `kernel.ts` 尚不存在或尚未被 exact consumer Gate 识别）；policy factory RED（literal factory 尚不存在，旧 `createFixedRolloutPolicy()` 不满足接口）；CRN ownership RED（两个 ply 或不同 acting seat 的决策能揭示固定 view 的错误配对）；privacy RED（opponent hand、full hands、privateState、raw scenario、callback/factory/registry 均被真实 production 类型、runtime validation 或 Compiler API Gate 拒绝）；state conservation RED（`stateConservation.ts` 尚不存在，且真实 duplicate/missing card、hand-count mismatch、finish mismatch 断言失败）。不能只用模块不存在作为全部行为 RED。GREEN 必须保留这些断言及 Task 1 Gate，且本轮不实施 Task 4 production 或 tests。
+
+Task 4 production/tests 尚未开始；Task 5–9 不提前开始。
+
 ### 3.6 Aggregation、risk 和排序
 
 设 accepted scenario 权重为 `w_s`，每个 candidate 的 replicate 数为 `R`，且 `sum(w_s)=1`。candidate j 的分母固定为：

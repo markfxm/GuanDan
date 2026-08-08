@@ -1316,6 +1316,42 @@ executing caller accessors, and reuses `particleScenarioIdentity`/`validateCanon
 The source keeps its second replay/public-consistency validation and cannot remove it because the bridge
 has become stricter.
 
+## Task 4 Private Boundary Reconciliation Freeze
+
+Task 4 的 isolated private rollout boundary 与 Design Spec、Implementation Plan 统一冻结为：
+
+~~~text
+particleBankInternals.ts
+  -> particleBankRolloutAccess.ts
+  -> particleScenarioSource.ts
+  -> kernel.ts isolated state
+  -> seat-local observation
+  -> policy.ts
+~~~
+
+`particleBankRolloutAccess.ts` 是唯一读取 ParticleBank internals 的 production reader，不进入 public barrel，验证 private records/scenario/weights/ESS 并返回隔离 projection。`particleScenarioSource.ts` 是唯一 private bridge caller，完成 private replay 与 public consistency 二次验证并产生冻结、隔离的 `RolloutScenario`。`kernel.ts` 只能消费 source 已产生的 `RolloutScenario`、`RolloutReplicateInput` 和 isolated `privateState`；不得导入 bridge/internals、读取 ParticleBank handle/WeakMap/raw records、把 private state 传给 policy/diagnostics，且必须先 clone/isolate 再模拟。`policy.ts` 不得获得 `RolloutScenario`、`privateState` 或四座位完整 hands，只能获得当前 acting seat 的 `SeatLocalObservation`、`RolloutPolicyDecisionContext` 和 `CrnView`，不得导入 kernel、particles、Room 或 planning private state。
+
+现有 Compiler API Gate 的 exact consumer 语义由 `tests/ai/rollout/particleBankRolloutBoundary.test.ts` 证明：使用 TypeScript Compiler API 与 resolved symbols，production contract symbol 的合法集合精确为 `src/ai/rollout/contracts.ts`（声明）、`src/ai/rollout/particleScenarioSource.ts`（producer）和 `src/ai/rollout/kernel.ts`（isolated consumer）。Gate 文件不是 production consumer。不得使用“rollout 目录全部允许”、basename 模糊匹配或文本 grep；不得删除既有 Task 1 断言。Gate 必须继续证明唯一 internals reader、唯一 bridge caller、kernel 只消费 source 产生的 isolated contract、policy 无 private contract、无 re-export/public barrel 泄漏。
+因此 `policy.ts`、`stateConservation.ts`、`aggregation.ts`、`evaluation.ts`、`shadowObserver.ts`、`Room`、`planning` 和 public barrel 均不得直接消费 private scenario 或 isolated private contract；它们不在 exact consumer set。
+
+Task 4 正式 code/test allowlist 精确为七个文件：
+
+~~~text
+src/ai/rollout/policy.ts
+src/ai/rollout/kernel.ts
+src/ai/rollout/stateConservation.ts
+tests/ai/rollout/policy.test.ts
+tests/ai/rollout/kernel.test.ts
+tests/ai/rollout/rolloutPrivacyAst.test.ts
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+~~~
+
+新增且仅新增的既有 Gate 文件是 `tests/ai/rollout/particleBankRolloutBoundary.test.ts`。旧 rescue-only 路径 `src/ai/rollout/rolloutPolicy.ts`、`src/ai/rollout/rolloutKernel.ts`、`tests/ai/rollout/rolloutKernel.test.ts` 和 `tests/ai/rollout/rolloutPolicyPrivacy.test.ts` 仅作历史禁止说明，禁止恢复到正式 source 链。
+
+`createInternalRolloutPolicy(policyId)` 继续是 exhaustive literal factory，只接受 `"d2f-lightweight-v1"`，不接受 callback、closure、caller factory 或 dynamic registry；`policyId` 只进入 provenance/configuration，不进入 CRN coordinate/value。每个模拟决策重新构造 `root + scenario + replicate + ply + acting seat + random domain` 的 `CrnCoordinate`/`CrnView`，不得固定 `ply=0` 或 `actingSeat=0`，不得让 `candidateId` 进入 CRN。每个 ply 严格执行 `stable isolated state → acting seat-local observation → createCrnCoordinate → createCrnView → internal policy → apply legal action → update hand counts/finish/trick/turn → conservation check`。
+
+RED/GREEN 必须先覆盖：private boundary RED（正式 `kernel.ts` 缺失或未被 exact Gate 识别）；policy factory RED（旧 `createFixedRolloutPolicy()` 不满足接口）；CRN ownership RED（两个 ply 或不同 acting seat 揭示固定 view 错误配对）；privacy RED（opponent hand、full hands、privateState、raw scenario、callback/factory/registry 被真实类型/runtime/Compiler API Gate 拒绝）；state conservation RED（真实 duplicate/missing card、hand-count mismatch、finish mismatch 失败）。模块缺失不能作为全部行为 RED。GREEN 保留所有既有 Task 1 Gate 断言。本轮不实施 Task 4 production/tests，Task 5–9 不提前开始。
+
 ## 8. Team Utility, leaf, aggregation and ranking gates
 
 ### Team Utility
