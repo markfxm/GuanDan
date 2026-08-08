@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { createDeck, type Card } from "../../../src/engine/cards";
 import type { CardGroup } from "../../../src/engine/groups";
+import { classifyPlay } from "../../../src/game/playRules";
 import { buildPublicGameIdentity, type PublicSeat } from "../../../src/game/publicEvent";
 import { createInitialPublicLedger } from "../../../src/game/publicLedger";
 import { validateRolloutState, type IsolatedRolloutState } from "../../../src/ai/rollout/stateConservation";
@@ -34,6 +35,33 @@ describe("D2F isolated rollout kernel", () => {
     expect(validateRolloutState(makeState())).toEqual({ ok: true });
   });
 
+  test("rejects a forged incomplete card universe", () => {
+    expect(validateRolloutState(makeState({ expectedCardIds: createDeck().slice(0, 4).map((card) => card.id) }))).toEqual({
+      ok: false,
+      failure: { kind: "state-conservation-failed", reason: "missing-card" },
+    });
+  });
+
+  test("uses the canonical 108-card universe for physical-location conservation", () => {
+    const deck = createDeck();
+    const canonicalIds = deck.map((card) => card.id);
+    expect(new Set(canonicalIds).size).toBe(108);
+    expect(canonicalIds).toHaveLength(108);
+    expect(validateRolloutState(makeState())).toEqual({ ok: true });
+
+    const missing = makeState();
+    (missing.publicPlayedCardIds as string[]).splice(0, 1);
+    expect(validateRolloutState(missing)).toEqual({ ok: false, failure: { kind: "state-conservation-failed", reason: "missing-card" } });
+
+    const duplicate = makeState();
+    (duplicate.publicPlayedCardIds as string[]).push(duplicate.publicPlayedCardIds[0]!);
+    expect(validateRolloutState(duplicate)).toEqual({ ok: false, failure: { kind: "state-conservation-failed", reason: "duplicate-card" } });
+
+    const extra = makeState();
+    (extra.publicPlayedCardIds as string[]).push("Unknown-Card-1");
+    expect(validateRolloutState(extra)).toEqual({ ok: false, failure: { kind: "state-conservation-failed", reason: "invalid-shape" } });
+  });
+
   test("rejects duplicate cards with a typed failure", () => {
     const deck = createDeck();
     const state = makeState({ hands: { 0: [deck[0]!], 1: [deck[0]!], 2: [deck[2]!], 3: [deck[3]!] } });
@@ -59,7 +87,6 @@ describe("D2F isolated rollout kernel", () => {
       handCounts: { 0: 0, 1: 1, 2: 1, 3: 1 },
       finishOrder: [0],
       actingSeat: 0,
-      expectedCardIds: deck.slice(0, 4).map((card) => card.id),
     });
     expect(validateRolloutState(state)).toEqual({ ok: false, failure: { kind: "state-conservation-failed", reason: "invalid-turn" } });
   });
@@ -72,7 +99,6 @@ describe("D2F isolated rollout kernel", () => {
       hands: { 0: [], 1: [deck[1]!], 2: [deck[2]!], 3: [deck[3]!] },
       publicPlayedCardIds: [deck[0]!.id],
       handCounts: { 0: 0, 1: 1, 2: 1, 3: 1 },
-      expectedCardIds: deck.slice(0, 4).map((card) => card.id),
     });
     expect(validateRolloutState(unfinished)).toEqual({ ok: false, failure: { kind: "state-conservation-failed", reason: "unfinished-hand-count-mismatch" } });
   });
@@ -103,6 +129,76 @@ describe("D2F isolated rollout kernel", () => {
     expect(input.scenario.privateState).toEqual(before);
   });
 
+  test("accepts a legal pair when action card order differs from finalized event order", () => {
+    const deck = createDeck();
+    const pairCards = [deck[0]!, deck[54]!];
+    const classified = classifyPlay(pairCards, "2");
+    expect(classified?.type).toBe("pair");
+    if (classified === undefined) return;
+    const action: RolloutAction = {
+      type: "play",
+      group: { ...classified, cards: [...classified.cards].reverse() },
+    };
+    const input = makeInput({
+      hands: { 0: pairCards, 1: [deck[1]!], 2: [deck[2]!], 3: [deck[3]!] },
+      candidate: action,
+      maxPliesPerReplicate: 1,
+    });
+    const result = runRolloutReplicate(input, ROOT_IDENTITY);
+    expect(result.ok).toBe(true);
+  });
+
+  test("accepts a legal compound bomb when action card order differs from finalized event order", () => {
+    const deck = createDeck();
+    const bombCards = [deck[0]!, deck[54]!, deck[13]!, deck[67]!];
+    const classified = classifyPlay(bombCards, "2");
+    expect(classified?.type).toBe("bomb");
+    if (classified === undefined) return;
+    const action: RolloutAction = { type: "play", group: { ...classified, cards: [...classified.cards].reverse() } };
+    const result = runRolloutReplicate(makeInput({
+      hands: { 0: bombCards, 1: [deck[1]!], 2: [deck[2]!], 3: [deck[3]!] },
+      candidate: action,
+      maxPliesPerReplicate: 1,
+    }), ROOT_IDENTITY);
+    expect(result.ok).toBe(true);
+  });
+
+  test("rejects duplicate, missing, extra, and foreign action card identities without partial results", () => {
+    const deck = createDeck();
+    const pairCards = [deck[0]!, deck[54]!];
+    const classified = classifyPlay(pairCards, "2");
+    expect(classified).toBeDefined();
+    if (classified === undefined) return;
+    const baseGroup = { ...classified };
+    const invalidGroups = [
+      { ...baseGroup, cards: [deck[0]!, deck[0]!] },
+      { ...baseGroup, cards: [deck[0]!] },
+      { ...baseGroup, cards: [deck[0]!, deck[54]!, deck[1]!] },
+      { ...baseGroup, cards: [deck[0]!, deck[4]!] },
+    ];
+    for (const group of invalidGroups) {
+      const action: RolloutAction = { type: "play", group };
+      const input = makeInput({
+        hands: { 0: pairCards, 1: [deck[1]!], 2: [deck[2]!], 3: [deck[3]!] },
+        candidate: { type: "pass" },
+        maxPliesPerReplicate: 1,
+      });
+      const candidateId = (() => {
+        try { return canonicalActionIdentity(action); } catch { return input.candidate.candidateId; }
+      })();
+      (input as unknown as { candidate: RolloutReplicateInput["candidate"] }).candidate = {
+        candidateId,
+        action,
+        baselineEvaluatorScore: 0,
+      };
+      const before = structuredClone(input.scenario.privateState);
+      const result = runRolloutReplicate(input, ROOT_IDENTITY);
+      expect(result).toEqual({ ok: false, failure: { kind: "simulation-failed", stage: "replay" } });
+      expect(input.scenario.privateState).toEqual(before);
+      expect(result).not.toHaveProperty("utility");
+    }
+  });
+
   test("rejects an illegal root action atomically", () => {
     const deck = createDeck();
     const input = makeInput({ candidate: singleAction(deck[5]!) });
@@ -113,10 +209,23 @@ describe("D2F isolated rollout kernel", () => {
     expect(result).not.toHaveProperty("utility");
   });
 
+  test("discards a next state when post-transition ledger validation fails", () => {
+    const input = makeInput();
+    const ledger = (input.scenario.privateState as Record<string, unknown>).ledger as Record<string, unknown>;
+    ledger.nextEventIndex = Number.NaN;
+    const before = structuredClone(input.scenario.privateState);
+    const result = runRolloutReplicate(input, ROOT_IDENTITY);
+    expect(result).toEqual({ ok: false, failure: { kind: "simulation-failed", stage: "replay" } });
+    expect(input.scenario.privateState).toEqual(before);
+    expect(input.scenario.privateState).not.toHaveProperty("nextState");
+    expect(result).not.toHaveProperty("utility");
+  });
+
   test("evaluates terminal utility immediately after the root action", () => {
     const deck = createDeck();
     const input = makeInput({
       hands: { 0: [deck[0]!], 1: [], 2: [], 3: [] },
+      publicPlayedCardIds: deck.slice(1).map((card) => card.id),
       finishOrder: [1, 2, 3],
       candidate: singleAction(deck[0]!),
       maxPliesPerReplicate: 1,
@@ -130,6 +239,66 @@ describe("D2F isolated rollout kernel", () => {
       utility: -2,
       workUnits: 1,
     });
+  });
+
+  test("returns terminal utility when a root action creates the first three finishers", () => {
+    const deck = createDeck();
+    const input = makeInput({
+      hands: { 0: [deck[0]!], 1: [], 2: [], 3: [deck[3]!] },
+      finishOrder: [1, 2],
+      candidate: singleAction(deck[0]!),
+      maxWorkUnits: 1,
+    });
+    const result = runRolloutReplicate(input, ROOT_IDENTITY);
+    expect(result.ok).toBe(true);
+    expect(result).toHaveProperty("workUnits", 1);
+  });
+
+  test("returns terminal utility when a root action makes the first two finishers partners", () => {
+    const deck = createDeck();
+    const input = makeInput({
+      hands: { 0: [], 1: [deck[1]!], 2: [deck[2]!], 3: [deck[4]!, deck[5]!] },
+      finishOrder: [0],
+      actingSeat: 3,
+      candidate: singleAction(deck[4]!),
+    });
+    const result = runRolloutReplicate(input, ROOT_IDENTITY);
+    expect(result.ok).toBe(true);
+    expect(result).not.toHaveProperty("failure", { kind: "budget-exhausted" });
+  });
+
+  test("returns terminal utility before policy work when a policy action creates the third finisher", () => {
+    const deck = createDeck();
+    const input = makeInput({
+      hands: { 0: [deck[0]!, deck[54]!], 1: [], 2: [], 3: [deck[3]!] },
+      finishOrder: [1, 2],
+      candidate: singleAction(deck[0]!),
+      maxPliesPerReplicate: 4,
+    });
+    const result = runRolloutReplicate(input, ROOT_IDENTITY);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.workUnits).toBe(3);
+  });
+
+  test("projects partner finish orders according to Room completion rules", () => {
+    const deck = createDeck();
+    const first = makeInput({
+      hands: { 0: [], 1: [deck[1]!], 2: [deck[2]!], 3: [deck[3]!] },
+      finishOrder: [0],
+      actingSeat: 2,
+      candidate: singleAction(deck[2]!),
+    });
+    const firstResult = runRolloutReplicate(first, ROOT_IDENTITY);
+    expect(firstResult).toMatchObject({ ok: true, utility: 3 });
+
+    const rotated = makeInput({
+      hands: { 0: [deck[0]!], 1: [], 2: [deck[2]!], 3: [deck[3]!] },
+      finishOrder: [1],
+      actingSeat: 3,
+      candidate: singleAction(deck[3]!),
+    });
+    const rotatedResult = runRolloutReplicate(rotated, ROOT_IDENTITY);
+    expect(rotatedResult).toMatchObject({ ok: true });
   });
 
   test("handles pass and trick clear while conserving the stable state", () => {
@@ -200,6 +369,34 @@ describe("D2F isolated rollout kernel", () => {
     expect(first.view.value(key.value)).not.toBe(nextPly.view.value(key.value));
     expect(first.view.value(key.value)).not.toBe(nextSeat.view.value(key.value));
   });
+
+  test("rejects hostile kernel input graphs before reading values or invoking callbacks", () => {
+    const cases: Array<(input: RolloutReplicateInput, calls: { getters: number; callbacks: number }) => void> = [
+      (input, calls) => Object.defineProperty(input, "candidate", { get: () => { calls.getters += 1; return input.candidate; } }),
+      (input, calls) => Object.defineProperty(input.validatedBudget, "budget", { get: () => { calls.getters += 1; return input.validatedBudget.budget; } }),
+      (input, calls) => Object.defineProperty((input.scenario.privateState as Record<string, unknown>).hands as object, "0", { get: () => { calls.getters += 1; return []; } }),
+      (input) => Object.defineProperty(input, Symbol("hostile"), { value: 1 }),
+      (input) => Object.setPrototypeOf(input.scenario.privateState, { inherited: true }),
+      (input) => Object.setPrototypeOf((input.scenario.privateState as Record<string, unknown>).hands as object, { [Symbol.iterator]: () => [] }),
+      (input) => { (input.scenario.privateState as Record<string, unknown>).currentTrick = new Array(1); },
+      (input) => { const trick = (input.scenario.privateState as Record<string, unknown>).currentTrick as Record<string, unknown>; trick.self = trick; },
+      (input) => { ((input.scenario.privateState as Record<string, unknown>).handCounts as Record<string, unknown>)["0"] = Number.NaN; },
+      (input) => { ((input.validatedBudget as Record<string, unknown>).budget as Record<string, unknown>).maxWorkUnits = -0; },
+      (input) => delete (input as unknown as Record<string, unknown>).publicState,
+      (input) => { (input as unknown as Record<string, unknown>).unexpected = 1; },
+    ];
+    for (const mutate of cases) {
+      const input = makeInput();
+      const calls = { getters: 0, callbacks: 0 };
+      const random = { value: () => { calls.callbacks += 1; return 0.5; } };
+      (input as unknown as { random: RolloutReplicateInput["random"] }).random = random;
+      mutate(input, calls);
+      const result = runRolloutReplicate(input, ROOT_IDENTITY);
+      expect(result).toEqual({ ok: false, failure: { kind: "simulation-failed", stage: "replay" } });
+      expect(calls).toEqual({ getters: 0, callbacks: 0 });
+      expect(result).not.toHaveProperty("privateState");
+    }
+  });
 });
 
 const ROOT_IDENTITY = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
@@ -207,17 +404,11 @@ const SCENARIO_IDENTITY = "ffeeddccbbaa99887766554433221100ffeeddccbbaa998877665
 const REPLICATE_IDENTITY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 function singleAction(card: Card): Extract<RolloutAction, { type: "play" }> {
+  const classified = classifyPlay([card], "2");
+  if (classified === undefined) throw new Error("SINGLE_ACTION_FIXTURE_INVALID");
   return {
     type: "play",
-    group: {
-      id: `single:${card.id}`,
-      type: "single",
-      label: `single ${card.id}`,
-      purpose: "risk",
-      cards: [card],
-      wildcards: [],
-      strength: 1,
-    },
+    group: classified,
   };
 }
 
@@ -241,9 +432,11 @@ function makeInput(options: Readonly<{
   maxWorkUnits?: number;
 }> = {}): RolloutReplicateInput {
   const deck = createDeck();
-  const hands = options.hands ?? { 0: [deck[0]!], 1: [deck[1]!], 2: [deck[2]!], 3: [deck[3]!] };
   const publicPlayedCardIds = options.publicPlayedCardIds ?? [];
   const finishOrder = options.finishOrder ?? [];
+  const requestedHands = options.hands ?? { 0: [deck[0]!], 1: [deck[1]!], 2: [deck[2]!], 3: [deck[3]!] };
+  const hands = completeHands(requestedHands, publicPlayedCardIds, finishOrder);
+  const physicalPublicPlayedCardIds = completePublicPlayedCardIds(hands, publicPlayedCardIds);
   const handCounts = { 0: hands[0].length, 1: hands[1].length, 2: hands[2].length, 3: hands[3].length } as const;
   const identity = buildPublicGameIdentity("task4-kernel-fixture", 0, 0, "benchmark-scenario");
   let ledger = createInitialPublicLedger({
@@ -255,14 +448,15 @@ function makeInput(options: Readonly<{
   });
   ledger = {
     ...ledger,
-    playedCardIds: [...publicPlayedCardIds],
+    playedCardIds: [...physicalPublicPlayedCardIds],
     handCounts: { ...handCounts },
     finishOrder: [...finishOrder],
     currentTrick: options.currentTrick ?? { trickIndex: 0, leadSeat: 0, passSeats: [] },
   };
   const state = {
     hands,
-    publicPlayedCardIds,
+    publicPlayedCardIds: physicalPublicPlayedCardIds,
+    revealedTransferEvents: [],
     currentLastPlay: options.currentLastPlay,
     currentTrick: options.currentTrick ?? { trickIndex: 0, leadSeat: 0, passSeats: [] },
     handCounts,
@@ -276,7 +470,7 @@ function makeInput(options: Readonly<{
     partnerSeat: 2,
     handCounts,
     finishOrder,
-    publicPlayedCardIds,
+    publicPlayedCardIds: physicalPublicPlayedCardIds,
     currentLastPlay: options.currentLastPlay ?? null,
     currentLastPlaySeat: options.currentLastPlaySeat ?? (options.currentTrick?.lastPlaySeat ?? null),
   };
@@ -312,17 +506,43 @@ function makeUnusedRandomView(): RolloutReplicateInput["random"] {
 
 function makeState(overrides: Partial<IsolatedRolloutState> = {}): IsolatedRolloutState {
   const deck = createDeck();
-  const hands = overrides.hands ?? { 0: [deck[0]!], 1: [deck[1]!], 2: [deck[2]!], 3: [deck[3]!] };
+  const finishOrder = overrides.finishOrder ?? [];
+  const publicPlayedCardIds = overrides.publicPlayedCardIds ?? [];
+  const requestedHands = overrides.hands ?? { 0: [deck[0]!], 1: [deck[1]!], 2: [deck[2]!], 3: [deck[3]!] };
+  const hands = completeHands(requestedHands, publicPlayedCardIds, finishOrder);
+  const physicalPublicPlayedCardIds = completePublicPlayedCardIds(hands, publicPlayedCardIds);
   return {
     hands,
-    publicPlayedCardIds: overrides.publicPlayedCardIds ?? [],
+    publicPlayedCardIds: physicalPublicPlayedCardIds,
     currentLastPlay: overrides.currentLastPlay ?? null,
     currentLastPlaySeat: overrides.currentLastPlaySeat ?? null,
     currentTrick: overrides.currentTrick ?? { trickIndex: 0, leadSeat: 0, passSeats: [] },
     handCounts: overrides.handCounts ?? { 0: hands[0].length, 1: hands[1].length, 2: hands[2].length, 3: hands[3].length },
-    finishOrder: overrides.finishOrder ?? [],
+    finishOrder,
     actingSeat: overrides.actingSeat ?? 0,
-    expectedCardIds: overrides.expectedCardIds ?? deck.slice(0, 4).map((card) => card.id),
+    expectedCardIds: overrides.expectedCardIds ?? deck.map((card) => card.id),
     gameRank: overrides.gameRank ?? "2",
   };
+}
+
+function completeHands(
+  requestedHands: Readonly<Record<PublicSeat, readonly Card[]>>,
+  publicPlayedCardIds: readonly string[],
+  finishOrder: readonly PublicSeat[],
+): Record<PublicSeat, Card[]> {
+  return {
+    0: [...requestedHands[0]],
+    1: [...requestedHands[1]],
+    2: [...requestedHands[2]],
+    3: [...requestedHands[3]],
+  };
+}
+
+function completePublicPlayedCardIds(
+  hands: Readonly<Record<PublicSeat, readonly Card[]>>,
+  requestedPublicPlayedCardIds: readonly string[],
+): string[] {
+  const used = new Set([...hands[0], ...hands[1], ...hands[2], ...hands[3]].map((card) => card.id).concat(requestedPublicPlayedCardIds));
+  const remaining = createDeck().filter((card) => !used.has(card.id)).map((card) => card.id);
+  return [...requestedPublicPlayedCardIds, ...remaining];
 }

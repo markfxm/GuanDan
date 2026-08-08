@@ -97,6 +97,13 @@ describe("D2F rollout privacy structure", () => {
 
     const kernelImports = importedModulePaths(kernelFile);
     expect(kernelImports.some((file) => file.includes("/src/ai/particles/") || file.endsWith("/src/ai/rollout/particleScenarioSource.ts"))).toBe(false);
+    expect(kernelImports.filter((file) => file.endsWith("/src/game/playRules.ts"))).toEqual([expect.stringMatching(/\/src\/game\/playRules\.ts$/)]);
+    const actionRuleSymbols = importSymbols(kernelFile).filter((symbol) => symbol.name === "classifyPlay" || symbol.name === "canBeatPlay");
+    expect(actionRuleSymbols).toHaveLength(2);
+    expect(actionRuleSymbols.every((symbol) => declarationFile(symbol)?.replaceAll("\\", "/").endsWith("/src/game/playRules.ts"))).toBe(true);
+    const cardGroupSymbol = importSymbols(kernelFile).find((symbol) => symbol.name === "CardGroup");
+    expect(cardGroupSymbol).toBeDefined();
+    if (cardGroupSymbol !== undefined) expect(declarationFile(cardGroupSymbol)?.replaceAll("\\", "/").endsWith("/src/engine/groups.ts")).toBe(true);
     const kernelPrivateImports = importSymbols(kernelFile).filter((symbol) => privateContractNames.has(symbol.name));
     expect(kernelPrivateImports.every((symbol) => contractExports.get(symbol.name) === symbol)).toBe(true);
 
@@ -142,5 +149,11 @@ describe("D2F rollout privacy structure", () => {
 
     const forbiddenPlanningImports = [...importedModulePaths(policyFile), ...importedModulePaths(kernelFile)].filter((file) => /(?:room|planning|formal.?ai|orchestrator)/i.test(file));
     expect(forbiddenPlanningImports).toEqual([]);
+
+    for (const file of [policyFile, kernelFile]) {
+      const source = readFileSync(file.fileName, "utf8");
+      expect(source).not.toMatch(/localeCompare|Math\.random|Date\.now|performance\.now|RoomState|Room\b|privateNextState|diagnostics/);
+    }
+    expect(readFileSync(policyFile.fileName, "utf8")).not.toMatch(/privateState|initialHands|otherHands/);
   });
 });

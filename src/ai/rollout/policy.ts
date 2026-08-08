@@ -1,6 +1,9 @@
 import { detectGroups, type CardGroup } from "../../engine/groups";
-import type { Card, GameRank } from "../../engine/cards";
-import { canBeatPlay } from "../../game/playRules";
+import { RANKS, SUITS, isHeartRankWild, type Card, type GameRank } from "../../engine/cards";
+import { canBeatPlay, classifyPlay } from "../../game/playRules";
+import { assertFinalizedPublicActionEvent } from "../../game/publicEvent";
+import { verifyPublicActionEventHash } from "../../game/publicEventHash";
+import type { PublicActionEvent } from "../../game/publicEvent";
 import { createCanonicalSemanticKey } from "./identity";
 import {
   canonicalActionIdentity,
@@ -109,8 +112,8 @@ function isolateObservation(input: unknown): SeatLocalObservation | undefined {
     const currentLastPlay = getDataProperty(input, "currentLastPlay");
     const finishOrder = getDataProperty(input, "finishOrder");
     const gameRank = getDataProperty(input, "gameRank");
-    if (!isPlainDataArray(hand) || !isPlainDataArray(publicHistoryEvents) || !isPlainDataRecord(handCounts, ["0", "1", "2", "3"], true) || !isPlainDataArray(finishOrder) || !isGameRank(gameRank)) return undefined;
-    if (currentLastPlay !== null && !isPlainDataRecord(currentLastPlay)) return undefined;
+    if (!isPlainDataGraph(hand) || !isPlainDataGraph(publicHistoryEvents) || !isPlainDataGraph(handCounts) || !isPlainDataGraph(finishOrder) || (currentLastPlay !== null && !isPlainDataGraph(currentLastPlay)) || !isGameRank(gameRank)) return undefined;
+    if (!isObservationSemantics(hand, publicHistoryEvents, handCounts, currentLastPlay, finishOrder, gameRank)) return undefined;
     return deepFreeze({
       hand: structuredClone(hand) as readonly Card[],
       publicHistoryEvents: structuredClone(publicHistoryEvents),
@@ -122,6 +125,85 @@ function isolateObservation(input: unknown): SeatLocalObservation | undefined {
   } catch {
     return undefined;
   }
+}
+
+function isObservationSemantics(
+  hand: unknown,
+  publicHistoryEvents: unknown,
+  handCounts: unknown,
+  currentLastPlay: unknown,
+  finishOrder: unknown,
+  gameRank: GameRank,
+): boolean {
+  if (!isCardArray(hand) || new Set(hand.map((card) => card.id)).size !== hand.length) return false;
+  if (!isPlainDataRecord(handCounts, ["0", "1", "2", "3"], true)) return false;
+  const counts = handCounts as Record<string, unknown>;
+  if (!["0", "1", "2", "3"].every((seat) => isNonNegativeSafeInteger(counts[seat]))) return false;
+  if (!isCanonicalSeatArray(finishOrder)) return false;
+  if (currentLastPlay !== null && !isCanonicalCardGroup(currentLastPlay, gameRank)) return false;
+  if (!isPlainDataArray(publicHistoryEvents)) return false;
+  return publicHistoryEvents.every((event) => isValidPublicEvent(event));
+}
+
+function isValidPublicEvent(value: unknown): value is PublicActionEvent {
+  try {
+    if (!isPlainDataGraph(value)) return false;
+    assertFinalizedPublicActionEvent(value);
+    verifyPublicActionEventHash(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isCanonicalCardGroup(value: unknown, gameRank: GameRank): value is CardGroup {
+  if (!isPlainDataRecord(value, ["id", "type", "label", "purpose", "cards", "wildcards", "strength"], true)) return false;
+  const group = value as Record<string, unknown>;
+  if (typeof group.id !== "string" || group.id.length === 0 || typeof group.type !== "string" || typeof group.label !== "string" || typeof group.purpose !== "string" || !isNonNegativeSafeInteger(group.strength) || !isCardArray(group.cards) || group.cards.length === 0 || !isCardArray(group.wildcards)) return false;
+  const cardIds = group.cards.map((card) => card.id);
+  const wildcardIds = group.wildcards.map((card) => card.id);
+  if (new Set(cardIds).size !== cardIds.length || new Set(wildcardIds).size !== wildcardIds.length || wildcardIds.some((id) => !cardIds.includes(id))) return false;
+  if (group.wildcards.some((card) => !isHeartRankWild(card, gameRank))) return false;
+  try {
+    const classified = classifyPlay([...group.cards], gameRank);
+    return classified !== undefined
+      && classified.type === group.type
+      && classified.id === group.id
+      && classified.strength === group.strength
+      && sameCardIdMultiset(classified.cards.map((card) => card.id), cardIds);
+  } catch {
+    return false;
+  }
+}
+
+function isCardArray(value: unknown): value is readonly Card[] {
+  return isPlainDataArray(value) && value.every(isCard);
+}
+
+function isCard(value: unknown): value is Card {
+  if (!isPlainDataRecord(value, ["id", "kind", "rank", "suit", "copy"], false)) return false;
+  const card = value as Record<string, unknown>;
+  if (typeof card.id !== "string" || typeof card.kind !== "string" || typeof card.rank !== "string" || (card.copy !== 1 && card.copy !== 2)) return false;
+  if (card.kind === "joker") return Object.keys(card).length === 4 && (card.rank === "SJ" || card.rank === "BJ") && card.id === `Joker-${card.rank}-${card.copy}`;
+  return Object.keys(card).length === 5 && card.kind === "suited" && typeof card.suit === "string" && SUITS.includes(card.suit as (typeof SUITS)[number]) && RANKS.includes(card.rank as (typeof RANKS)[number]) && card.id === `${card.suit === "spades" ? "S" : card.suit === "clubs" ? "C" : card.suit === "hearts" ? "H" : "D"}${card.rank}-${card.copy}`;
+}
+
+function isCanonicalSeatArray(value: unknown): value is readonly (0 | 1 | 2 | 3)[] {
+  if (!isPlainDataArray(value) || value.length > 4 || !value.every(isSeat)) return false;
+  return new Set(value).size === value.length;
+}
+
+function sameCardIdMultiset(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const counts = new Map<string, number>();
+  for (const id of left) counts.set(id, (counts.get(id) ?? 0) + 1);
+  for (const id of right) {
+    const remaining = counts.get(id);
+    if (remaining === undefined) return false;
+    if (remaining === 1) counts.delete(id);
+    else counts.set(id, remaining - 1);
+  }
+  return counts.size === 0;
 }
 
 function isolateContext(input: unknown): RolloutPolicyDecisionContext | undefined {
@@ -201,6 +283,16 @@ function isPlainDataArray(value: unknown): value is readonly unknown[] {
   } catch {
     return false;
   }
+}
+
+function isPlainDataGraph(value: unknown, ancestors = new WeakSet<object>()): boolean {
+  if (value === null || value === undefined || typeof value === "boolean" || typeof value === "number" || typeof value === "string") return true;
+  if (typeof value !== "object" || ancestors.has(value)) return false;
+  ancestors.add(value);
+  const valid = (Array.isArray(value) ? isPlainDataArray(value) : isPlainDataRecord(value))
+    && Reflect.ownKeys(value).every((key) => typeof key === "string" && isDataDescriptor(Object.getOwnPropertyDescriptor(value, key)) && isPlainDataGraph((Object.getOwnPropertyDescriptor(value, key) as PropertyDescriptor & { value: unknown }).value, ancestors));
+  ancestors.delete(value);
+  return valid;
 }
 
 function isDataDescriptor(descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor & { value: unknown } {

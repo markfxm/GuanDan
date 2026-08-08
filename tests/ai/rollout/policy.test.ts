@@ -133,4 +133,117 @@ describe("D2F fixed internal rollout policy", () => {
     expect(canonicalCrnDomainBytes).toBeTypeOf("function");
     expect(key).not.toHaveProperty("candidateId");
   });
+
+  test("rejects a nested malformed observation without invoking or mutating caller data", async () => {
+    const policy = await loadPolicyModule();
+    const factory = policy.createInternalRolloutPolicy as (policyId: unknown) => {
+      ok: boolean;
+      policy?: { chooseAction: (observation: unknown, context: unknown, crn: unknown) => unknown };
+    };
+    const result = factory("d2f-lightweight-v1");
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.policy === undefined) return;
+    const observation = makeObservation();
+    observation.handCounts = { 0: Number.NaN, 1: 1, 2: 1, 3: 1 };
+    const before = structuredClone(observation);
+    const crn = makeCrnView();
+    expect(crn.ok).toBe(true);
+    if (!crn.ok) return;
+    const action = result.policy.chooseAction(observation, {
+      replicateIdentity: "2".repeat(64),
+      ply: 0,
+      actingSeat: 0,
+    }, crn.view);
+    expect(action).toEqual({ ok: false, failure: { kind: "no-legal-action", actingSeat: 0 } });
+    expect(observation).toEqual(before);
+  });
+
+  test("rejects hostile nested observation shapes before policy or CRN observation", async () => {
+    const policy = await loadPolicyModule();
+    const factory = policy.createInternalRolloutPolicy as (policyId: unknown) => {
+      ok: boolean;
+      policy?: { listLegalActions: (observation: unknown) => readonly unknown[]; chooseAction: (observation: unknown, context: unknown, crn: unknown) => unknown };
+    };
+    const result = factory("d2f-lightweight-v1");
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.policy === undefined) return;
+
+    const numericValues = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 1.5, -1, Number.MAX_SAFE_INTEGER + 1, -0];
+    for (const value of numericValues) {
+      const observation = makeObservation();
+      (observation.handCounts as Record<string, unknown>)["0"] = value;
+      expect(result.policy.listLegalActions(observation)).toEqual([]);
+    }
+
+    const invalidObservations: Record<string, unknown>[] = [];
+    const missingSeat = makeObservation();
+    delete (missingSeat.handCounts as Record<string, unknown>)["3"];
+    invalidObservations.push(missingSeat);
+    const extraSeat = makeObservation();
+    (extraSeat.handCounts as Record<string, unknown>)["4"] = 0;
+    invalidObservations.push(extraSeat);
+    const duplicateFinish = makeObservation();
+    duplicateFinish.finishOrder = [0, 0];
+    invalidObservations.push(duplicateFinish);
+    const unknownFinish = makeObservation();
+    unknownFinish.finishOrder = [4];
+    invalidObservations.push(unknownFinish);
+    const malformedCard = makeObservation();
+    malformedCard.hand = [{ id: "forged", kind: "suited", rank: "A", suit: "spades", copy: 1 }];
+    invalidObservations.push(malformedCard);
+    const malformedLastPlay = makeObservation();
+    malformedLastPlay.currentLastPlay = { type: "single" };
+    invalidObservations.push(malformedLastPlay);
+    const malformedHistory = makeObservation();
+    malformedHistory.publicHistoryEvents = [{ kind: "play" }];
+    invalidObservations.push(malformedHistory);
+    const sparseHistory = makeObservation();
+    sparseHistory.publicHistoryEvents = new Array(1);
+    invalidObservations.push(sparseHistory);
+    const expandoHistory = makeObservation();
+    (expandoHistory.publicHistoryEvents as unknown[] & { extra?: number }).extra = 1;
+    invalidObservations.push(expandoHistory);
+    const customPrototype = makeObservation();
+    Object.setPrototypeOf(customPrototype, { inherited: true });
+    invalidObservations.push(customPrototype);
+    const symbolObservation = makeObservation();
+    Object.defineProperty(symbolObservation, Symbol("hostile"), { value: 1 });
+    invalidObservations.push(symbolObservation);
+
+    let getterCalls = 0;
+    const nestedGetter = makeObservation();
+    Object.defineProperty((nestedGetter.hand as unknown[])[0] as object, "rank", { get: () => { getterCalls += 1; return "A"; } });
+    invalidObservations.push(nestedGetter);
+
+    for (const observation of invalidObservations) {
+      let crnCalls = 0;
+      const action = result.policy.chooseAction(observation, {
+        replicateIdentity: "2".repeat(64),
+        ply: 0,
+        actingSeat: 0,
+      }, { value: () => { crnCalls += 1; return 0.5; } });
+      expect(action).toEqual({ ok: false, failure: { kind: "no-legal-action", actingSeat: 0 } });
+      expect(crnCalls).toBe(0);
+    }
+    expect(getterCalls).toBe(0);
+  });
+
+  test("maps throwing CrnView values to the existing typed policy failure", async () => {
+    const policy = await loadPolicyModule();
+    const factory = policy.createInternalRolloutPolicy as (policyId: unknown) => {
+      ok: boolean;
+      policy?: { chooseAction: (observation: unknown, context: unknown, crn: unknown) => unknown };
+    };
+    const result = factory("d2f-lightweight-v1");
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.policy === undefined) return;
+    let calls = 0;
+    const action = result.policy.chooseAction(makeObservation(), {
+      replicateIdentity: "2".repeat(64),
+      ply: 0,
+      actingSeat: 0,
+    }, { value: () => { calls += 1; throw new Error("CRN_HOSTILE"); } });
+    expect(action).toEqual({ ok: false, failure: { kind: "invalid-policy-context", field: "ply" } });
+    expect(calls).toBe(1);
+  });
 });

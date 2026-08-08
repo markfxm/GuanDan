@@ -1,4 +1,5 @@
 import type { Card, GameRank } from "../../engine/cards";
+import { createDeck } from "../../engine/cards";
 import type { CardGroup } from "../../engine/groups";
 import { playPublicStableKey } from "../../game/publicEvent";
 import type { PublicSeat } from "../../game/publicEvent";
@@ -46,6 +47,7 @@ export type StateConservationResult =
 
 const SEATS: readonly PublicSeat[] = [0, 1, 2, 3];
 const SEAT_KEYS = ["0", "1", "2", "3"] as const;
+const CANONICAL_CARD_IDS = Object.freeze(createDeck().map((card) => card.id));
 
 export function validateRolloutState(input: unknown): StateConservationResult {
   try {
@@ -80,8 +82,8 @@ export function validateActionTransition(
 }
 
 function validateCardsAndConservation(state: IsolatedRolloutState): boolean {
-  const expected = new Set(state.expectedCardIds);
-  if (expected.size !== state.expectedCardIds.length) return false;
+  if (!sameCardIdMultiset(state.expectedCardIds, CANONICAL_CARD_IDS)) return false;
+  const expected = new Set(CANONICAL_CARD_IDS);
   const handIds: string[] = [];
   for (const seat of SEATS) {
     for (const card of state.hands[seat]) handIds.push(card.id);
@@ -148,7 +150,8 @@ function validatePlayTransition(
   if (afterHand.length !== beforeHand.length - playedIds.length) return failed("invalid-action-transition");
   if (afterHand.some((id) => playedIds.includes(id)) || beforeHand.filter((id) => !playedIds.includes(id)).some((id) => !afterHand.includes(id))) return failed("invalid-action-transition");
   if (!sameOtherHands(before, after, before.actingSeat)) return failed("invalid-action-transition");
-  if (!samePrefix(before.publicPlayedCardIds, after.publicPlayedCardIds, playedIds)) return failed("invalid-action-transition");
+  const appendedPublicIds = after.publicPlayedCardIds.slice(before.publicPlayedCardIds.length);
+  if (!sameCardIdMultiset(appendedPublicIds, playedIds)) return failed("invalid-action-transition");
   if (after.currentTrick.trickIndex !== before.currentTrick.trickIndex || after.currentTrick.leadSeat !== before.currentTrick.leadSeat) return failed("invalid-action-transition");
   if (after.currentLastPlaySeat !== before.actingSeat || after.currentLastPlay === null) return failed("invalid-action-transition");
   if (!sameCardIds(after.currentLastPlay.cards, action.group.cards)) return failed("invalid-action-transition");
@@ -273,6 +276,7 @@ function isDataDescriptor(descriptor: PropertyDescriptor | undefined): descripto
 }
 
 function findCardFailure(state: IsolatedRolloutState): StateConservationFailure["reason"] {
+  if (!sameCardIdMultiset(state.expectedCardIds, CANONICAL_CARD_IDS)) return "missing-card";
   const handIds = SEATS.flatMap((seat) => state.hands[seat].map((card) => card.id));
   if (new Set(handIds).size !== handIds.length || new Set(state.publicPlayedCardIds).size !== state.publicPlayedCardIds.length) return "duplicate-card";
   if (state.publicPlayedCardIds.some((id) => handIds.includes(id))) return "public-card-overlap";
@@ -315,11 +319,20 @@ function expectedTrickWinner(state: IsolatedRolloutState, lastPlaySeat: PublicSe
 }
 
 function sameCardIds(left: readonly Card[], right: readonly Card[]): boolean {
-  return sameArray(left.map((card) => card.id).sort(), right.map((card) => card.id).sort());
+  return sameCardIdMultiset(left.map((card) => card.id), right.map((card) => card.id));
 }
 
-function samePrefix(before: readonly string[], after: readonly string[], appended: readonly string[]): boolean {
-  return after.length === before.length + appended.length && sameArray(after.slice(0, before.length), before) && sameArray(after.slice(before.length), appended);
+function sameCardIdMultiset(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const counts = new Map<string, number>();
+  for (const id of left) counts.set(id, (counts.get(id) ?? 0) + 1);
+  for (const id of right) {
+    const remaining = counts.get(id);
+    if (remaining === undefined) return false;
+    if (remaining === 1) counts.delete(id);
+    else counts.set(id, remaining - 1);
+  }
+  return counts.size === 0;
 }
 
 function sameArray(left: readonly unknown[], right: readonly unknown[]): boolean {
