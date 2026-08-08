@@ -2527,11 +2527,13 @@ describe("D2F ParticleBank bridge", () => {
     const bridgeFile = files.find((file) => sourcePath(file).endsWith("/src/ai/particles/particleBankRolloutAccess.ts"));
     const publicValidatorFile = files.find((file) => sourcePath(file).endsWith("/src/ai/particles/particleBankPublicValidation.ts"));
     const sourceFile = files.find((file) => sourcePath(file).endsWith("/src/ai/rollout/particleScenarioSource.ts"));
+    const kernelFile = files.find((file) => sourcePath(file).endsWith("/src/ai/rollout/kernel.ts"));
     expect(internalFile).toBeDefined();
     expect(bridgeFile).toBeDefined();
     expect(publicValidatorFile).toBeDefined();
     expect(sourceFile).toBeDefined();
-    if (internalFile === undefined || bridgeFile === undefined || publicValidatorFile === undefined || sourceFile === undefined) return;
+    expect(kernelFile).toBeDefined();
+    if (internalFile === undefined || bridgeFile === undefined || publicValidatorFile === undefined || sourceFile === undefined || kernelFile === undefined) return;
 
     const privateModule = checker.getSymbolAtLocation(internalFile);
     if (privateModule === undefined) throw new Error("PRIVATE_MODULE_SYMBOL_MISSING");
@@ -2618,7 +2620,7 @@ describe("D2F ParticleBank bridge", () => {
     let forbiddenSourceReexport = false;
     let localeCompareUse = false;
     const privateContractNames = new Set(["RolloutScenario", "RolloutScenarioSourceInput", "RolloutScenarioSourceResult", "RolloutReplicateInput", "RolloutPublicState"]);
-    const allowedPrivateConsumers = new Set([sourcePath(contractsFile), sourcePath(sourceFile)]);
+    const allowedPrivateConsumers = new Set([sourcePath(contractsFile), sourcePath(sourceFile), sourcePath(kernelFile)]);
 
     const recordPrivateContractUse = (file: ts.SourceFile, symbol: ts.Symbol): void => {
       const resolved = resolveSymbol(symbol);
