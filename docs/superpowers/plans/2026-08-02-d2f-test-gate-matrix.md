@@ -1,10 +1,11 @@
 # D2F Test Gate Matrix
 
 状态：
-TASK 1 INDEPENDENT REVIEW BLOCKED
-TASK 1 FINAL GATE REMEDIATION DESIGN FROZEN
-TASK 1 CODE REMEDIATION PENDING
-TASK 2 NOT STARTED
+TASK 4 STATE-MACHINE REMEDIATION DESIGN FROZEN
+TASK 4 CODE REMEDIATION PENDING
+TASK 5 NOT STARTED
+
+Task 1–3 的历史状态和已完成契约仍保留在下文；本状态块表示本轮 review-remediation freeze 的当前结论。
 
 ## Task 1 Independent Review Findings — formal adjudication
 
@@ -1316,7 +1317,7 @@ executing caller accessors, and reuses `particleScenarioIdentity`/`validateCanon
 The source keeps its second replay/public-consistency validation and cannot remove it because the bridge
 has become stricter.
 
-## Task 4 Private Boundary Reconciliation Freeze
+## Historical Task 4 private-boundary freeze — superseded by the current freeze at the end of this document
 
 Task 4 的 isolated private rollout boundary 与 Design Spec、Implementation Plan 统一冻结为：
 
@@ -1334,7 +1335,7 @@ particleBankInternals.ts
 现有 Compiler API Gate 的 exact consumer 语义由 `tests/ai/rollout/particleBankRolloutBoundary.test.ts` 证明：使用 TypeScript Compiler API 与 resolved symbols，production contract symbol 的合法集合精确为 `src/ai/rollout/contracts.ts`（声明）、`src/ai/rollout/particleScenarioSource.ts`（producer）和 `src/ai/rollout/kernel.ts`（isolated consumer）。Gate 文件不是 production consumer。不得使用“rollout 目录全部允许”、basename 模糊匹配或文本 grep；不得删除既有 Task 1 断言。Gate 必须继续证明唯一 internals reader、唯一 bridge caller、kernel 只消费 source 产生的 isolated contract、policy 无 private contract、无 re-export/public barrel 泄漏。
 因此 `policy.ts`、`stateConservation.ts`、`aggregation.ts`、`evaluation.ts`、`shadowObserver.ts`、`Room`、`planning` 和 public barrel 均不得直接消费 private scenario 或 isolated private contract；它们不在 exact consumer set。
 
-Task 4 正式 code/test allowlist 精确为七个文件：
+历史 pre-remediation allowlist（当前冻结已替换）为：
 
 ~~~text
 src/ai/rollout/policy.ts
@@ -1343,12 +1344,11 @@ src/ai/rollout/stateConservation.ts
 tests/ai/rollout/policy.test.ts
 tests/ai/rollout/kernel.test.ts
 tests/ai/rollout/rolloutPrivacyAst.test.ts
-tests/ai/rollout/particleBankRolloutBoundary.test.ts
 ~~~
 
 新增且仅新增的既有 Gate 文件是 `tests/ai/rollout/particleBankRolloutBoundary.test.ts`。旧 rescue-only 路径 `src/ai/rollout/rolloutPolicy.ts`、`src/ai/rollout/rolloutKernel.ts`、`tests/ai/rollout/rolloutKernel.test.ts` 和 `tests/ai/rollout/rolloutPolicyPrivacy.test.ts` 仅作历史禁止说明，禁止恢复到正式 source 链。
 
-`createInternalRolloutPolicy(policyId)` 继续是 exhaustive literal factory，只接受 `"d2f-lightweight-v1"`，不接受 callback、closure、caller factory 或 dynamic registry；`policyId` 只进入 provenance/configuration，不进入 CRN coordinate/value。每个模拟决策重新构造 `root + scenario + replicate + ply + acting seat + random domain` 的 `CrnCoordinate`/`CrnView`，不得固定 `ply=0` 或 `actingSeat=0`，不得让 `candidateId` 进入 CRN。每个 ply 严格执行 `stable isolated state → acting seat-local observation → createCrnCoordinate → createCrnView → internal policy → apply legal action → update hand counts/finish/trick/turn → conservation check`。
+历史记录保留 exhaustive literal policy 与 candidate-free CRN 结论；当时的 ply 顺序和测试范围已由文档末尾 current freeze 取代。
 
 RED/GREEN 必须先覆盖：private boundary RED（正式 `kernel.ts` 缺失或未被 exact Gate 识别）；policy factory RED（旧 `createFixedRolloutPolicy()` 不满足接口）；CRN ownership RED（两个 ply 或不同 acting seat 揭示固定 view 错误配对）；privacy RED（opponent hand、full hands、privateState、raw scenario、callback/factory/registry 被真实类型/runtime/Compiler API Gate 拒绝）；state conservation RED（真实 duplicate/missing card、hand-count mismatch、finish mismatch 失败）。模块缺失不能作为全部行为 RED。GREEN 保留所有既有 Task 1 Gate 断言。本轮不实施 Task 4 production/tests，Task 5–9 不提前开始。
 
@@ -1649,3 +1649,119 @@ AWAITING_NODE22_CI
 ~~~
 
 A documentation readiness review may use only one of these final decisions: `PASS — READY FOR TASK 1`, `PASS WITH NON-BLOCKING DEFERRED GATES — READY FOR TASK 1`, or `BLOCKED — NOT READY FOR TASK 1`. Missing fixed benchmark runner and Node 22 evidence are deferred gates, not Task 1 blockers; missing/ambiguous current manifest, unresolved pre-action snapshot semantics, or any contract/privacy/CRN inconsistency is a blocker. A readiness decision must not be described as an implementation or formal release pass.
+
+## D2F Task 4 State-Machine Remediation Design Freeze (current)
+
+本节是当前 Task 4 唯一有效的 test-gate matrix，替换历史 private-boundary 条款。F1–F7 均已结合 expected HEAD 的真实 production、test 和正式 Room/settlement 语义确认；本轮只冻结文档。
+
+### F1 — canonical multi-card identity
+
+`finalizePublicActionEvent` 的 `normalizeDraft` 对 play/tribute/return 的 `publicCardIds` 使用默认 `sort()`；kernel 将 finalized canonical order 写入 public state，而 `stateConservation.ts` 当前用原始 action order 检查 prefix，finding confirmed。`createDeck()` 以真实 `kind/rank/suit/copy` 唯一生成 108 个 card ID。
+
+action/event 比较冻结为 exact card-ID set/multiset equality；不得使用 `localeCompare`，action 内 duplicate ID、missing、extra、foreign ID 独立失败，不能只比较长度。event 保留 canonical order，hand 删除按 card ID。RED 直接调用 `runRolloutReplicate`：合法 pair、合法 full-house、canonical order 不同的同集合成功，四类 forged identity failure typed。
+
+### F2 — unknown-input kernel boundary
+
+当前 `runRolloutReplicate` 在 envelope/schema 防护前读取 `validatedBudget` 并 clone `scenario.privateState`，finding confirmed。冻结流水线：
+
+~~~text
+unknown input -> strict envelope/prototype/own-key/data-descriptor validation
+               -> nested plain-data validation -> semantic validation
+               -> fresh isolated projection -> rollout execution
+~~~
+
+exact envelope keys 为 `candidate`、`scenario`、`publicState`、`replicateIdentity`、`random`、`validatedBudget`。字段读取前完成 `Object.getPrototypeOf`、`Reflect.ownKeys`、exact own keys、own data descriptor、无 accessor/symbol/function；plain record、canonical contiguous `Array.prototype`、无 sparse/expando/custom iterator/map；safe integer/finite/nonnegative 及 `-0` 规则沿用 contracts。cycle、Proxy trap、getter、callback 失败 typed，getter/callback 计数为 0；clone 只用于已验证安全图/可信内部图；no throw/no partial/no hostile/private diagnostics。现有 `validateRolloutBudget` 复用，本轮不改 contracts union/interface。
+
+### F3 — nested seat-local observation
+
+exact observation keys：`hand`、`publicHistoryEvents`、`handCounts`、`currentLastPlay`、`finishOrder`、`gameRank`。policy 只得到 acting seat hand 与公开数据，不得到 privateState、scenario、其他 seat hands、weights 或 seed。
+
+Card exact schema 为 suited `id/kind/rank/suit/copy` 或 joker `id/kind/rank/copy`，字段关系与 `createDeck` 一致；hand ID 唯一。`handCounts` exact `0`,`1`,`2`,`3`，count finite/nonnegative/safe integer，拒绝 `-0`；finishOrder canonical unique seats；gameRank 属于 `RANKS`。currentLastPlay 必须是 null 或完整 canonical CardGroup；publicHistoryEvents 必须先递归 descriptor/prototype/own-key 检查，再通过 finalized public-event/hash 语义验证。所有 nested graph 先验证后 clone/freeze；getter/accessor/symbol/custom prototype/function/sparse/expando fail，caller 不被保留；throwing `CrnView.value()` 为 typed `invalid-policy-context/ply`，不产生 action。
+
+### F4 — Room-authoritative early terminal
+
+正式 `Room.advanceAfterAction` 只在前三名已完成或前两名完成者是搭档时终局；普通两名非搭档继续，已完成 seat 跳过。Task 4 不修改 Room/settlement。root 与每个 policy action 的 transition/conservation 成功后立即检查；root early terminal 即使最小 budget 也不调用 policy、不走 budget-exhausted、不调用 leaf。顺序：nextState hand/count/finish/trick/turn 更新 → transition → conservation → terminal projection → terminal utility；非 terminal 才 stable-state → leaf。
+
+projection 保留真实 prefix；三人完成追加唯一剩余 seat；前两名为搭档且尚无第三名时，从最后真实 finisher 按 seat-1 modulo 4 的 `nextPlayableSeat` 方向跳过已完成 seat 追加剩余两席；完整四席原样保留。示例 `[0,2] -> [0,2,1,3]`、`[1,3] -> [1,3,2,0]`、`[0,1,2] -> [0,1,2,3]`；`[0,2,1,3]` 的 perspective 0/1 utility 为 `+3/-3`。不得按绝对 seat number 排序或用 leaf heuristic 伪造 terminal 名次。
+
+### F5 — independent card universe
+
+~~~text
+U = Set(createDeck().map(card => card.id))
+|U| = 108
+physicalLocations = Set(all four hand card IDs ∪ publicPlayedCardIds)
+require physicalLocations === U
+~~~
+
+hands/publicPlayed 各自 unique、彼此 disjoint、全属于 U、并集 exact U；expected IDs 直接来自 trusted `createDeck`。history event IDs、currentLastPlay.cards、current-trick stable key 是同一 played card 的重复公开视图，不计入 physicalLocations；tribute/return 是 hand transfer 视图，不创造/销毁牌。source replay 先用 `validateCanonicalInitialDeal/createDeck`，kernel 再复核 U。canonical full deck 和正常 multi-particle replay 成功；missing/extra/duplicate/overlap/forged fail。
+
+### F6 — atomic transition
+
+root play、policy play 和 pass 共用 `accepted immutable current → independent nextState → apply/update hand/count/finish/trick/turn/public → transition validation → conservation → terminal projection or stable-state validation → terminal utility or leaf on nextState → commit`。validated transition 前不得污染 current state，不得先写后回滚；失败丢弃 nextState，结果无 state/nextState/private diagnostics，caller input 不变。RED 覆盖 play/pass post-validation、conservation、terminal projection、illegal policy action，并断言 accepted state/caller/no-partial。
+
+### F7 — observation/CRN order
+
+固定顺序：`current stable state → validated seat-local observation → current ply/acting-seat CRN coordinate/view → fixed policy → action validation → transactional transition`。observation 不含 CRN private material；CRN 仍用当前 ply/actingSeat；policyId/candidateId 不进 CRN，Task 3 known vectors 不变。
+
+### Failure mapping
+
+现有 union 足够，不新增 contracts 字段、optional string 或 throw API：malformed envelope、invalid scenario/private state、invalid candidate、CRN failure 为 `simulation-failed/replay`；kernel invalid observation 为 replay，direct policy invalid observation 为 `{ kind: "invalid-policy-context", field: "actingSeat" }`；card universe、transition、conservation 为 `simulation-failed/state-conservation`；policy failure 为 `policy-failed`; terminal projection 为 `simulation-failed/leaf-evaluation`；budget 为 exact `{ kind: "budget-exhausted", workUnits, maximumWorkUnits }`。`CrnView.value()` throw 在 policy 归一化为 `invalid-policy-context/ply`。所有 failure no throw/no partial/no private diagnostics。
+
+### Next-round exact code allowlist
+
+以下六路径必须与 Design Spec、Implementation Plan 完全一致：
+
+~~~text
+src/ai/rollout/policy.ts
+src/ai/rollout/kernel.ts
+src/ai/rollout/stateConservation.ts
+tests/ai/rollout/policy.test.ts
+tests/ai/rollout/kernel.test.ts
+tests/ai/rollout/rolloutPrivacyAst.test.ts
+~~~
+
+`contracts.ts` 不加入：现有 failure union/interface 足够，`validateRolloutBudget` 已可复用。`particleBankRolloutBoundary.test.ts` 不加入：Task 4 不改 bridge/source，kernel.test 调用真实 source replay。禁止 game/engine/particles/planning/decision-engine、package/lock/config 和 Task 5–9 paths。
+
+### Frozen TDD RED matrix
+
+| slice | real entry and required RED | required GREEN |
+| --- | --- | --- |
+| multi-card | `runRolloutReplicate` root pair/full-house order mismatch; duplicate/missing/extra/foreign | legal permutations pass; exact identity failures typed; event canonical |
+| kernel boundary | `runRolloutReplicate(unknown)` top/nested/budget getter, symbol/accessor, custom prototype, inherited iterator/map, sparse/expando, cycle | getter/callback 0, typed no-throw/no-partial/no-private diagnostics |
+| policy observation | list/choose with NaN/Infinity/fraction/negative/unsafe/-0 counts, missing/extra keys, duplicate/unknown finish, malformed card/event, nested getter, throwing CRN | complete schema, caller unchanged, no partial action, local-only observation |
+| terminal | root/policy partner-first-two, three complete, ordinary nonterminal, minimum budget, utility/rotation | immediate terminal, no later policy/leaf, completed-seat skip, full projection, `+3/-3` |
+| universe | canonical deck, missing/extra/duplicate/overlap/forged kernel and real source replay with history/current-trick/transfer views | exact U, transfer invariant, repeated views not double-counted, normal replay success |
+| transaction | play/pass post-validation, conservation, terminal projection, illegal policy action | accepted/current and caller unchanged, no partial result/diagnostics, one path |
+
+Missing module/import/empty collection is invalid RED; each row must fail on behavior at the named production entry. This round runs no tests or compiler/build/benchmark. The retained gates are `AWAITING_FIXED_BENCHMARK_RUNNER`, `AWAITING_NODE22_CI` and `Task 9 full permitted regression`; status is `TASK 4 STATE-MACHINE REMEDIATION DESIGN FROZEN / TASK 4 CODE REMEDIATION PENDING / TASK 5 NOT STARTED` and this is not D2F Shadow release ready.
+
+## D2F Task 4 cross-document canonical literals
+
+The following lines are the shared literal contract for all three D2F documents; every occurrence must remain word-for-word identical.
+
+Finding verdict: F1 confirmed canonical multi-card identity defect; F2 confirmed pre-validation kernel getter boundary; F3 confirmed top-level-only policy observation validation; F4 confirmed Room early-terminal mismatch; F5 confirmed self-derived card universe; F6 confirmed non-transactional transition; F7 confirmed observation/CRN ordering defect.
+
+Canonical terminal rule: after every root or policy action, finish/count/trick/turn updates are complete, transition and conservation validation pass, then the kernel checks terminal. Terminal is true when finishOrder.length >= 3 or the first two finishers are partners; two non-partner finishers are non-terminal. A root early terminal returns before any later policy, budget-exhausted path, or leaf call; completed seats are skipped.
+
+Canonical terminal projection: preserve the real finishOrder prefix; if three seats are finished append the sole remaining seat; if the first two finishers are partners and no third finisher exists, append remaining seats by repeated Room nextPlayableSeat (seat - 1 modulo 4) from the last real finisher while skipping finished seats; if four seats are present preserve the order. Examples: [0,2] -> [0,2,1,3], [1,3] -> [1,3,2,0], [0,1,2] -> [0,1,2,3]. For [0,2,1,3], perspective 0 utility is +3 and perspective 1 utility is -3. No absolute-seat sort and no leaf heuristic may create terminal ranks.
+
+Canonical card universe: U = Set(createDeck().map(card => card.id)); |U| = 108; physicalLocations = Set(all four hand card IDs union publicPlayedCardIds); require physicalLocations === U. History event IDs, currentLastPlay cards, and current-trick stable keys are duplicate public views and are checked without adding another physical location; tribute/return IDs are transfer views and cannot create or destroy a card.
+
+Canonical transaction: accepted immutable current state -> independent nextState -> apply action and all hand/count/finish/trick/turn/public updates to nextState -> validate transition -> validate conservation -> validate terminal projection or stable state -> evaluate terminal utility or non-terminal leaf on nextState -> commit nextState. No accepted current state mutation before validation, no rollback, no partial result, and caller input remains unchanged.
+
+Canonical decision order: current stable state -> validated seat-local observation -> current ply/acting-seat CRN coordinate/view -> fixed policy -> policy-action validation -> transactional transition. Observation contains no CRN private material; policyId and candidateId never enter CRN; Task 3 known vectors remain unchanged.
+
+Canonical failure mapping: malformed envelope, invalid scenario/private state, invalid candidate, and CRN failure -> simulation-failed/replay; invalid observation at kernel boundary -> simulation-failed/replay; direct policy observation failure -> invalid-policy-context(field=actingSeat); card universe, transition, and conservation failure -> simulation-failed/state-conservation; policy failure -> policy-failed; terminal projection failure -> simulation-failed/leaf-evaluation; budget exhaustion -> budget-exhausted(workUnits, maximumWorkUnits). CrnView.value() throw -> invalid-policy-context(field=ply). Every failure is typed, no-throw, no-partial, and contains no hostile input or private state.
+
+Canonical next-round allowlist:
+
+~~~text
+src/ai/rollout/policy.ts
+src/ai/rollout/kernel.ts
+src/ai/rollout/stateConservation.ts
+tests/ai/rollout/policy.test.ts
+tests/ai/rollout/kernel.test.ts
+tests/ai/rollout/rolloutPrivacyAst.test.ts
+~~~
+
+Canonical RED IDs: MC-PAIR, MC-COMPOUND, MC-DUPLICATE, MC-MISSING, MC-EXTRA, MC-FOREIGN, K-GETTER, K-NESTED-GETTER, K-BUDGET-GETTER, K-SYMBOL, K-ACCESSOR, K-PROTOTYPE, K-ITERATOR, K-SPARSE, K-CYCLE, P-COUNT-NUMBERS, P-COUNT-KEYS, P-FINISH, P-CARD, P-NESTED-GETTER, P-EVENT, P-CRN-THROW, T-ROOT-EARLY, T-POLICY-EARLY, T-THREE-FINISH, T-NONTERMINAL, T-NO-POLICY, T-NO-LEAF, T-PROJECTION, T-UTILITY, T-ROTATION, U-CANONICAL, U-MISSING, U-EXTRA, U-DUPLICATE, U-OVERLAP, U-HISTORY-VIEW, U-TRANSFER, U-FORGED, U-SOURCE, X-PLAY-POST, X-PASS-POST, X-CONSERVATION, X-TERMINAL-PROJECTION, X-ILLEGAL-ACTION, X-STATE-UNCHANGED, X-CALLER-UNCHANGED, X-NO-PARTIAL, X-NO-DIAGNOSTIC.

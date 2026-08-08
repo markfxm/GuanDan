@@ -1,10 +1,11 @@
 # D2F CRN Rollout / Team Utility Design Specification
 
 状态：
-TASK 1 INDEPENDENT REVIEW BLOCKED
-TASK 1 FINAL GATE REMEDIATION DESIGN FROZEN
-TASK 1 CODE REMEDIATION PENDING
-TASK 2 NOT STARTED
+TASK 4 STATE-MACHINE REMEDIATION DESIGN FROZEN
+TASK 4 CODE REMEDIATION PENDING
+TASK 5 NOT STARTED
+
+Task 1–3 的历史状态和已完成契约仍保留在下文；本状态块表示本轮 review-remediation freeze 的当前结论。
 
 ## Task 1 Independent Review Findings — formal adjudication
 
@@ -1055,30 +1056,128 @@ type RolloutAggregationResult =
 
 所有失败均为真正的 discriminated union，不使用所有 `kind` 共享的模糊 `count?: number`。utility、leaf、policy、kernel、aggregation 在进入下一个阶段前必须检查 `ok`；任何失败都不返回部分排序。
 
-### 3.5.1 Task 4 Private Boundary Reconciliation Freeze
+### 3.5.1 D2F Task 4 State-Machine Remediation Design Freeze
 
-Task 4 的 isolated private rollout boundary 统一冻结为：
+本节替换旧的 Private Boundary Reconciliation 条款，是本轮唯一有效的 Task 4 state-machine remediation 规范。当前 HEAD 的真实代码复核结论如下：F1、F2、F3、F4、F5、F6、F7 均确认；没有 reviewer finding 被无证据驳回。
+
+#### F1 — canonical multi-card identity
+
+`src/game/publicEventHash.ts` 的 `finalizePublicActionEvent` 经 `normalizeDraft` 对 play/tribute/return 的 `publicCardIds` 执行默认字符串 `sort()`，因此 finalized public event 的牌序是 canonical code-unit order。`src/ai/rollout/stateConservation.ts` 当前 `validatePlayTransition` 却用原始 action 顺序检查 `publicPlayedCardIds` prefix；`kernel.ts` 先写入 finalized event 的 canonical 顺序，所以输入顺序不同的合法动作会被拒绝。`createDeck()` 的两副牌、四种花色、13 个等级和两种 joker 共 108 张；id 由真实 `kind/rank/suit/copy` 唯一确定，不存在合法的相同 card ID。
+
+冻结规则：
+
+- action 与 finalized public event 的牌身份比较使用 exact card-ID set/multiset equality，不使用输入数组位置；实现不使用 `localeCompare`。
+- 因真实 card ID 必须唯一，action 内重复 ID 独立拒绝；missing、extra、foreign ID 各自拒绝，不能只比较长度。等价实现必须同时检查计数 map 与 canonical deck membership。
+- event 继续保留现有 canonical public order；从 hand 删除按 card ID 过滤，不依赖输入顺序或 prefix。
+- RED 必须直接从 `runRolloutReplicate` 的 root-action path 证明：合法 pair 的 action 顺序与 finalized event 顺序不同仍成功；另一种 compound play（固定使用 full-house）同样成功；同集合不同顺序成功；duplicate、missing、extra、foreign 各返回 typed failure。
+
+#### F2 — kernel unknown-input boundary
+
+真实入口是 `runRolloutReplicate(input, rootIdentity)`，当前实现先读取 `input.validatedBudget`，再读取 `scenario.privateState` 并 `structuredClone`，均早于 envelope/schema validation；这是 confirmed getter boundary defect。现有 `contracts.ts` 的 `validateRolloutBudget` 是可复用的正式 budget validator；其 descriptor-first/plain-data/cycle 数值语义是 Task 4 的唯一参考，Task 4 不新增另一套规则，也不修改 contracts union/interface。
+
+冻结入口流水线，且每一层失败都返回 typed `RolloutReplicateResult` failure：
 
 ~~~text
-particleBankInternals.ts
-  -> particleBankRolloutAccess.ts
-  -> particleScenarioSource.ts
-  -> kernel.ts isolated state
-  -> seat-local observation
-  -> policy.ts
+unknown input
+  -> strict envelope/prototype/own-key/data-descriptor validation
+  -> nested plain-data validation
+  -> semantic validation
+  -> fresh isolated projection
+  -> rollout execution
 ~~~
 
-职责固定如下：
+envelope 的 exact own keys 是 `candidate`、`scenario`、`publicState`、`replicateIdentity`、`random`、`validatedBudget`。在读取这些字段前，必须完成 `Object.getPrototypeOf`、`Reflect.ownKeys`、exact own keys、own data descriptor、no accessor、no symbol、no function 检查；对象必须是 `Object.prototype`/`null` plain record，数组必须是 `Array.prototype` 的 contiguous canonical array，无 sparse hole、expando、custom iterator/map。所有座位、计数、ply、budget 和 index 均为 finite safe integer，拒绝 `-0`；图必须拒绝 cycle。`structuredClone` 只允许作用于完成上述验证的安全图或可信内部图。Proxy trap 抛错、getter、callback、`CrnView` 以外的可执行值均捕获为 typed failure；成功或失败都不得抛出、返回 partial result 或在 diagnostics 回显 hostile input/private state。getter/callback 调用计数必须为零。
 
-- `particleBankRolloutAccess.ts` 是唯一读取 ParticleBank internals 的 production reader；它不进入 public barrel，负责 private records/scenario/weights/ESS 验证，并只返回隔离 projection。
-- `particleScenarioSource.ts` 是唯一调用 private bridge 的 production consumer；它完成 private replay 与 public consistency 二次验证，并产生冻结、隔离的 `RolloutScenario`。
-- `kernel.ts` 只能消费 `particleScenarioSource.ts` 已产生的 `RolloutScenario`、`RolloutReplicateInput` 和其中的 isolated `privateState`；它不得导入 `particleBankRolloutAccess.ts` 或 `particleBankInternals.ts`，不得读取 ParticleBank handle、WeakMap 或 raw private records，不得把 private state 传给 policy 或 diagnostics，且必须先 clone/isolate 再执行模拟。
-- `policy.ts` 不得获得 `RolloutScenario`、`privateState` 或四座位完整 hands；它只能获得当前 acting seat 的 `SeatLocalObservation`、`RolloutPolicyDecisionContext` 和 `CrnView`，不得导入 kernel、particles、Room 或 planning private state。
+#### F3 — complete seat-local observation
 
-现有 Compiler API Gate 的新语义保持 exact set：`tests/ai/rollout/particleBankRolloutBoundary.test.ts` 使用 TypeScript Compiler API 与 resolved symbols，精确允许 production contract symbol 出现在 `src/ai/rollout/contracts.ts`（声明）、`src/ai/rollout/particleScenarioSource.ts`（producer）和 `src/ai/rollout/kernel.ts`（isolated consumer）；Gate 文件本身不是 production consumer。Gate 不得使用“rollout 目录全部允许”、basename 模糊匹配或文本 grep 替代 symbol resolution。它必须继续证明 internals reader 唯一、bridge consumer 唯一、kernel 只能消费 source 产生的 isolated contract、policy 不能获得 private contract、无 re-export/public barrel 泄漏，并保留 Task 1 的全部既有断言。
-因此 `policy.ts`、`stateConservation.ts`、`aggregation.ts`、`evaluation.ts`、`shadowObserver.ts`、`Room`、`planning` 和 public barrel 均不得直接消费 private scenario 或 isolated private contract；它们不在 exact consumer set。
+policy 的 observation exact keys 固定为 `hand`、`publicHistoryEvents`、`handCounts`、`currentLastPlay`、`finishOrder`、`gameRank`。它只能收到 acting seat 的完整 hand 和公开数据，永远不能收到 kernel private state、scenario、其他座位 hand、weights 或 seed。
 
-Task 4 正式 code/test allowlist 精确为七个文件：
+- `hand` 中每张 card 先以真实 exact schema 验证：suited 只允许 `id/kind/rank/suit/copy`，joker 只允许 `id/kind/rank/copy`；rank/suit/copy 和 id 的 canonical 关系必须与 `src/engine/cards.ts` 一致，拒绝未知/foreign/duplicate ID。
+- `handCounts` 只允许 canonical keys `0`,`1`,`2`,`3`；每个 count finite、nonnegative、safe integer 且拒绝 `-0`。
+- `finishOrder` 只含 `0|1|2|3`，不重复；`gameRank` 必须是 `RANKS` 的合法值。
+- `currentLastPlay` 为 null 或完整 canonical `CardGroup`；其 exact group keys、type/purpose、cards、wildcards、strength、card schema、无重复 ID、wildcard 投影和牌型语义都必须验证。
+- `publicHistoryEvents` 是 contiguous canonical array；每个 event 先做 exact nested descriptor/prototype/own-key validation，再复用 `assertFinalizedPublicActionEvent` 与 `verifyPublicActionEventHash` 的正式公共事件语义。play event 的 card IDs 必须 canonical、唯一并与 event kind/count/trick 字段相符；transfer/finish/pass/trick-clear 的字段也必须完整合法。
+- 所有 nested object/array 都先 descriptor-first 验证再逐字段复制；不得把 caller observation 保留为 policy state。getter、accessor、symbol、custom prototype、function、sparse/expando array 一律 typed fail；failure 不产生 action。`CrnView.value()` 抛错映射为现有 `{ kind: "invalid-policy-context", field: "ply" }`，不得逃逸。
+
+#### F4 — authoritative early terminal and finish projection
+
+`src/game/room.ts` 的真实 `advanceAfterAction` 在每次 play/pass 的正式 transition 后检查：`finishOrder.length >= 3` 或 `partnersFinishedFirstAndSecond(room)`；后者要求前两名 finishers 是 partner。命中后 `finishRound` 补齐四座位并调用 `settleRound`；`settleRound` 只接受四座位顺序，并按第一名的 partner place 决定 double-down/single-down/single-win。Task 4 不修改 Room/settlement。
+
+冻结 kernel 规则：root action 和每个 policy action 完成同一 transactional transition 后都立即检查 terminal；root action 触发 early terminal 时，即使剩余 budget 为最小合法值，也不得调用 policy、走 budget-exhausted 或调用 leaf。每个后续 action 后同样检查；已完成 seat 永远跳过，普通两名非搭档完成时继续模拟。
+
+terminal 顺序固定为：`nextState` 完成 hand/count/finish/trick/turn 更新 → transition validation → conservation validation → terminal predicate/projection validation → terminal utility evaluation；terminal 分支不调用 `evaluateNonTerminalLeaf`。非 terminal 分支先完成 stable-state validation，再以同一个 nextState 调用 leaf；leaf 不得伪造 terminal finish order。
+
+完整四座位 projection 固定为：保留真实 `finishOrder` prefix；长度为 3 时追加唯一未完成 seat；前两名为搭档且尚未有第三名时，从最后一个真实 finisher 按 Room 的 `nextPlayableSeat` 方向（seat - 1 modulo 4）跳过已完成座位，依次追加两个剩余 seat；已有完整四名则原样保留。该规则不按绝对 seat number 排序，且旋转不变。例如 `[0,2] -> [0,2,1,3]`、`[1,3] -> [1,3,2,0]`；三人 `[0,1,2] -> [0,1,2,3]`。`[0,2,1,3]` 下 perspective 0 的 utility 为 `+3`、perspective 1 为 `-3`，因为 winner partner place 是 2；projection 的后两名只用于补齐完整输入，不得改变该 utility。
+
+#### F5 — independent canonical card universe
+
+expected universe 不是从待验证 state 反推，而是：
+
+~~~text
+U = Set(createDeck().map(card => card.id))
+|U| = 108
+physicalLocations = Set(all four hand card IDs ∪ publicPlayedCardIds)
+require physicalLocations === U
+~~~
+
+四个 hand 与 `publicPlayedCardIds` 必须互斥、各自无重复、所有 ID 属于 U，且并集 exact 等于 U；`expectedCardIds` 直接来自 trusted `createDeck()` 的 canonical identity。`publicHistoryEvents[*].publicCardIds`、`currentLastPlay.cards` 和 current trick 的 last-play/stable-key 是已经 played card 的公开重复视图，不加入 physicalLocations；它们必须与对应 ledger/event 的 card-ID set exact 相等。tribute/return 的 `publicCardIds` 是 hand-to-hand transfer 视图，也不加入第二个位置；transfer 只能改变 hand ownership，不能创造或销毁 ID。source replay state 先使用现有 `validateCanonicalInitialDeal/createDeck` 防线，再由 kernel public boundary 复核同一 U。正常 multi-particle replay scenario 必须成功；forged、incomplete、extra、duplicate、hand/public overlap 必须失败。
+
+#### F6 — atomic transaction
+
+每个 root action、policy action 和 pass 都使用同一个事务路径：
+
+~~~text
+accepted immutable current state
+  -> construct independent nextState
+  -> apply action to nextState
+  -> update hand/count/finish/trick/turn/public state in nextState
+  -> validate transition(nextState)
+  -> validate conservation(nextState)
+  -> terminal projection or stable-state validation
+  -> evaluate terminal utility or non-terminal leaf on nextState
+  -> commit nextState as current state
+~~~
+
+验证完成前不得写入 accepted current state，不得先写后回滚。任一步失败都丢弃完整 nextState；失败结果不含 state、action、nextState 或 private diagnostics。caller input、scenario、candidate、observation 和 CRN input 始终不变。`validateActionTransition` 的 play/pass 后置失败、conservation 失败、terminal projection 失败和非法 policy action 都必须证明 no partial result；内部 accepted current state 在失败前必须保持 byte/semantic identity。
+
+#### F7 — observation and CRN order
+
+每个 decision 固定为：
+
+~~~text
+current stable state
+  -> construct and validate seat-local observation
+  -> construct current decision CRN coordinate/view
+  -> call fixed policy
+  -> validate policy action
+  -> transactional transition
+~~~
+
+observation 不包含 CRN private material；CRN 继续使用当前 `ply` 与 `actingSeat`，`policyId` 和 `candidateId` 不进入 coordinate/domain/semantic key。该顺序只改变 Task 4 入口时序，不改变 Task 3 known vectors。
+
+#### Failure mapping
+
+现有 `RolloutKernelFailure`/`RolloutPolicyFailure` union 足够表达本轮边界；本轮不修改 `contracts.ts` 的 union 或 interface，也不新增 optional string。映射固定为：
+
+| failure class | exact result |
+| --- | --- |
+| malformed kernel envelope | `{ kind: "simulation-failed", stage: "replay" }` |
+| invalid scenario/private state | `{ kind: "simulation-failed", stage: "replay" }` |
+| invalid seat-local observation | kernel maps to `{ kind: "simulation-failed", stage: "replay" }`; direct policy maps to `{ kind: "invalid-policy-context", field: "actingSeat" }` |
+| invalid card universe | `{ kind: "simulation-failed", stage: "state-conservation" }` |
+| invalid candidate action | `{ kind: "simulation-failed", stage: "replay" }` |
+| policy failure | `{ kind: "policy-failed", failure: RolloutPolicyFailure }` |
+| CRN coordinate/view failure or throwing value | `{ kind: "simulation-failed", stage: "replay" }`, with direct `CrnView.value()` throw normalized to policy `invalid-policy-context/ply` |
+| transition failure | `{ kind: "simulation-failed", stage: "state-conservation" }` |
+| conservation failure | `{ kind: "simulation-failed", stage: "state-conservation" }` |
+| terminal projection failure | `{ kind: "simulation-failed", stage: "leaf-evaluation" }` |
+| budget exhaustion | `{ kind: "budget-exhausted", workUnits, maximumWorkUnits }` |
+
+All branches are no-throw, no-partial-result, and diagnostics-free of hostile/private data. Existing `validateRolloutBudget`, canonical action identity, public event validators and source replay validators remain the reusable authorities; no incompatible contracts field is introduced.
+
+#### Next-round exact code allowlist
+
+The six paths below are the complete allowlist and must be identical in all three D2F documents:
 
 ~~~text
 src/ai/rollout/policy.ts
@@ -1087,16 +1186,37 @@ src/ai/rollout/stateConservation.ts
 tests/ai/rollout/policy.test.ts
 tests/ai/rollout/kernel.test.ts
 tests/ai/rollout/rolloutPrivacyAst.test.ts
-tests/ai/rollout/particleBankRolloutBoundary.test.ts
 ~~~
 
-新增且仅新增的既有 Gate 修改文件是 `tests/ai/rollout/particleBankRolloutBoundary.test.ts`。历史 rescue-only 路径 `src/ai/rollout/rolloutPolicy.ts`、`src/ai/rollout/rolloutKernel.ts`、`tests/ai/rollout/rolloutKernel.test.ts` 和 `tests/ai/rollout/rolloutPolicyPrivacy.test.ts` 禁止恢复；它们不属于正式 source 链。
+`src/ai/rollout/contracts.ts` is not allowed because the existing failure union/interface is sufficient and `validateRolloutBudget` is already reusable. `tests/ai/rollout/particleBankRolloutBoundary.test.ts` is not allowed because Task 4 adds no bridge/source production change; kernel tests invoke the real source replay path. Forbidden paths remain `src/game/**`, `src/engine/**`, `src/ai/particles/**`, `src/ai/planning/**`, `src/ai/aiDecisionEngine.ts`, package/lock/config files and Task 5–9 files.
 
-Task 4 关键接口继续冻结：`createInternalRolloutPolicy(policyId)` 是 exhaustive literal factory，只接受 `"d2f-lightweight-v1"`，不接受 callback、closure、caller factory 或 dynamic registry；`policyId` 只进入 provenance/configuration，不进入 CRN coordinate/value。每个模拟决策都重新构造 `root + scenario + replicate + ply + acting seat + random domain` 的 `CrnCoordinate`/`CrnView`，不得复用固定 `ply=0` 或 `actingSeat=0` 的 view，也不得让 `candidateId` 进入 CRN。每个 ply 严格执行：`stable isolated state → acting seat-local observation → createCrnCoordinate → createCrnView → internal policy → apply legal action → update hand counts/finish/trick/turn → conservation check`。
+#### Frozen TDD RED matrix
 
-Task 4 RED/GREEN gate 必须先覆盖真实行为失败：private boundary RED（正式 `kernel.ts` 尚不存在或尚未被 exact consumer Gate 识别）；policy factory RED（literal factory 尚不存在，旧 `createFixedRolloutPolicy()` 不满足接口）；CRN ownership RED（两个 ply 或不同 acting seat 的决策能揭示固定 view 的错误配对）；privacy RED（opponent hand、full hands、privateState、raw scenario、callback/factory/registry 均被真实 production 类型、runtime validation 或 Compiler API Gate 拒绝）；state conservation RED（`stateConservation.ts` 尚不存在，且真实 duplicate/missing card、hand-count mismatch、finish mismatch 断言失败）。不能只用模块不存在作为全部行为 RED。GREEN 必须保留这些断言及 Task 1 Gate，且本轮不实施 Task 4 production 或 tests。
+Every row uses an existing production entry and must fail for the missing behavior, not because a module or fixture is absent. This round records the matrix only; no Vitest/tsc/build/benchmark runs are authorized.
 
-Task 4 production/tests 尚未开始；Task 5–9 不提前开始。
+| slice | real entry and RED cases | required GREEN evidence |
+| --- | --- | --- |
+| Multi-card identity | `runRolloutReplicate` root action: pair with noncanonical input order, full-house with noncanonical order, same-set permutation, duplicate/missing/extra/foreign ID | legal pair and compound action succeed; exact identity rejects all five invalid classes; event remains canonical |
+| Kernel hostile boundary | `runRolloutReplicate(unknown)` with top-level/nested/budget getter, symbol, accessor, custom prototype, inherited iterator/map, sparse/expando array, cycle | zero getter/callback calls, typed failure, no throw, no partial result, no hostile/private diagnostics |
+| Policy observation | `createInternalRolloutPolicy(...).listLegalActions/chooseAction` with NaN/Infinity/fraction/negative/unsafe/-0 counts, missing/extra count keys, duplicate/unknown finish seat, malformed card, nested getter, hostile event, throwing `CrnView.value` | exact nested schema, caller unchanged, no partial action, typed policy failure, no private/other-seat hand exposure |
+| Early terminal | `runRolloutReplicate` root and fixed-policy paths for partner first two, three completed seats, ordinary nonterminal; terminal utility and rotation/team perspectives | minimum budget still terminates; no later policy or leaf; completed seats skipped; full finish order and `+3/-3` projection are stable |
+| Card universe | `runRolloutReplicate` with canonical full deck, missing/extra/duplicate/overlap/forged state; real `createParticleScenarioSource` replay output including transfer/history/current-trick duplicate views | exact U succeeds; malformed scenarios fail; history/current-trick views are not double-counted; transfer preserves U; normal multi-particle replay succeeds |
+| Transaction | root/policy play and pass through `runRolloutReplicate`, plus `validateActionTransition`: post-validation play/pass failure, conservation failure, terminal projection failure, illegal policy action | accepted state unchanged before failure, caller input unchanged, no partial result, no private diagnostics; all actions use one atomic path |
+
+#### Deferred gates and current status
+
+本轮只冻结设计，不运行代码验证，不修改 production/tests，不开始 Task 5。保持：
+
+~~~text
+TASK 4 STATE-MACHINE REMEDIATION DESIGN FROZEN
+TASK 4 CODE REMEDIATION PENDING
+TASK 5 NOT STARTED
+AWAITING_FIXED_BENCHMARK_RUNNER
+AWAITING_NODE22_CI
+Task 9 full permitted regression
+~~~
+
+本冻结不等于 D2F Shadow release ready。
 
 ### 3.6 Aggregation、risk 和排序
 
@@ -1282,3 +1402,34 @@ binary 执行 `tsx --version` 和 benchmark。不得用 `npx tsx`、临时网络
 不存在时状态固定为 `AWAITING_FIXED_BENCHMARK_RUNNER`，不得跳过 benchmark RED 或把 benchmark
 纳入普通 correctness 回归。Node 22 证据同样是最终 release Gate 的前置条件而非 Task 1 blocker；
 未取得 Node 22 证据前不得称为 D2F SHADOW RELEASE READY。
+
+## D2F Task 4 cross-document canonical literals
+
+The following lines are the shared literal contract for all three D2F documents; every occurrence must remain word-for-word identical.
+
+Finding verdict: F1 confirmed canonical multi-card identity defect; F2 confirmed pre-validation kernel getter boundary; F3 confirmed top-level-only policy observation validation; F4 confirmed Room early-terminal mismatch; F5 confirmed self-derived card universe; F6 confirmed non-transactional transition; F7 confirmed observation/CRN ordering defect.
+
+Canonical terminal rule: after every root or policy action, finish/count/trick/turn updates are complete, transition and conservation validation pass, then the kernel checks terminal. Terminal is true when finishOrder.length >= 3 or the first two finishers are partners; two non-partner finishers are non-terminal. A root early terminal returns before any later policy, budget-exhausted path, or leaf call; completed seats are skipped.
+
+Canonical terminal projection: preserve the real finishOrder prefix; if three seats are finished append the sole remaining seat; if the first two finishers are partners and no third finisher exists, append remaining seats by repeated Room nextPlayableSeat (seat - 1 modulo 4) from the last real finisher while skipping finished seats; if four seats are present preserve the order. Examples: [0,2] -> [0,2,1,3], [1,3] -> [1,3,2,0], [0,1,2] -> [0,1,2,3]. For [0,2,1,3], perspective 0 utility is +3 and perspective 1 utility is -3. No absolute-seat sort and no leaf heuristic may create terminal ranks.
+
+Canonical card universe: U = Set(createDeck().map(card => card.id)); |U| = 108; physicalLocations = Set(all four hand card IDs union publicPlayedCardIds); require physicalLocations === U. History event IDs, currentLastPlay cards, and current-trick stable keys are duplicate public views and are checked without adding another physical location; tribute/return IDs are transfer views and cannot create or destroy a card.
+
+Canonical transaction: accepted immutable current state -> independent nextState -> apply action and all hand/count/finish/trick/turn/public updates to nextState -> validate transition -> validate conservation -> validate terminal projection or stable state -> evaluate terminal utility or non-terminal leaf on nextState -> commit nextState. No accepted current state mutation before validation, no rollback, no partial result, and caller input remains unchanged.
+
+Canonical decision order: current stable state -> validated seat-local observation -> current ply/acting-seat CRN coordinate/view -> fixed policy -> policy-action validation -> transactional transition. Observation contains no CRN private material; policyId and candidateId never enter CRN; Task 3 known vectors remain unchanged.
+
+Canonical failure mapping: malformed envelope, invalid scenario/private state, invalid candidate, and CRN failure -> simulation-failed/replay; invalid observation at kernel boundary -> simulation-failed/replay; direct policy observation failure -> invalid-policy-context(field=actingSeat); card universe, transition, and conservation failure -> simulation-failed/state-conservation; policy failure -> policy-failed; terminal projection failure -> simulation-failed/leaf-evaluation; budget exhaustion -> budget-exhausted(workUnits, maximumWorkUnits). CrnView.value() throw -> invalid-policy-context(field=ply). Every failure is typed, no-throw, no-partial, and contains no hostile input or private state.
+
+Canonical next-round allowlist:
+
+~~~text
+src/ai/rollout/policy.ts
+src/ai/rollout/kernel.ts
+src/ai/rollout/stateConservation.ts
+tests/ai/rollout/policy.test.ts
+tests/ai/rollout/kernel.test.ts
+tests/ai/rollout/rolloutPrivacyAst.test.ts
+~~~
+
+Canonical RED IDs: MC-PAIR, MC-COMPOUND, MC-DUPLICATE, MC-MISSING, MC-EXTRA, MC-FOREIGN, K-GETTER, K-NESTED-GETTER, K-BUDGET-GETTER, K-SYMBOL, K-ACCESSOR, K-PROTOTYPE, K-ITERATOR, K-SPARSE, K-CYCLE, P-COUNT-NUMBERS, P-COUNT-KEYS, P-FINISH, P-CARD, P-NESTED-GETTER, P-EVENT, P-CRN-THROW, T-ROOT-EARLY, T-POLICY-EARLY, T-THREE-FINISH, T-NONTERMINAL, T-NO-POLICY, T-NO-LEAF, T-PROJECTION, T-UTILITY, T-ROTATION, U-CANONICAL, U-MISSING, U-EXTRA, U-DUPLICATE, U-OVERLAP, U-HISTORY-VIEW, U-TRANSFER, U-FORGED, U-SOURCE, X-PLAY-POST, X-PASS-POST, X-CONSERVATION, X-TERMINAL-PROJECTION, X-ILLEGAL-ACTION, X-STATE-UNCHANGED, X-CALLER-UNCHANGED, X-NO-PARTIAL, X-NO-DIAGNOSTIC.
