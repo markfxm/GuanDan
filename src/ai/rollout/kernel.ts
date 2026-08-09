@@ -9,7 +9,8 @@ import {
   type PublicSeat,
 } from "../../game/publicEvent";
 import { finalizePublicActionEvent } from "../../game/publicEventHash";
-import { applyPublicEvent, type HardPublicLedger } from "../../game/publicLedger";
+import { verifyPublicActionEventHash } from "../../game/publicEventHash";
+import { applyPublicEvent, canonicalPublicLedgerHash, type HardPublicLedger } from "../../game/publicLedger";
 import { evaluateNonTerminalLeaf } from "./leafEvaluation";
 import { createCrnView } from "./crn";
 import {
@@ -17,15 +18,18 @@ import {
   createCrnCoordinate,
   deriveRandomDomain,
 } from "./identity";
-import { createInternalRolloutPolicy } from "./policy";
+import { createInternalRolloutPolicy, validateSeatLocalObservation } from "./policy";
 import {
   validateActionTransition,
+  validatePublicHistoryAppend,
   validateRolloutState,
   type IsolatedRolloutState,
+  type StateConservationFailure,
 } from "./stateConservation";
 import { evaluateTeamUtility } from "./teamUtility";
 import {
   validateRolloutBudget,
+  isHardPublicLedger,
   canonicalActionIdentity,
   type RolloutAction,
   type RolloutKernelFailure,
@@ -38,7 +42,7 @@ import type { RootIdentity } from "./contracts";
 
 const SEATS: readonly PublicSeat[] = [0, 1, 2, 3];
 const RANDOM_DOMAIN_LABEL = "policy-action-v1";
-const INPUT_KEYS = ["candidate", "scenario", "publicState", "replicateIdentity", "random", "validatedBudget"] as const;
+const INPUT_KEYS = ["candidate", "scenario", "publicState", "publicReplayContext", "replicateIdentity", "random", "validatedBudget"] as const;
 
 type MutableRolloutState = {
   hands: Record<PublicSeat, Card[]>;
@@ -61,42 +65,62 @@ type MutableRolloutState = {
   publicEvents: PublicActionEvent[];
 };
 
+type InputIsolationResult =
+  | { ok: true; input: RolloutReplicateInput }
+  | { ok: false; failure: Extract<RolloutKernelFailure, { kind: "simulation-failed" }> };
+
+type ActionApplicationResult =
+  | { ok: true; state: MutableRolloutState }
+  | {
+      ok: false;
+      failure:
+        | { kind: "illegal-action" }
+        | Extract<RolloutKernelFailure, { kind: "simulation-failed"; stage: "transition" | "state-conservation" }>;
+    };
+
 export function runRolloutReplicate(
   input: RolloutReplicateInput,
   rootIdentity: RootIdentity,
 ): RolloutReplicateResult {
-  const isolatedInput = isolateRolloutInput(input);
-  if (isolatedInput === undefined) return simulationFailure("replay");
+  const isolated = isolateRolloutInput(input);
+  if (!isolated.ok) return simulationFailure(isolated.failure);
+  const isolatedInput = isolated.input;
   const budget = validateInputBudget(isolatedInput);
-  if (!budget.ok) return budgetFailure(0, 0);
-  if (!isRootIdentity(rootIdentity)) return simulationFailure("replay");
+  if (!budget.ok) return simulationFailure({ kind: "simulation-failed", stage: "input", reason: "invalid-budget" });
+  if (!isRootIdentity(rootIdentity)) return simulationFailure({ kind: "simulation-failed", stage: "input", reason: "invalid-root-identity" });
 
   let state: MutableRolloutState;
   try {
     state = createIsolatedState(isolatedInput);
   } catch {
-    return simulationFailure("state-conservation");
+    return simulationFailure({ kind: "simulation-failed", stage: "replay", reason: "invalid-scenario" });
   }
-  if (!stateConservationOk(state)) return simulationFailure("state-conservation");
+  const initialConservation = validateRolloutState(toConservationState(state));
+  if (!initialConservation.ok) return simulationFailure(classifyConservationFailure(initialConservation.failure));
 
   let workUnits = 1;
   if (workUnits > budget.value.maximumWorkUnits) return budgetFailure(workUnits, budget.value.maximumWorkUnits);
 
   const rootApplied = applyLegalAction(state, isolatedInput.candidate.action);
-  if (rootApplied === undefined) return simulationFailure("replay");
-  state = rootApplied;
+  if (!rootApplied.ok) {
+    return rootApplied.failure.kind === "illegal-action"
+      ? simulationFailure({ kind: "simulation-failed", stage: "root-action", reason: "illegal-action" })
+      : simulationFailure(rootApplied.failure);
+  }
+  state = rootApplied.state;
 
   const rootTerminal = terminalResult(state, isolatedInput, workUnits);
   if (rootTerminal !== undefined) return rootTerminal;
 
-  const policyResult = createInternalRolloutPolicy("d2f-lightweight-v1");
-  if (!policyResult.ok) return policyFailure({ kind: "invalid-policy-context", field: "ply" });
-  const policy = policyResult.policy;
-
   for (let ply = 0; ply < budget.value.budget.maxPliesPerReplicate; ply += 1) {
-    const observation = makeObservation(state);
+    const observationResult = validateSeatLocalObservation(makeObservation(state));
+    if (!observationResult.ok) return policyFailure(observationResult.failure);
+    const observation = observationResult.observation;
     const random = createDecisionCrn(rootIdentity, isolatedInput, ply, state.actingSeat);
-    if (!random.ok) return simulationFailure("replay");
+    if (!random.ok) return simulationFailure({ kind: "simulation-failed", stage: "crn", reason: random.reason });
+    const policyResult = createInternalRolloutPolicy("d2f-lightweight-v1");
+    if (!policyResult.ok) return policyFailure({ kind: "invalid-policy-context", field: "ply", reason: "invalid-ply" });
+    const policy = policyResult.policy;
     const legalActions = policy.listLegalActions(observation);
     if (legalActions.length === 0) return policyFailure({ kind: "no-legal-action", actingSeat: state.actingSeat });
     if (legalActions.length > budget.value.budget.maxPolicyActionEvaluationsPerPly) {
@@ -115,20 +139,24 @@ export function runRolloutReplicate(
     workUnits += legalActions.length;
 
     const applied = applyLegalAction(state, chosen.action);
-    if (applied === undefined) return simulationFailure("replay");
-    state = applied;
+    if (!applied.ok) {
+      return applied.failure.kind === "illegal-action"
+        ? simulationFailure({ kind: "simulation-failed", stage: "policy-action", reason: "illegal-action" })
+        : simulationFailure(applied.failure);
+    }
+    state = applied.state;
 
     const terminal = terminalResult(state, isolatedInput, workUnits);
     if (terminal !== undefined) return terminal;
   }
 
   const leaf = evaluateNonTerminalLeaf({
-    perspectiveSeat: input.publicState.perspectiveSeat,
+    perspectiveSeat: isolatedInput.publicState.perspectiveSeat,
     actingSeat: state.actingSeat,
     finishOrder: state.finishOrder,
     handCounts: state.handCounts,
   });
-  if (!leaf.ok) return simulationFailure("leaf-evaluation");
+  if (!leaf.ok) return simulationFailure({ kind: "simulation-failed", stage: "terminal-projection", reason: "utility-failed" });
   return Object.freeze({
     ok: true as const,
     candidateId: isolatedInput.candidate.candidateId,
@@ -151,31 +179,89 @@ function validateInputBudget(input: RolloutReplicateInput): ReturnType<typeof va
   }
 }
 
-function isolateRolloutInput(input: unknown): RolloutReplicateInput | undefined {
+function isolateRolloutInput(input: unknown): InputIsolationResult {
   try {
-    if (!isPlainDataRecord(input, INPUT_KEYS, true)) return undefined;
+    if (!isPlainDataRecord(input, INPUT_KEYS, true)) return isolationFailure("input", "malformed-envelope");
     const candidate = getOwnData(input, "candidate");
     const scenario = getOwnData(input, "scenario");
     const publicState = getOwnData(input, "publicState");
+    const publicReplayContext = getOwnData(input, "publicReplayContext");
     const replicateIdentity = getOwnData(input, "replicateIdentity");
     const random = getOwnData(input, "random");
     const validatedBudget = getOwnData(input, "validatedBudget");
-    if (!isPlainDataGraph(candidate) || !isPlainDataGraph(scenario) || !isPlainDataGraph(publicState) || !isPlainDataGraph(replicateIdentity) || !isPlainDataGraph(validatedBudget) || !isCrnViewEnvelope(random)) return undefined;
-    if (!isCandidateInput(candidate) || !isScenarioInput(scenario) || !isPublicStateInput(publicState) || typeof replicateIdentity !== "string" || !/^[a-f0-9]{64}$/.test(replicateIdentity)) return undefined;
+    if (!isPlainDataGraph(candidate) || !isCandidateInput(candidate)) return isolationFailure("input", "invalid-candidate");
+    if (!isPlainDataGraph(scenario) || !isScenarioInput(scenario)) return isolationFailure("replay", "invalid-scenario");
+    if (!isPlainDataGraph(publicState) || !isPublicStateInput(publicState)) return isolationFailure("input", "invalid-public-state");
+    if (!isPlainDataGraph(publicReplayContext) || !isValidPublicReplayContext(publicReplayContext, scenario)) return isolationFailure("replay", "invalid-replay-context");
+    if (!isPlainDataGraph(replicateIdentity) || typeof replicateIdentity !== "string" || !/^[a-f0-9]{64}$/.test(replicateIdentity) || !isCrnViewEnvelope(random)) return isolationFailure("input", "malformed-envelope");
+    if (!isPlainDataGraph(validatedBudget)) return isolationFailure("input", "invalid-budget");
     const safeInput = {
       candidate: structuredClone(candidate),
       scenario: structuredClone(scenario),
       publicState: structuredClone(publicState),
+      publicReplayContext: structuredClone(publicReplayContext),
       replicateIdentity: structuredClone(replicateIdentity),
       random,
       validatedBudget: structuredClone(validatedBudget),
     } as RolloutReplicateInput;
     const budget = validateInputBudget(safeInput);
-    if (!budget.ok) return undefined;
-    return Object.freeze(safeInput);
+    if (!budget.ok) return isolationFailure("input", "invalid-budget");
+    return { ok: true, input: Object.freeze(safeInput) };
   } catch {
-    return undefined;
+    return isolationFailure("input", "malformed-envelope");
   }
+}
+
+function isolationFailure(
+  stage: "input" | "replay",
+  reason: "malformed-envelope" | "invalid-budget" | "invalid-public-state" | "invalid-candidate" | "invalid-scenario" | "invalid-replay-context",
+): InputIsolationResult {
+  return { ok: false, failure: { kind: "simulation-failed", stage, reason } as Extract<RolloutKernelFailure, { kind: "simulation-failed" }> };
+}
+
+function isValidPublicReplayContext(value: unknown, scenario: unknown): boolean {
+  if (!isPlainDataRecord(value, ["publicHistoryEvents", "initialLedger", "finalLedger"], true)) return false;
+  const events = value.publicHistoryEvents;
+  const initialLedger = value.initialLedger;
+  const finalLedger = value.finalLedger;
+  if (!isPlainDataArray(events) || !isHardPublicLedger(initialLedger) || !isHardPublicLedger(finalLedger)) return false;
+  if (!isPlainDataRecord(scenario) || !isPlainDataRecord(scenario.privateState) || !isPlainDataRecord(scenario.privateState.ledger)) return false;
+  try {
+    const initial = initialLedger as HardPublicLedger;
+    const final = finalLedger as HardPublicLedger;
+    if (!isInitialOpeningLedger(initial)) return false;
+    if (events.length !== final.nextEventIndex || final.lastAppliedEventIndex !== events.length - 1) return false;
+    if (events.length === 0 && canonicalPublicLedgerHash(initial) !== canonicalPublicLedgerHash(final)) return false;
+    let ledger = initialLedger as HardPublicLedger;
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index] as PublicActionEvent;
+      if (event.eventIndex !== index) return false;
+      verifyPublicActionEventHash(event);
+      const applied = applyPublicEvent(ledger, event);
+      if (!applied.ok || applied.kind !== "applied") return false;
+      ledger = applied.ledger;
+    }
+    return canonicalPublicLedgerHash(ledger) === canonicalPublicLedgerHash(finalLedger as HardPublicLedger)
+      && canonicalPublicLedgerHash(finalLedger as HardPublicLedger) === canonicalPublicLedgerHash(scenario.privateState.ledger as HardPublicLedger);
+  } catch {
+    return false;
+  }
+}
+
+function isInitialOpeningLedger(ledger: HardPublicLedger): boolean {
+  return ledger.lastAppliedEventIndex === -1
+    && ledger.nextEventIndex === 0
+    && Reflect.ownKeys(ledger.seenEventHashes).length === 0
+    && ledger.playedCardIds.length === 0
+    && ledger.revealedTransferEvents.length === 0
+    && ledger.finishOrder.length === 0
+    && ledger.publicTributeEvents.length === 1
+    && ledger.publicTributeEvents.every((event) => typeof event === "string" && event.length > 0)
+    && ledger.handCounts[0] + ledger.handCounts[1] + ledger.handCounts[2] + ledger.handCounts[3] === 108
+    && ledger.currentTrick.passSeats.length === 0
+    && ledger.currentTrick.lastPlaySeat === undefined
+    && ledger.currentTrick.lastPlayStableKey === undefined
+    && ledger.recentActionSummaries.length === 0;
 }
 
 function isCandidateInput(value: unknown): boolean {
@@ -404,34 +490,63 @@ function createIsolatedState(input: RolloutReplicateInput): MutableRolloutState 
     actingSeat: input.publicState.actingSeat,
     expectedCardIds,
     gameRank: input.publicState.gameRank,
-    ledger,
-    publicEvents: [],
+    ledger: structuredClone(input.publicReplayContext.finalLedger),
+    publicEvents: [...structuredClone(input.publicReplayContext.publicHistoryEvents)],
   };
 }
 
-function applyLegalAction(state: MutableRolloutState, action: RolloutAction): MutableRolloutState | undefined {
+function applyLegalAction(state: MutableRolloutState, action: RolloutAction): ActionApplicationResult {
   const before = structuredClone(toConservationState(state));
   const candidateState = structuredClone(state) as MutableRolloutState;
   try {
-    if (!applyLegalActionInPlace(candidateState, action)) return undefined;
+    if (!applyLegalActionInPlace(candidateState, action)) return { ok: false, failure: { kind: "illegal-action" } };
   } catch {
-    return undefined;
+    return { ok: false, failure: { kind: "illegal-action" } };
+  }
+  if (!validateHistoryTransition(state, candidateState)) {
+    return { ok: false, failure: { kind: "simulation-failed", stage: "transition", reason: "public-history-not-append-only" } };
   }
   const after = toConservationState(candidateState);
   const transition = validateActionTransition(before, after, action);
-  if (!transition.ok || !stateConservationOk(candidateState)) return undefined;
-  return candidateState;
+  if (!transition.ok) {
+    const reason = transition.failure.reason === "invalid-pass-quorum" ? "invalid-pass-quorum" : "invalid-action-transition";
+    return { ok: false, failure: { kind: "simulation-failed", stage: "transition", reason } };
+  }
+  const conservation = validateRolloutState(after);
+  if (!conservation.ok) {
+    return {
+      ok: false,
+      failure: classifyConservationFailure(conservation.failure),
+    };
+  }
+  return { ok: true, state: candidateState };
+}
+
+function validateHistoryTransition(before: MutableRolloutState, after: MutableRolloutState): boolean {
+  if (after.publicEvents.length <= before.publicEvents.length) return false;
+  let history = [...before.publicEvents];
+  let ledger = before.ledger;
+  for (const event of after.publicEvents.slice(before.publicEvents.length)) {
+    const applied = applyPublicEvent(ledger, event);
+    if (!applied.ok || applied.kind !== "applied") return false;
+    const nextHistory = [...history, event];
+    if (!validatePublicHistoryAppend(history, nextHistory, ledger, applied.ledger).ok) return false;
+    history = nextHistory;
+    ledger = applied.ledger;
+  }
+  return history.length === after.publicEvents.length
+    && canonicalPublicLedgerHash(ledger) === canonicalPublicLedgerHash(after.ledger);
 }
 
 function applyLegalActionInPlace(state: MutableRolloutState, action: RolloutAction): boolean {
   if (action.type === "pass") {
-    if (state.currentLastPlay === null || state.currentLastPlaySeat === null || state.finishOrder.includes(state.actingSeat) || state.currentTrick.passSeats.includes(state.actingSeat)) return false;
+    if (isAuthoritativeTerminal(state.finishOrder) || state.currentLastPlay === null || state.currentLastPlaySeat === null || state.finishOrder.includes(state.actingSeat) || state.currentTrick.passSeats.includes(state.actingSeat)) return false;
     const event = makePassEvent(state);
     if (!appendPublicEvent(state, event)) return false;
     state.currentTrick.passSeats.push(state.actingSeat);
     const lastPlaySeat = state.currentLastPlaySeat;
-    const requiredPasses = SEATS.filter((seat) => !state.finishOrder.includes(seat) && seat !== lastPlaySeat);
-    if (requiredPasses.every((seat) => state.currentTrick.passSeats.includes(seat))) {
+    const requiredPasses = Math.max(1, SEATS.length - state.finishOrder.length - 1);
+    if (state.currentTrick.passSeats.length >= requiredPasses) {
       const leadSeat = resolveTrickWinnerSeat(state, lastPlaySeat);
       const clearEvent = makeTrickClearEvent(state, leadSeat);
       if (!appendPublicEvent(state, clearEvent)) return false;
@@ -466,7 +581,7 @@ function applyLegalActionInPlace(state: MutableRolloutState, action: RolloutActi
       || !sameCardIdMultiset(group.cards.map((card) => card.id), action.group.cards.map((card) => card.id))
       || !canBeatPlay(group, state.currentLastPlay ?? undefined, state.gameRank)) return false;
     const handCountBefore = state.hands[state.actingSeat].length;
-    const event = makePlayEvent(state, group, cardIds, handCountBefore);
+    const event = makePlayEvent(state, group, [...cardIds].sort(), handCountBefore);
     if (!appendPublicEvent(state, event)) return false;
     if (event.kind !== "play" || event.publicCardIds === undefined) return false;
     const orderedIds = [...event.publicCardIds];
@@ -493,9 +608,9 @@ function createDecisionCrn(
   input: RolloutReplicateInput,
   ply: number,
   actingSeat: PublicSeat,
-): ReturnType<typeof createCrnView> {
+): { ok: true; view: import("./contracts").CrnView } | { ok: false; reason: "coordinate" | "random-domain" | "view" } {
   const label = createCanonicalRandomDomainLabel(RANDOM_DOMAIN_LABEL);
-  if (!label.ok) return { ok: false, failure: label.failure };
+  if (!label.ok) return { ok: false, reason: "random-domain" };
   const coordinate = createCrnCoordinate({
     rootIdentity,
     scenarioIdentity: input.scenario.scenarioIdentity,
@@ -504,8 +619,13 @@ function createDecisionCrn(
     actingSeat,
     randomDomain: label.value,
   });
-  if (!coordinate.ok) return coordinate;
-  return createCrnView({ coordinate: coordinate.value, randomDomain: deriveRandomDomain(coordinate.value) });
+  if (!coordinate.ok) return { ok: false, reason: "coordinate" };
+  try {
+    const view = createCrnView({ coordinate: coordinate.value, randomDomain: deriveRandomDomain(coordinate.value) });
+    return view.ok ? view : { ok: false, reason: "view" };
+  } catch {
+    return { ok: false, reason: "random-domain" };
+  }
 }
 
 function makeObservation(state: MutableRolloutState): import("./contracts").SeatLocalObservation {
@@ -522,9 +642,9 @@ function makeObservation(state: MutableRolloutState): import("./contracts").Seat
 function terminalResult(state: MutableRolloutState, input: RolloutReplicateInput, workUnits: number): RolloutReplicateResult | undefined {
   if (!isAuthoritativeTerminal(state.finishOrder)) return undefined;
   const projectedFinishOrder = projectFinishOrder(state.finishOrder);
-  if (projectedFinishOrder === undefined) return simulationFailure("leaf-evaluation");
+  if (projectedFinishOrder === undefined) return simulationFailure({ kind: "simulation-failed", stage: "terminal-projection", reason: "invalid-finish-order" });
   const utility = evaluateTeamUtility({ perspectiveSeat: input.publicState.perspectiveSeat, finishOrder: projectedFinishOrder });
-  if (!utility.ok) return simulationFailure("leaf-evaluation");
+  if (!utility.ok) return simulationFailure({ kind: "simulation-failed", stage: "terminal-projection", reason: "utility-failed" });
   return Object.freeze({
     ok: true as const,
     candidateId: input.candidate.candidateId,
@@ -639,10 +759,6 @@ function makeFinishEvent(state: MutableRolloutState): PublicActionEvent {
   });
 }
 
-function stateConservationOk(state: MutableRolloutState): boolean {
-  return validateRolloutState(toConservationState(state)).ok;
-}
-
 function toConservationState(state: MutableRolloutState): IsolatedRolloutState {
   return {
     hands: state.hands,
@@ -724,6 +840,14 @@ function policyFailure(failure: Extract<RolloutPolicyResult, { ok: false }>["fai
   return Object.freeze({ ok: false as const, failure: Object.freeze({ kind: "policy-failed" as const, failure: Object.freeze(failure) }) });
 }
 
-function simulationFailure(stage: Extract<RolloutKernelFailure, { kind: "simulation-failed" }>["stage"]): RolloutReplicateResult {
-  return Object.freeze({ ok: false as const, failure: Object.freeze({ kind: "simulation-failed" as const, stage }) });
+function simulationFailure(failure: Extract<RolloutKernelFailure, { kind: "simulation-failed" }>): RolloutReplicateResult {
+  return Object.freeze({ ok: false as const, failure: Object.freeze(failure) });
+}
+
+function classifyConservationFailure(
+  failure: StateConservationFailure,
+): Extract<RolloutKernelFailure, { kind: "simulation-failed"; stage: "transition" | "state-conservation" }> {
+  return failure.reason === "invalid-action-transition" || failure.reason === "invalid-pass-quorum" || failure.reason === "public-history-not-append-only"
+    ? { kind: "simulation-failed", stage: "transition", reason: failure.reason }
+    : { kind: "simulation-failed", stage: "state-conservation", reason: failure.reason };
 }

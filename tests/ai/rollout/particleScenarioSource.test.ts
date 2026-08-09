@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { createDeck } from "../../../src/engine/cards";
 import { detectGroups } from "../../../src/engine/groups";
 import { playPublicStableKey, buildPublicGameIdentity, type PublicActionEvent, type PublicActionEventDraft } from "../../../src/game/publicEvent";
@@ -6,10 +6,18 @@ import { applyPublicEvent, canonicalPublicLedgerHash, createInitialPublicLedger,
 import { finalizePublicActionEvent } from "../../../src/game/publicEventHash";
 import { createParticleBankHandle } from "../../../src/ai/particles/particleBankInternals";
 import { particleScenarioIdentity } from "../../../src/ai/particles/canonicalDeal";
-import type { CanonicalInitialDeal, ParticleBank, ParticleScenario } from "../../../src/ai/particles/contracts";
-import { createParticleScenarioSource } from "../../../src/ai/rollout/particleScenarioSource";
+import { buildParticleBank } from "../../../src/ai/particles/particleBankBuilder";
+import type { CanonicalInitialDeal, ParticleBank, ParticleBankBuildInput, ParticleScenario } from "../../../src/ai/particles/contracts";
+import {
+  createParticleScenarioSource,
+  createRolloutReplicateInputFromValidatedSource,
+} from "../../../src/ai/rollout/particleScenarioSource";
+import { runRolloutReplicate } from "../../../src/ai/rollout/kernel";
 import { canonicalActionIdentity, canonicalReplayContextIdentity, createRolloutRequest } from "../../../src/ai/rollout/contracts";
 import type { RolloutScenarioSourceInput } from "../../../src/ai/rollout/contracts";
+import { createCrnView } from "../../../src/ai/rollout/crn";
+import { createCrnCoordinate, deriveRandomDomain } from "../../../src/ai/rollout/identity";
+import * as policyModule from "../../../src/ai/rollout/policy";
 
 function makePlayEvent(identity: ReturnType<typeof buildPublicGameIdentity>, cardId: string): PublicActionEvent {
   const draft: PublicActionEventDraft = {
@@ -469,6 +477,183 @@ describe("particleScenarioSource", () => {
       finishOrder: [],
     });
     expect("scenario" in result.scenarios[0]!.privateState).toBe(false);
+  });
+
+  test("preserves validated pre-root history in the first kernel policy observation", () => {
+    const deck = createDeck();
+    const publicIdentity = buildPublicGameIdentity("d2f-real-builder-source-fixture", 0, 0, "benchmark-scenario");
+    const initialLedger = createInitialPublicLedger({
+      identity: publicIdentity,
+      initialHandCounts: { 0: 27, 1: 27, 2: 27, 3: 27 },
+      openingLeader: 0,
+      initialTrickIndex: 0,
+      openingTributePublicState: { status: "pending" },
+    });
+    const publicHistoryEvents: readonly PublicActionEvent[] = [
+      finalizePublicActionEvent({
+        schemaVersion: "d2-public-event-v2",
+        gameId: publicIdentity.gameId,
+        roundIdentity: publicIdentity.roundIdentity,
+        handIdentity: publicIdentity.handIdentity,
+        eventIndex: 0,
+        kind: "tribute",
+        seat: 1,
+        publicCardIds: [],
+        fromSeat: 1,
+        toSeat: 3,
+        handCountChanges: { 0: 0, 1: -1, 2: 0, 3: 1 },
+        publicStableKey: "tribute:1:3:hidden",
+        trickIndex: 0,
+      }),
+      finalizePublicActionEvent({
+        schemaVersion: "d2-public-event-v2",
+        gameId: publicIdentity.gameId,
+        roundIdentity: publicIdentity.roundIdentity,
+        handIdentity: publicIdentity.handIdentity,
+        eventIndex: 1,
+        kind: "return",
+        seat: 3,
+        publicCardIds: [],
+        fromSeat: 3,
+        toSeat: 1,
+        handCountChanges: { 0: 0, 1: 1, 2: 0, 3: -1 },
+        publicStableKey: "return:3:1:hidden",
+        trickIndex: 0,
+      }),
+    ];
+    let finalLedger = initialLedger;
+    for (const event of publicHistoryEvents) {
+      const applied = applyPublicEvent(finalLedger, event);
+      if (!applied.ok) throw new Error("REAL_BUILDER_SOURCE_EVENT_REJECTED");
+      finalLedger = applied.ledger;
+    }
+    const builtBank = buildParticleBank({
+      schemaVersion: "d2-particle-bank-build-input-v1",
+      publicIdentity,
+      initialLedger,
+      baseLedger: initialLedger,
+      publicHistoryEvents,
+      pendingPublicEvents: publicHistoryEvents,
+      expectedFinalEventIndex: finalLedger.lastAppliedEventIndex,
+      expectedFinalPublicLedgerHash: canonicalPublicLedgerHash(finalLedger),
+      gameRank: "2",
+      actingSeat: 0,
+      ownCurrentHand: deck.slice(0, 27),
+      particleSeed: 0,
+      particleCount: 2,
+      maxSamplingAttempts: 64,
+      maxIndexDraws: 8,
+      samplerConfigVersion: "d2-particle-sampler-v1",
+      likelihoodConfig: {
+        schemaVersion: "d2-particle-likelihood-v1",
+        forcedPassLogFactor: -1,
+        couldBeatButPassedLogFactor: -0.25,
+        observedLeadPlayLogFactor: -0.1,
+        observedFollowPlayLogFactor: -0.2,
+        degradedEssThreshold: 1,
+        normalizationTolerance: 1e-6,
+        essTolerance: 1e-6,
+      },
+    } satisfies ParticleBankBuildInput);
+    expect(builtBank.ok).toBe(true);
+    if (!builtBank.ok) return;
+    expect(builtBank.bank.summary.acceptedParticleCount).toBe(2);
+    const sourceInput: RolloutScenarioSourceInput = {
+      bank: builtBank.bank,
+      publicHistoryEvents,
+      initialLedger,
+      finalLedger,
+      gameRank: "2",
+      perspectiveSeat: 0,
+      ownCurrentHand: deck.slice(0, 27),
+      publicState: {
+        gameRank: "2",
+        actingSeat: 0,
+        perspectiveSeat: 0,
+        partnerSeat: 2,
+        handCounts: { 0: 27, 1: 27, 2: 27, 3: 27 },
+        finishOrder: [],
+        publicPlayedCardIds: [],
+        currentLastPlay: null,
+        currentLastPlaySeat: null,
+      },
+    };
+    const source = createParticleScenarioSource(sourceInput);
+    expect(source.ok).toBe(true);
+    if (!source.ok) return;
+    expect(source.acceptedScenarioCount).toBe(2);
+    const rootIdentity = canonicalReplayContextIdentity({
+      publicHistoryEvents: sourceInput.publicHistoryEvents,
+      initialLedger: sourceInput.initialLedger,
+      finalLedger: sourceInput.finalLedger,
+      gameRank: sourceInput.gameRank,
+      perspectiveSeat: sourceInput.perspectiveSeat,
+      ownCurrentHand: sourceInput.ownCurrentHand,
+      actingSeat: sourceInput.publicState.actingSeat,
+      publicState: sourceInput.publicState,
+      particleBankSnapshot: sourceInput.bank.snapshot,
+    });
+    const replicateIdentity = "3".repeat(64);
+    const coordinate = createCrnCoordinate({
+      rootIdentity,
+      scenarioIdentity: source.scenarios[0]!.scenarioIdentity,
+      replicateIdentity,
+      ply: 0,
+      actingSeat: sourceInput.publicState.actingSeat,
+      randomDomain: "source-history-test",
+    });
+    expect(coordinate.ok).toBe(true);
+    if (!coordinate.ok) return;
+    const random = createCrnView({ coordinate: coordinate.value, randomDomain: deriveRandomDomain(coordinate.value) });
+    expect(random.ok).toBe(true);
+    if (!random.ok) return;
+    const rootGroup = detectGroups([deck[0]!], "2")[0];
+    if (rootGroup === undefined) throw new Error("REAL_BUILDER_ROOT_GROUP_REJECTED");
+    const action = { type: "play", group: rootGroup } as const;
+    const budget = { replicateCountPerScenario: 1, maxPliesPerReplicate: 1, maxPolicyActionEvaluationsPerPly: 256, maxWorkUnits: 256 };
+    const validatedBudget = {
+      budget,
+      limits: { maxReplicateCountPerScenario: 1, maxPliesPerReplicate: 1, maxPolicyActionEvaluationsPerPly: 256, maxWorkUnits: 256 },
+      maximumWorkUnits: 256,
+      validated: true as const,
+    };
+    const candidate = { candidateId: canonicalActionIdentity(action), action, baselineEvaluatorScore: 0 };
+    expect(createRolloutReplicateInputFromValidatedSource(
+      { ...source },
+      0,
+      candidate,
+      replicateIdentity,
+      random.view,
+      validatedBudget,
+    )).toEqual({ ok: false, failure: { kind: "invalid-request", field: "request" } });
+    const built = createRolloutReplicateInputFromValidatedSource(
+      source,
+      0,
+      candidate,
+      replicateIdentity,
+      random.view,
+      validatedBudget,
+    );
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    expect(built.value.publicReplayContext.publicHistoryEvents).toEqual(sourceInput.publicHistoryEvents);
+    expect(Object.isFrozen(built.value.publicReplayContext)).toBe(true);
+    expect(Object.isFrozen(built.value.publicReplayContext.publicHistoryEvents)).toBe(true);
+    const observations: unknown[] = [];
+    const validateObservation = policyModule.validateSeatLocalObservation;
+    vi.spyOn(policyModule, "validateSeatLocalObservation").mockImplementation((observation) => {
+      observations.push(structuredClone(observation));
+      return validateObservation(observation);
+    });
+
+    const kernelResult = runRolloutReplicate(built.value, rootIdentity);
+
+    expect(kernelResult.ok).toBe(true);
+    expect(observations).not.toHaveLength(0);
+    const firstHistory = (observations[0] as { publicHistoryEvents: PublicActionEvent[] }).publicHistoryEvents;
+    expect(firstHistory.slice(0, 2)).toEqual(sourceInput.publicHistoryEvents);
+    expect(firstHistory.map((event) => event.eventIndex)).toEqual([0, 1, 2]);
+    vi.restoreAllMocks();
   });
 
   test("returns the typed fake-bank failure without exposing a partial source", () => {

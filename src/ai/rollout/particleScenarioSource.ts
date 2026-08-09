@@ -7,13 +7,19 @@ import { particleScenarioIdentity } from "../particles/canonicalDeal";
 import { validateCanonicalInitialDeal } from "../particles/particleConservation";
 import { readParticleBankRolloutAccess } from "../particles/particleBankRolloutAccess";
 import type { ParticleBankRolloutRecord } from "../particles/particleBankRolloutAccess";
-import { canonicalActionIdentity, canonicalReplayContextIdentity } from "./contracts";
+import { canonicalActionIdentity, canonicalReplayContextIdentity, validateRolloutBudget } from "./contracts";
 import type {
+  CrnView,
+  RolloutCandidate,
+  RolloutContractResult,
+  RolloutReplicateInput,
   RolloutReplayContextInput,
   RolloutPublicState,
   RolloutScenario,
   RolloutScenarioSourceInput,
   RolloutScenarioSourceResult,
+  ValidatedPublicReplayContext,
+  ValidatedRolloutBudget,
 } from "./contracts";
 import type { ParticleScenario, ParticleSnapshotIdentity, ReplayedParticleState } from "../particles/contracts";
 import type { HardPublicLedger } from "../../game/publicLedger";
@@ -22,11 +28,53 @@ const SOURCE_INPUT_KEYS = [
   "bank", "publicHistoryEvents", "initialLedger", "finalLedger", "gameRank", "perspectiveSeat", "ownCurrentHand", "publicState",
 ] as const;
 
+type ValidatedSourceContext = Readonly<{
+  publicReplayContext: ValidatedPublicReplayContext;
+  publicState: RolloutPublicState;
+}>;
+
+const validatedSourceContext = Symbol("validatedSourceContext");
+type RegisteredScenarioSourceResult = Extract<RolloutScenarioSourceResult, { ok: true }> & Readonly<{
+  [validatedSourceContext]: ValidatedSourceContext;
+}>;
+const validatedSourceResults = new WeakSet<object>();
+
 export function createParticleScenarioSource(input: RolloutScenarioSourceInput): RolloutScenarioSourceResult {
   try {
     return createParticleScenarioSourceUnchecked(input);
   } catch {
     return scenarioSourceFailure("replay-context-missing");
+  }
+}
+
+export function createRolloutReplicateInputFromValidatedSource(
+  context: RolloutScenarioSourceResult,
+  scenarioIndex: number,
+  candidate: RolloutCandidate,
+  replicateIdentity: string,
+  random: CrnView,
+  validatedBudget: ValidatedRolloutBudget,
+): RolloutContractResult<RolloutReplicateInput> {
+  try {
+    if (!isRegisteredScenarioSourceResult(context) || !Number.isSafeInteger(scenarioIndex) || scenarioIndex < 0 || scenarioIndex >= context.scenarios.length) return invalidReplicateInput();
+    const registered = context[validatedSourceContext];
+    if (!/^[a-f0-9]{64}$/.test(replicateIdentity)) return invalidReplicateInput();
+    if (canonicalActionIdentity(candidate.action) !== candidate.candidateId || !Number.isFinite(candidate.baselineEvaluatorScore)) return invalidReplicateInput();
+    const budget = validateRolloutBudget({ budget: validatedBudget.budget, limits: validatedBudget.limits });
+    if (!budget.ok || validatedBudget.validated !== true || validatedBudget.maximumWorkUnits !== budget.value.maximumWorkUnits) return invalidReplicateInput();
+    const scenario = context.scenarios[scenarioIndex]!;
+    const input: RolloutReplicateInput = {
+      candidate: structuredClone(candidate),
+      scenario: structuredClone(scenario),
+      publicState: structuredClone(registered.publicState),
+      publicReplayContext: structuredClone(registered.publicReplayContext),
+      replicateIdentity,
+      random,
+      validatedBudget: structuredClone(validatedBudget),
+    };
+    return Object.freeze({ ok: true as const, value: deepFreeze(input) });
+  } catch {
+    return invalidReplicateInput();
   }
 }
 
@@ -96,15 +144,32 @@ function createParticleScenarioSourceUnchecked(input: RolloutScenarioSourceInput
       return scenarioSourceFailure("private-state-invalid");
     }
 
-    return deepFreeze({
-      ok: true,
+    const registeredContext = deepFreeze({
+      publicReplayContext: {
+        publicHistoryEvents: structuredClone(input.publicHistoryEvents),
+        initialLedger: structuredClone(input.initialLedger),
+        finalLedger: structuredClone(input.finalLedger),
+      },
+      publicState: structuredClone(input.publicState),
+    });
+    const result: RegisteredScenarioSourceResult = {
+      ok: true as const,
       scenarios,
       effectiveSampleSize: accessResult.access.effectiveSampleSize,
       acceptedScenarioCount: scenarios.length,
-    });
+      [validatedSourceContext]: registeredContext,
+    };
+    Object.defineProperty(result, validatedSourceContext, { enumerable: false, configurable: false, writable: false });
+    deepFreeze(result);
+    validatedSourceResults.add(result);
+    return result;
   } catch {
     return scenarioSourceFailure("private-state-invalid");
   }
+}
+
+function isRegisteredScenarioSourceResult(value: RolloutScenarioSourceResult): value is RegisteredScenarioSourceResult {
+  return value.ok && validatedSourceResults.has(value);
 }
 
 function hasReplayEnvelopeShape(input: unknown): input is RolloutScenarioSourceInput {
@@ -254,6 +319,10 @@ function sameArray(left: readonly unknown[], right: readonly unknown[]): boolean
 
 function scenarioSourceFailure(reason: "ledger-mismatch" | "replay-context-missing" | "private-state-invalid"): RolloutScenarioSourceResult {
   return { ok: false, failure: { kind: "scenario-source-failed", reason } };
+}
+
+function invalidReplicateInput(): RolloutContractResult<never> {
+  return Object.freeze({ ok: false as const, failure: Object.freeze({ kind: "invalid-request" as const, field: "request" }) });
 }
 
 function isRecord(value: unknown): value is Record<string, any> {

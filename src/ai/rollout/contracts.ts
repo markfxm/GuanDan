@@ -11,6 +11,7 @@ import type {
 } from "../particles/contracts";
 import { particleScenarioIdentity } from "../particles/canonicalDeal";
 import { validateParticleBankPublic } from "../particles/particleBankPublicValidation";
+import type { StateConservationFailure } from "./stateConservation";
 
 export type CanonicalCandidateIdentity = string;
 export type CanonicalScenarioIdentity = string;
@@ -126,10 +127,17 @@ export type RolloutScenarioSourceResult =
     }
   | { ok: false; failure: RolloutFailure };
 
+export type ValidatedPublicReplayContext = Readonly<{
+  publicHistoryEvents: readonly PublicActionEvent[];
+  initialLedger: HardPublicLedger;
+  finalLedger: HardPublicLedger;
+}>;
+
 export type RolloutReplicateInput = Readonly<{
   candidate: RolloutCandidate;
   scenario: RolloutScenario;
   publicState: RolloutPublicState;
+  publicReplayContext: ValidatedPublicReplayContext;
   replicateIdentity: string;
   random: CrnView;
   validatedBudget: ValidatedRolloutBudget;
@@ -214,11 +222,33 @@ export type LeafEvaluationFailure =
   | { kind: "invalid-leaf-state"; reason: "duplicate-finish" | "unknown-seat" | "negative-hand-count" | "non-finite-hand-count" | "fractional-hand-count" | "unsafe-hand-count" | "negative-zero-hand-count" | "unfinished-zero-hand-count" | "missing-hand-count" | "unknown-hand-count" | "finish-hand-count-mismatch" | "terminal-state" };
 
 export type RolloutPolicyFailure =
+  | { kind: "invalid-policy-context"; field: "observation"; reason: "malformed-observation" }
+  | { kind: "invalid-policy-context"; field: "ply"; reason: "invalid-ply" }
+  | { kind: "invalid-policy-context"; field: "actingSeat"; reason: "invalid-acting-seat" }
   | { kind: "no-legal-action"; actingSeat: PublicSeat }
-  | { kind: "invalid-policy-context"; field: "ply" | "actingSeat" };
+  | {
+      kind: "crn-failure";
+      field: "coordinate" | "randomDomain" | "view" | "value";
+      reason: "construction-failed" | "throwing-value" | "non-finite-value" | "out-of-range-value";
+    };
 
 export type RolloutKernelFailure =
-  | { kind: "simulation-failed"; stage: "state-conservation" | "leaf-evaluation" | "replay" }
+  | {
+      kind: "simulation-failed";
+      stage: "input";
+      reason: "malformed-envelope" | "invalid-budget" | "invalid-root-identity" | "invalid-public-state" | "invalid-candidate";
+    }
+  | { kind: "simulation-failed"; stage: "replay"; reason: "invalid-scenario" | "invalid-replay-context" }
+  | { kind: "simulation-failed"; stage: "root-action"; reason: "illegal-action" }
+  | { kind: "simulation-failed"; stage: "policy-action"; reason: "illegal-action" }
+  | { kind: "simulation-failed"; stage: "crn"; reason: "coordinate" | "random-domain" | "view" }
+  | {
+      kind: "simulation-failed";
+      stage: "transition";
+      reason: "invalid-action-transition" | "invalid-pass-quorum" | "public-history-not-append-only";
+    }
+  | { kind: "simulation-failed"; stage: "state-conservation"; reason: Exclude<StateConservationFailure["reason"], "invalid-action-transition" | "invalid-pass-quorum" | "public-history-not-append-only"> }
+  | { kind: "simulation-failed"; stage: "terminal-projection"; reason: "invalid-finish-order" | "utility-failed" }
   | { kind: "policy-failed"; failure: RolloutPolicyFailure }
   | { kind: "budget-exhausted"; workUnits: number; maximumWorkUnits: number };
 
@@ -227,8 +257,27 @@ export type RolloutAggregationFailure =
   | { kind: "coverage-mismatch"; expected: number; actual: number }
   | { kind: "empty-replicate-set"; candidateId: string };
 
+export type RolloutRequestField =
+  | "request"
+  | "schemaVersion"
+  | "mode"
+  | "formalExecutionAllowed"
+  | "rootIdentity"
+  | "scenarioSourceInput"
+  | "candidates"
+  | "budget"
+  | "limits"
+  | "evidenceRequirements"
+  | "riskPolicy"
+  | "policyId"
+  | "assemblyInput"
+  | "requestInput"
+  | "candidateSummaries"
+  | "ranking"
+  | "aggregateDiagnostics";
+
 export type RolloutFailure =
-  | { kind: "invalid-request"; field: string }
+  | { kind: "invalid-request"; field: RolloutRequestField }
   | { kind: "invalid-budget"; field: "replicateCountPerScenario" | "maxPliesPerReplicate" | "maxPolicyActionEvaluationsPerPly" | "maxWorkUnits" }
   | { kind: "invalid-risk-policy"; field: "variancePenalty" | "downsideRiskPenalty" }
   | { kind: "invalid-evidence-requirements"; field: "minimumEffectiveSampleSize" | "minimumAcceptedScenarioCount" | "minimumCompletedReplicateCount" }
@@ -692,16 +741,16 @@ function createRolloutRequestUnchecked(input: unknown): RolloutContractResult<Ro
   };
 }
 
-function requestEnvelopeFailure(input: unknown): string | undefined {
+function requestEnvelopeFailure(input: unknown): RolloutRequestField | undefined {
   if (!isPlainDataRecord(input)) return "request";
   const ownKeys = Reflect.ownKeys(input);
   const unexpected = ownKeys.find((key) => typeof key !== "string" || !REQUEST_KEYS.includes(key as (typeof REQUEST_KEYS)[number]));
   if (unexpected !== undefined) {
-    return typeof unexpected === "string" ? unexpected : "request";
+    return "request";
   }
   const missing = REQUEST_KEYS.find((key) => !ownKeys.includes(key));
   if (missing !== undefined) return missing;
-  const nestedFields: readonly (readonly [string, string])[] = [
+  const nestedFields: readonly (readonly [string, RolloutRequestField])[] = [
     ["scenarioSourceInput", "scenarioSourceInput"],
     ["candidates", "candidates"],
     ["budget", "budget"],
@@ -1035,7 +1084,7 @@ function isParticleSnapshotIdentity(value: unknown): value is ParticleSnapshotId
     && RANKS.includes(value.gameRank as GameRank);
 }
 
-function isHardPublicLedger(value: unknown): value is HardPublicLedger {
+export function isHardPublicLedger(value: unknown): value is HardPublicLedger {
   if (!isRecord(value) || !hasExactKeys(value, LEDGER_KEYS) || value.schemaVersion !== "d2-public-ledger-v1" || !isNonEmptyString(value.gameId) || !isNonEmptyString(value.roundIdentity) || !isNonEmptyString(value.handIdentity) || !isLedgerEventIndex(value.lastAppliedEventIndex) || !isNonNegativeSafeInteger(value.nextEventIndex) || value.nextEventIndex !== value.lastAppliedEventIndex + 1 || !isRecord(value.seenEventHashes) || !isRecord(value.handCounts) || !hasExactKeys(value.handCounts, ["0", "1", "2", "3"]) || !isRecord(value.currentTrick) || !Array.isArray(value.playedCardIds) || !Array.isArray(value.revealedTransferEvents) || !Array.isArray(value.finishOrder) || !Array.isArray(value.publicTributeEvents) || !Array.isArray(value.recentActionSummaries)) return false;
   if (!isValidSeenEventHashes(value.seenEventHashes, value.lastAppliedEventIndex)) return false;
   if (!SEATS.every((seat) => isNonNegativeSafeInteger(value.handCounts[seat]))) return false;
@@ -1257,6 +1306,9 @@ function isInitialOpeningLedger(ledger: HardPublicLedger): boolean {
     && ledger.playedCardIds.length === 0
     && ledger.revealedTransferEvents.length === 0
     && ledger.finishOrder.length === 0
+    && ledger.publicTributeEvents.length === 1
+    && ledger.publicTributeEvents.every((event) => typeof event === "string" && event.length > 0)
+    && ledger.handCounts[0] + ledger.handCounts[1] + ledger.handCounts[2] + ledger.handCounts[3] === 108
     && ledger.currentTrick.passSeats.length === 0
     && ledger.currentTrick.lastPlaySeat === undefined
     && ledger.currentTrick.lastPlayStableKey === undefined
@@ -1389,7 +1441,7 @@ function assertRolloutCard(card: unknown): asserts card is Card {
   throw new TypeError("ACTION_CARD_INVALID");
 }
 
-function invalid(field: string): RolloutContractResult<never> {
+function invalid(field: RolloutRequestField): RolloutContractResult<never> {
   return { ok: false, failure: { kind: "invalid-request", field } };
 }
 

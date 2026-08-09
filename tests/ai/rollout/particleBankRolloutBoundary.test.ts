@@ -31,7 +31,10 @@ import {
   validateRolloutRiskPolicy,
 } from "../../../src/ai/rollout/contracts";
 import * as rolloutContracts from "../../../src/ai/rollout/contracts";
-import { createParticleScenarioSource } from "../../../src/ai/rollout/particleScenarioSource";
+import {
+  createParticleScenarioSource,
+  createRolloutReplicateInputFromValidatedSource,
+} from "../../../src/ai/rollout/particleScenarioSource";
 import { canonicalCrnDomainBytes, createCrnCoordinate } from "../../../src/ai/rollout/identity";
 import type {
   RolloutAction,
@@ -1418,7 +1421,7 @@ describe("D2F ParticleBank bridge", () => {
     } as unknown);
 
     capturedSecret = "mutated-secret";
-    expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "policy" } });
+    expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "request" } });
     expect(callbackCallCount).toBe(0);
   });
 
@@ -1443,7 +1446,7 @@ describe("D2F ParticleBank bridge", () => {
         policyId: "d2f-lightweight-v1",
         [field]: value,
       } as unknown);
-      expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field } });
+      expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "request" } });
     }
     expect(callbackCallCount).toBe(0);
   });
@@ -1497,20 +1500,43 @@ describe("D2F ParticleBank bridge", () => {
   });
 
   test("keeps RolloutReplicateInput free of executable policy", () => {
-    const request = makeRequestInput();
-    const budget = validateRolloutBudget({ budget: request.budget, limits: request.limits });
+    const scenarioSourceInput = makeAntiTributeSourceInput();
+    const request = createRolloutRequest({
+      ...makeRequestInput(),
+      rootIdentity: replayRoot(scenarioSourceInput),
+      scenarioSourceInput,
+    });
+    expect(request.ok).toBe(true);
+    if (!request.ok) return;
+    const source = createParticleScenarioSource(request.value.scenarioSourceInput);
+    expect(source.ok).toBe(true);
+    if (!source.ok) return;
+    const budget = validateRolloutBudget({ budget: request.value.budget, limits: request.value.limits });
     expect(budget.ok).toBe(true);
     if (!budget.ok) return;
 
-    const replicateInput: RolloutReplicateInput = {
-      candidate: request.candidates[0]!,
-      scenario: { scenarioIdentity: "scenario", normalizedWeight: 1, privateState: {} },
-      publicState: request.scenarioSourceInput.publicState,
-      replicateIdentity: "replicate",
-      random: { value: () => 0.5 },
-      validatedBudget: budget.value,
-    };
+    const replicate = createRolloutReplicateInputFromValidatedSource(
+      source,
+      0,
+      request.value.candidates[0]!,
+      canonicalReplicateIdentity(0),
+      { value: () => 0.5 },
+      budget.value,
+    );
+    expect(replicate.ok).toBe(true);
+    if (!replicate.ok) return;
+    const replicateInput: RolloutReplicateInput = replicate.value;
     expect("policy" in replicateInput).toBe(false);
+    expect(replicateInput.publicReplayContext.publicHistoryEvents).toHaveLength(1);
+    expect(replicateInput.publicReplayContext.publicHistoryEvents[0]?.publicPayloadHash).toBe(
+      request.value.scenarioSourceInput.finalLedger.seenEventHashes[0],
+    );
+    expect(replicateInput.publicReplayContext.initialLedger.lastAppliedEventIndex).toBe(-1);
+    expect(replicateInput.publicReplayContext.finalLedger.lastAppliedEventIndex).toBe(0);
+    expect(Object.isFrozen(replicateInput.publicReplayContext)).toBe(true);
+    expect(Object.isFrozen(replicateInput.publicReplayContext.publicHistoryEvents)).toBe(true);
+    expect(Object.isFrozen(replicateInput.publicReplayContext.initialLedger)).toBe(true);
+    expect(Object.isFrozen(replicateInput.publicReplayContext.finalLedger)).toBe(true);
   });
 
   test("binds result baseline, budget, scenario and ESS provenance to the validated request", () => {
@@ -1792,7 +1818,7 @@ describe("D2F ParticleBank bridge", () => {
     });
     expect(createRolloutResult({ ...request, rawScenario: { hidden: true } } as unknown, makeResultAssemblyInput(input))).toEqual({
       ok: false,
-      failure: { kind: "invalid-request", field: "rawScenario" },
+      failure: { kind: "invalid-request", field: "request" },
     });
   });
 
@@ -2528,12 +2554,14 @@ describe("D2F ParticleBank bridge", () => {
     const publicValidatorFile = files.find((file) => sourcePath(file).endsWith("/src/ai/particles/particleBankPublicValidation.ts"));
     const sourceFile = files.find((file) => sourcePath(file).endsWith("/src/ai/rollout/particleScenarioSource.ts"));
     const kernelFile = files.find((file) => sourcePath(file).endsWith("/src/ai/rollout/kernel.ts"));
+    const policyFile = files.find((file) => sourcePath(file).endsWith("/src/ai/rollout/policy.ts"));
     expect(internalFile).toBeDefined();
     expect(bridgeFile).toBeDefined();
     expect(publicValidatorFile).toBeDefined();
     expect(sourceFile).toBeDefined();
     expect(kernelFile).toBeDefined();
-    if (internalFile === undefined || bridgeFile === undefined || publicValidatorFile === undefined || sourceFile === undefined || kernelFile === undefined) return;
+    expect(policyFile).toBeDefined();
+    if (internalFile === undefined || bridgeFile === undefined || publicValidatorFile === undefined || sourceFile === undefined || kernelFile === undefined || policyFile === undefined) return;
 
     const privateModule = checker.getSymbolAtLocation(internalFile);
     if (privateModule === undefined) throw new Error("PRIVATE_MODULE_SYMBOL_MISSING");
@@ -2549,6 +2577,50 @@ describe("D2F ParticleBank bridge", () => {
       .filter((symbol) => symbol.name === "CanonicalCandidateDecisionAssociationIdentity" || symbol.name === "canonicalCandidateDecisionAssociationIdentity")
       .map(resolveSymbol));
     expect(associationSymbols.size).toBe(2);
+    const replicateInputExport = contractsExports.find((symbol) => symbol.name === "RolloutReplicateInput");
+    const replayContextExport = contractsExports.find((symbol) => symbol.name === "ValidatedPublicReplayContext");
+    if (replicateInputExport === undefined || replayContextExport === undefined) throw new Error("REPLAY_INPUT_CONTRACT_SYMBOL_MISSING");
+    const replicateInputSymbol = resolveSymbol(replicateInputExport);
+    const replicateInputType = checker.getDeclaredTypeOfSymbol(replicateInputSymbol);
+    expect(replicateInputType.getProperties().map((property) => property.name)).toEqual([
+      "candidate",
+      "scenario",
+      "publicState",
+      "publicReplayContext",
+      "replicateIdentity",
+      "random",
+      "validatedBudget",
+    ]);
+    const replayContextProperty = replicateInputType.getProperty("publicReplayContext");
+    if (replayContextProperty === undefined) throw new Error("PUBLIC_REPLAY_CONTEXT_PROPERTY_MISSING");
+    expect((replayContextProperty.flags & ts.SymbolFlags.Optional) !== 0).toBe(false);
+    const replayContextDeclaration = replayContextProperty.declarations?.find(ts.isPropertySignature);
+    if (replayContextDeclaration === undefined) throw new Error("PUBLIC_REPLAY_CONTEXT_DECLARATION_MISSING");
+    expect(replayContextDeclaration.questionToken).toBeUndefined();
+    const replayContextTypeNode = replayContextDeclaration.type;
+    if (replayContextTypeNode === undefined || !ts.isTypeReferenceNode(replayContextTypeNode)) throw new Error("PUBLIC_REPLAY_CONTEXT_TYPE_REFERENCE_MISSING");
+    const replayContextTypeSymbol = checker.getSymbolAtLocation(replayContextTypeNode.typeName);
+    if (replayContextTypeSymbol === undefined) throw new Error("PUBLIC_REPLAY_CONTEXT_TYPE_SYMBOL_MISSING");
+    expect(resolveSymbol(replayContextTypeSymbol)).toBe(resolveSymbol(replayContextExport));
+
+    const sourceModule = checker.getSymbolAtLocation(sourceFile);
+    if (sourceModule === undefined) throw new Error("SCENARIO_SOURCE_MODULE_SYMBOL_MISSING");
+    const replicateFactoryExport = checker.getExportsOfModule(sourceModule)
+      .find((symbol) => symbol.name === "createRolloutReplicateInputFromValidatedSource");
+    if (replicateFactoryExport === undefined) throw new Error("REPLICATE_INPUT_FACTORY_SYMBOL_MISSING");
+    const replicateFactoryDeclaration = resolveSymbol(replicateFactoryExport).declarations
+      ?.find((declaration): declaration is ts.FunctionDeclaration => ts.isFunctionDeclaration(declaration));
+    if (replicateFactoryDeclaration === undefined || replicateFactoryDeclaration.type === undefined) throw new Error("REPLICATE_INPUT_FACTORY_DECLARATION_MISSING");
+    expect(replicateFactoryDeclaration.parameters.map((parameter) => parameter.name.getText())).toEqual([
+      "context",
+      "scenarioIndex",
+      "candidate",
+      "replicateIdentity",
+      "random",
+      "validatedBudget",
+    ]);
+    expect(replicateFactoryDeclaration.parameters.some((parameter) => parameter.name.getText() === "publicReplayContext")).toBe(false);
+    expect(replicateFactoryDeclaration.type.getText()).toBe("RolloutContractResult<RolloutReplicateInput>");
     const crnCoordinateExport = contractsExports.find((symbol) => symbol.name === "CrnCoordinate");
     if (crnCoordinateExport === undefined) throw new Error("CRN_COORDINATE_SYMBOL_MISSING");
     const crnCoordinateSymbol: ts.Symbol = crnCoordinateExport;
@@ -2559,6 +2631,7 @@ describe("D2F ParticleBank bridge", () => {
     const publicCrnProperties = crnProperties.filter((property) => !computedCrnProperties.includes(property));
     expect(publicCrnProperties.map((property) => property.name)).toEqual(["rootIdentity", "scenarioIdentity", "replicateIdentity", "ply", "actingSeat", "randomDomain"]);
     expect(publicCrnProperties.some((property) => property.name === "candidateIdentity")).toBe(false);
+    expect(publicCrnProperties.some((property) => property.name === "publicReplayContext" || property.name === "publicHistoryEvents")).toBe(false);
     expect(computedCrnProperties).toHaveLength(1);
     const brandProperty = computedCrnProperties[0]!;
     const brandDeclaration = brandProperty.declarations?.find((declaration): declaration is ts.PropertySignature => (
@@ -2611,6 +2684,7 @@ describe("D2F ParticleBank bridge", () => {
     const privateSourceConsumers: string[] = [];
     const bridgeCallers: string[] = [];
     const associationConsumers: string[] = [];
+    const replicateInputConsumers: string[] = [];
     const publicValidatorImporters: string[] = [];
     const publicValidatorReexporters: string[] = [];
     let validatorImportsForbiddenBoundary = false;
@@ -2625,6 +2699,7 @@ describe("D2F ParticleBank bridge", () => {
     const recordPrivateContractUse = (file: ts.SourceFile, symbol: ts.Symbol): void => {
       const resolved = resolveSymbol(symbol);
       const consumerPath = sourcePath(file);
+      if (resolved === replicateInputSymbol) replicateInputConsumers.push(consumerPath);
       if (contractSymbols.has(resolved) && privateContractNames.has(resolved.name) && !allowedPrivateConsumers.has(consumerPath)) forbiddenPrivateConsumers.push(consumerPath);
       if (resolved.name === "privateState" && !allowedPrivateConsumers.has(consumerPath)) forbiddenPrivateConsumers.push(consumerPath);
     };
@@ -2716,6 +2791,12 @@ describe("D2F ParticleBank bridge", () => {
     expect(localeCompareUse).toBe(false);
     expect(bridgeCallers).toContain("readParticleBankRolloutAccess");
     expect([...new Set(associationConsumers)]).toEqual([sourcePath(contractsFile)]);
+    expect([...new Set(replicateInputConsumers)].sort()).toEqual([
+      sourcePath(contractsFile),
+      sourcePath(kernelFile),
+      sourcePath(sourceFile),
+    ].sort());
+    expect([...new Set(replicateInputConsumers)]).not.toContain(sourcePath(policyFile));
     expect([...new Set(publicValidatorImporters)].sort()).toEqual([sourcePath(contractsFile), sourcePath(bridgeFile)].sort());
     expect([...new Set(publicValidatorReexporters)]).toEqual([]);
     expect(validatorImportsForbiddenBoundary).toBe(false);

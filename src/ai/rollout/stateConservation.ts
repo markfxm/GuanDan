@@ -1,8 +1,10 @@
 import type { Card, GameRank } from "../../engine/cards";
 import { createDeck } from "../../engine/cards";
 import type { CardGroup } from "../../engine/groups";
-import { playPublicStableKey } from "../../game/publicEvent";
-import type { PublicSeat } from "../../game/publicEvent";
+import { assertFinalizedPublicActionEvent, playPublicStableKey } from "../../game/publicEvent";
+import type { PublicActionEvent, PublicSeat } from "../../game/publicEvent";
+import { applyPublicEvent, canonicalPublicLedgerHash, type HardPublicLedger } from "../../game/publicLedger";
+import { verifyPublicActionEventHash } from "../../game/publicEventHash";
 import type { RolloutAction } from "./contracts";
 
 export type IsolatedRolloutState = Readonly<{
@@ -38,7 +40,9 @@ export type StateConservationFailure = Readonly<{
     | "invalid-finish-order"
     | "invalid-trick"
     | "invalid-turn"
-    | "invalid-action-transition";
+    | "invalid-action-transition"
+    | "invalid-pass-quorum"
+    | "public-history-not-append-only";
 }>;
 
 export type StateConservationResult =
@@ -77,8 +81,36 @@ export function validateActionTransition(
   const action = actionInput as RolloutAction;
 
   if (!sameArray(stateBefore.expectedCardIds, stateAfter.expectedCardIds)) return failed("invalid-action-transition");
+  if (stateBefore.gameRank !== stateAfter.gameRank) return failed("invalid-action-transition");
   if (action.type === "pass") return validatePassTransition(stateBefore, stateAfter);
   return validatePlayTransition(stateBefore, stateAfter, action);
+}
+
+export function validatePublicHistoryAppend(
+  beforeHistory: readonly PublicActionEvent[],
+  afterHistory: readonly PublicActionEvent[],
+  beforeLedger: HardPublicLedger,
+  afterLedger: HardPublicLedger,
+): StateConservationResult {
+  try {
+    if (!isPlainDataArray(beforeHistory) || !isPlainDataArray(afterHistory) || afterHistory.length !== beforeHistory.length + 1) return failed("public-history-not-append-only");
+    if (!beforeHistory.every((event, index) => deepDataEqual(event, afterHistory[index]))) return failed("public-history-not-append-only");
+    const event = afterHistory[afterHistory.length - 1]!;
+    if (event.eventIndex !== beforeLedger.nextEventIndex || beforeHistory.length !== beforeLedger.nextEventIndex) return failed("public-history-not-append-only");
+    if (event.eventIndex > 0) {
+      const previous = beforeHistory[event.eventIndex - 1];
+      if (previous === undefined || beforeLedger.seenEventHashes[event.eventIndex - 1] !== previous.publicPayloadHash) return failed("public-history-not-append-only");
+    }
+    assertFinalizedPublicActionEvent(event);
+    verifyPublicActionEventHash(event);
+    const applied = applyPublicEvent(beforeLedger, event);
+    if (!applied.ok || applied.kind !== "applied") return failed("public-history-not-append-only");
+    if (canonicalPublicLedgerHash(applied.ledger) !== canonicalPublicLedgerHash(afterLedger)) return failed("public-history-not-append-only");
+    if (afterLedger.seenEventHashes[event.eventIndex] !== event.publicPayloadHash) return failed("public-history-not-append-only");
+    return success();
+  } catch {
+    return failed("public-history-not-append-only");
+  }
 }
 
 function validateCardsAndConservation(state: IsolatedRolloutState): boolean {
@@ -148,13 +180,15 @@ function validatePlayTransition(
   const beforeHand = before.hands[before.actingSeat].map((card) => card.id);
   const afterHand = after.hands[before.actingSeat].map((card) => card.id);
   if (afterHand.length !== beforeHand.length - playedIds.length) return failed("invalid-action-transition");
-  if (afterHand.some((id) => playedIds.includes(id)) || beforeHand.filter((id) => !playedIds.includes(id)).some((id) => !afterHand.includes(id))) return failed("invalid-action-transition");
+  if (!sameArray(afterHand, beforeHand.filter((id) => !playedIds.includes(id)))) return failed("invalid-action-transition");
   if (!sameOtherHands(before, after, before.actingSeat)) return failed("invalid-action-transition");
   const appendedPublicIds = after.publicPlayedCardIds.slice(before.publicPlayedCardIds.length);
+  if (!before.publicPlayedCardIds.every((id, index) => after.publicPlayedCardIds[index] === id)) return failed("invalid-action-transition");
   if (!sameCardIdMultiset(appendedPublicIds, playedIds)) return failed("invalid-action-transition");
+  if (!sameArray(appendedPublicIds, [...playedIds].sort())) return failed("invalid-action-transition");
   if (after.currentTrick.trickIndex !== before.currentTrick.trickIndex || after.currentTrick.leadSeat !== before.currentTrick.leadSeat) return failed("invalid-action-transition");
   if (after.currentLastPlaySeat !== before.actingSeat || after.currentLastPlay === null) return failed("invalid-action-transition");
-  if (!sameCardIds(after.currentLastPlay.cards, action.group.cards)) return failed("invalid-action-transition");
+  if (!sameCardGroup(after.currentLastPlay, action.group)) return failed("invalid-action-transition");
   if (after.currentTrick.passSeats.length !== 0) return failed("invalid-action-transition");
   if (after.finishOrder.length === before.finishOrder.length + 1) {
     if (afterHand.length !== 0 || after.finishOrder.at(-1) !== before.actingSeat) return failed("invalid-action-transition");
@@ -167,12 +201,17 @@ function validatePlayTransition(
 
 function validatePassTransition(before: IsolatedRolloutState, after: IsolatedRolloutState): StateConservationResult {
   if (before.currentLastPlay === null || before.currentLastPlaySeat === null) return failed("invalid-action-transition");
+  if (before.finishOrder.includes(before.actingSeat) || before.currentTrick.passSeats.includes(before.actingSeat)) return failed("invalid-action-transition");
   if (!sameHands(before, after) || !sameArray(before.publicPlayedCardIds, after.publicPlayedCardIds) || !sameArray(before.finishOrder, after.finishOrder)) return failed("invalid-action-transition");
+  const requiredPasses = Math.max(1, SEATS.length - before.finishOrder.length - 1);
+  const shouldClear = before.currentTrick.passSeats.length + 1 >= requiredPasses;
   if (after.currentTrick.trickIndex === before.currentTrick.trickIndex + 1) {
+    if (!shouldClear) return failed("invalid-pass-quorum");
     if (after.currentLastPlay !== null || after.currentLastPlaySeat !== null || after.currentTrick.lastPlaySeat !== undefined || after.currentTrick.passSeats.length !== 0 || after.currentTrick.leadSeat !== expectedTrickWinner(before, before.currentLastPlaySeat) || after.actingSeat !== after.currentTrick.leadSeat) return failed("invalid-action-transition");
     return success();
   }
-  if (after.currentTrick.trickIndex !== before.currentTrick.trickIndex || after.currentTrick.leadSeat !== before.currentTrick.leadSeat || after.currentLastPlay === null || after.currentLastPlaySeat !== before.currentLastPlaySeat || !after.currentTrick.passSeats.includes(before.actingSeat) || !sameCardIds(after.currentLastPlay.cards, before.currentLastPlay.cards) || after.actingSeat !== expectedNextSeat(after, before.actingSeat)) return failed("invalid-action-transition");
+  if (shouldClear) return failed("invalid-pass-quorum");
+  if (after.currentTrick.trickIndex !== before.currentTrick.trickIndex || after.currentTrick.leadSeat !== before.currentTrick.leadSeat || after.currentLastPlay === null || after.currentLastPlaySeat !== before.currentLastPlaySeat || !sameArray(after.currentTrick.passSeats, [...before.currentTrick.passSeats, before.actingSeat]) || !deepDataEqual(after.currentLastPlay, before.currentLastPlay) || after.actingSeat !== expectedNextSeat(after, before.actingSeat)) return failed("invalid-action-transition");
   return success();
 }
 
@@ -322,6 +361,16 @@ function sameCardIds(left: readonly Card[], right: readonly Card[]): boolean {
   return sameCardIdMultiset(left.map((card) => card.id), right.map((card) => card.id));
 }
 
+function sameCardGroup(left: CardGroup, right: CardGroup): boolean {
+  return left.id === right.id
+    && left.type === right.type
+    && left.label === right.label
+    && left.purpose === right.purpose
+    && left.strength === right.strength
+    && sameCardIds(left.cards, right.cards)
+    && sameCardIds(left.wildcards, right.wildcards);
+}
+
 function sameCardIdMultiset(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false;
   const counts = new Map<string, number>();
@@ -337,6 +386,19 @@ function sameCardIdMultiset(left: readonly string[], right: readonly string[]): 
 
 function sameArray(left: readonly unknown[], right: readonly unknown[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function deepDataEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+  const leftKeys = Reflect.ownKeys(left);
+  const rightKeys = Reflect.ownKeys(right);
+  if (leftKeys.length !== rightKeys.length || leftKeys.some((key) => !rightKeys.includes(key))) return false;
+  return leftKeys.every((key) => {
+    const leftDescriptor = Object.getOwnPropertyDescriptor(left, key);
+    const rightDescriptor = Object.getOwnPropertyDescriptor(right, key);
+    return isDataDescriptor(leftDescriptor) && isDataDescriptor(rightDescriptor) && deepDataEqual(leftDescriptor.value, rightDescriptor.value);
+  });
 }
 
 function success(): StateConservationResult {

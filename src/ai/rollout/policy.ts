@@ -1,9 +1,9 @@
 import { detectGroups, type CardGroup } from "../../engine/groups";
 import { RANKS, SUITS, isHeartRankWild, type Card, type GameRank } from "../../engine/cards";
 import { canBeatPlay, classifyPlay } from "../../game/playRules";
-import { assertFinalizedPublicActionEvent } from "../../game/publicEvent";
+import { assertFinalizedPublicActionEvent, playPublicStableKey, trickClearPublicStableKey } from "../../game/publicEvent";
 import { verifyPublicActionEventHash } from "../../game/publicEventHash";
-import type { PublicActionEvent } from "../../game/publicEvent";
+import type { PublicActionEvent, PublicSeat } from "../../game/publicEvent";
 import { createCanonicalSemanticKey } from "./identity";
 import {
   canonicalActionIdentity,
@@ -28,6 +28,17 @@ export type InternalRolloutPolicyFactoryResult =
   | Readonly<{ ok: true; policy: InternalRolloutPolicy }>
   | Readonly<{ ok: false; failure: { kind: "unsupported-policy-id" } }>;
 
+export type SeatLocalObservationValidationResult =
+  | Readonly<{ ok: true; observation: SeatLocalObservation }>
+  | Readonly<{
+      ok: false;
+      failure: {
+        kind: "invalid-policy-context";
+        field: "observation";
+        reason: "malformed-observation";
+      };
+    }>;
+
 const fixedPolicy: InternalRolloutPolicy = Object.freeze({
   listLegalActions,
   chooseAction,
@@ -38,6 +49,21 @@ export function createInternalRolloutPolicy(policyId: RolloutPolicyId): Internal
     return Object.freeze({ ok: false as const, failure: Object.freeze({ kind: "unsupported-policy-id" as const }) });
   }
   return Object.freeze({ ok: true as const, policy: fixedPolicy });
+}
+
+export function validateSeatLocalObservation(input: unknown): SeatLocalObservationValidationResult {
+  const observation = isolateObservation(input);
+  if (observation === undefined) {
+    return Object.freeze({
+      ok: false as const,
+      failure: Object.freeze({
+        kind: "invalid-policy-context" as const,
+        field: "observation" as const,
+        reason: "malformed-observation" as const,
+      }),
+    });
+  }
+  return Object.freeze({ ok: true as const, observation });
 }
 
 function listLegalActions(input: SeatLocalObservation): readonly RolloutAction[] {
@@ -69,34 +95,41 @@ function chooseAction(
   const context = isolateContext(contextInput);
   if (context === undefined) {
     const rawContext = contextInput as unknown as Record<string, unknown>;
-    const field = safeContextField(rawContext);
-    return policyFailure({ kind: "invalid-policy-context", field });
+    return policyFailure(safeContextFailure(rawContext));
   }
 
-  const actions = listLegalActions(input);
+  const validation = validateSeatLocalObservation(input);
+  if (!validation.ok) return validation;
+  const observation = validation.observation;
+  if (observation.finishOrder.includes(context.actingSeat)
+    || observation.handCounts[context.actingSeat] <= 0
+    || observation.hand.length !== observation.handCounts[context.actingSeat]) {
+    return policyFailure({ kind: "invalid-policy-context", field: "observation", reason: "malformed-observation" });
+  }
+
+  const actions = listLegalActions(observation);
   if (actions.length === 0) return policyFailure({ kind: "no-legal-action", actingSeat: context.actingSeat });
 
   let selected = actions[0]!;
   let selectedPriority = Number.POSITIVE_INFINITY;
   for (const action of actions) {
     const semanticKey = createCanonicalSemanticKey(`policy-action:${canonicalActionIdentity(action)}`);
-    if (!semanticKey.ok) return policyFailure({ kind: "invalid-policy-context", field: "ply" });
+    if (!semanticKey.ok) return policyFailure({ kind: "crn-failure", field: "value", reason: "construction-failed" });
     let priority: number;
     try {
       priority = crn.value(semanticKey.value);
     } catch {
-      return policyFailure({ kind: "invalid-policy-context", field: "ply" });
+      return policyFailure({ kind: "crn-failure", field: "value", reason: "throwing-value" });
     }
-    if (!Number.isFinite(priority) || priority < 0 || priority >= 1) {
-      return policyFailure({ kind: "invalid-policy-context", field: "ply" });
-    }
+    if (!Number.isFinite(priority)) return policyFailure({ kind: "crn-failure", field: "value", reason: "non-finite-value" });
+    if (priority < 0 || priority >= 1) return policyFailure({ kind: "crn-failure", field: "value", reason: "out-of-range-value" });
     if (priority < selectedPriority) {
       selected = action;
       selectedPriority = priority;
     }
   }
 
-  const legalActions = listLegalActions(input);
+  const legalActions = listLegalActions(observation);
   if (!legalActions.some((action) => canonicalActionIdentity(action) === canonicalActionIdentity(selected))) {
     return policyFailure({ kind: "no-legal-action", actingSeat: context.actingSeat });
   }
@@ -114,11 +147,13 @@ function isolateObservation(input: unknown): SeatLocalObservation | undefined {
     const gameRank = getDataProperty(input, "gameRank");
     if (!isPlainDataGraph(hand) || !isPlainDataGraph(publicHistoryEvents) || !isPlainDataGraph(handCounts) || !isPlainDataGraph(finishOrder) || (currentLastPlay !== null && !isPlainDataGraph(currentLastPlay)) || !isGameRank(gameRank)) return undefined;
     if (!isObservationSemantics(hand, publicHistoryEvents, handCounts, currentLastPlay, finishOrder, gameRank)) return undefined;
+    const canonicalLastPlay = currentLastPlay === null ? null : canonicalizeCardGroup(currentLastPlay, gameRank);
+    if (currentLastPlay !== null && canonicalLastPlay === undefined) return undefined;
     return deepFreeze({
       hand: structuredClone(hand) as readonly Card[],
       publicHistoryEvents: structuredClone(publicHistoryEvents),
       handCounts: structuredClone(handCounts) as Readonly<Record<0 | 1 | 2 | 3, number>>,
-      currentLastPlay: currentLastPlay === null ? null : structuredClone(currentLastPlay),
+      currentLastPlay: canonicalLastPlay === null ? null : structuredClone(canonicalLastPlay),
       finishOrder: structuredClone(finishOrder) as readonly (0 | 1 | 2 | 3)[],
       gameRank,
     }) as SeatLocalObservation;
@@ -140,9 +175,142 @@ function isObservationSemantics(
   const counts = handCounts as Record<string, unknown>;
   if (!["0", "1", "2", "3"].every((seat) => isNonNegativeSafeInteger(counts[seat]))) return false;
   if (!isCanonicalSeatArray(finishOrder)) return false;
-  if (currentLastPlay !== null && !isCanonicalCardGroup(currentLastPlay, gameRank)) return false;
+  const finished = finishOrder as readonly (0 | 1 | 2 | 3)[];
+  if (![0, 1, 2, 3].every((seat) => finished.includes(seat as 0 | 1 | 2 | 3) ? counts[String(seat)] === 0 : (counts[String(seat)] as number) > 0)) return false;
+  if (isRoomTerminalFinishOrder(finished)) return false;
+  if (currentLastPlay !== null && canonicalizeCardGroup(currentLastPlay, gameRank) === undefined) return false;
   if (!isPlainDataArray(publicHistoryEvents)) return false;
-  return publicHistoryEvents.every((event) => isValidPublicEvent(event));
+  if (!publicHistoryEvents.every((event) => isValidPublicEvent(event))) return false;
+  return isCoherentPublicHistory(publicHistoryEvents as readonly PublicActionEvent[], counts, finished, currentLastPlay, gameRank);
+}
+
+function isCoherentPublicHistory(
+  events: readonly PublicActionEvent[],
+  counts: Record<string, unknown>,
+  finishOrder: readonly (0 | 1 | 2 | 3)[],
+  currentLastPlay: unknown,
+  gameRank: GameRank,
+): boolean {
+  const first = events[0];
+  const finished: (0 | 1 | 2 | 3)[] = [];
+  const derivedCounts: Record<0 | 1 | 2 | 3, number> = {
+    0: counts["0"] as number,
+    1: counts["1"] as number,
+    2: counts["2"] as number,
+    3: counts["3"] as number,
+  };
+  let lastPlay: Extract<PublicActionEvent, { kind: "play" }> | undefined;
+  let activeLastPlaySeat: 0 | 1 | 2 | 3 | undefined;
+  const passSeats = new Set<0 | 1 | 2 | 3>();
+  const seenCardIds = new Set<string>();
+  let currentTrickIndex: number | undefined;
+  let ordinaryStarted = false;
+  let finishingAction = false;
+  let terminalReached = false;
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]!;
+    if (event.eventIndex !== index) return false;
+    if (first !== undefined && (event.gameId !== first.gameId || event.roundIdentity !== first.roundIdentity || event.handIdentity !== first.handIdentity)) return false;
+    if (currentTrickIndex === undefined) currentTrickIndex = event.trickIndex;
+    if (event.kind === "tribute" || event.kind === "return" || event.kind === "anti-tribute") {
+      if (ordinaryStarted || event.trickIndex !== currentTrickIndex) return false;
+      if (event.kind === "tribute" || event.kind === "return") {
+        if (event.fromSeat === event.toSeat) return false;
+        const expectedChanges: Record<0 | 1 | 2 | 3, number> = { 0: 0, 1: 0, 2: 0, 3: 0 };
+        expectedChanges[event.fromSeat] = -1;
+        expectedChanges[event.toSeat] = 1;
+        const allSeats: readonly (0 | 1 | 2 | 3)[] = [0, 1, 2, 3];
+        if (!allSeats.every((seat) => event.handCountChanges[seat] === expectedChanges[seat])) return false;
+      }
+      continue;
+    }
+    if (terminalReached && event.kind !== "finish") return false;
+    if (event.trickIndex !== currentTrickIndex) return false;
+    ordinaryStarted = true;
+    if (event.kind === "play") {
+      if (finished.includes(event.seat) || event.publicCardIds.some((id) => seenCardIds.has(id)) || new Set(event.publicCardIds).size !== event.publicCardIds.length) return false;
+      if (event.handCountAfter !== event.handCountBefore - event.publicCardIds.length) return false;
+      for (const id of event.publicCardIds) seenCardIds.add(id);
+      lastPlay = event;
+      activeLastPlaySeat = event.seat;
+      passSeats.clear();
+      finishingAction = false;
+    } else if (event.kind === "pass") {
+      if (finished.includes(event.seat) || activeLastPlaySeat === undefined || activeLastPlaySeat === event.seat || passSeats.has(event.seat) || event.handCountAfter !== event.handCountBefore) return false;
+      passSeats.add(event.seat);
+      finishingAction = false;
+    } else if (event.kind === "trick-clear") {
+      const requiredPasses = Math.max(1, 4 - finished.length - 1);
+      const expectedLeadSeat = activeLastPlaySeat === undefined ? undefined : resolvePublicTrickWinnerSeat(activeLastPlaySeat, finished);
+      if (activeLastPlaySeat === undefined
+        || passSeats.size < requiredPasses
+        || event.publicStableKey !== trickClearPublicStableKey(currentTrickIndex, currentTrickIndex + 1)
+        || event.leadSeat !== expectedLeadSeat) return false;
+      lastPlay = undefined;
+      activeLastPlaySeat = undefined;
+      passSeats.clear();
+      currentTrickIndex += 1;
+      finishingAction = false;
+    } else if (event.kind === "finish") {
+      const previousEvent = index === 0 ? undefined : events[index - 1];
+      if (terminalReached && event.finishReason !== "round-settlement") return false;
+      if (event.finishReason === "hand-empty") {
+        if (activeLastPlaySeat === undefined
+          || event.seat !== activeLastPlaySeat
+          || previousEvent?.kind !== "play"
+          || previousEvent.seat !== event.seat
+          || previousEvent.handCountAfter !== 0
+          || event.remainingHandCount !== 0) return false;
+        finishingAction = true;
+      } else if (!terminalReached || !finishingAction) {
+        return false;
+      }
+      if (activeLastPlaySeat === undefined || event.finishPosition !== finished.length + 1 || finished.includes(event.seat)) return false;
+      finished.push(event.seat);
+      if (isRoomTerminalFinishOrder(finished)) terminalReached = true;
+    }
+  }
+  if (terminalReached && finished.length !== 4) return false;
+  if (finished.length !== finishOrder.length || !finished.every((seat, index) => finishOrder[index] === seat)) return false;
+  if ((currentLastPlay !== null) !== (lastPlay !== undefined)) return false;
+  if (currentLastPlay !== null && lastPlay !== undefined) {
+    const canonicalLastPlay = canonicalizeCardGroup(currentLastPlay, gameRank);
+    if (canonicalLastPlay === undefined
+      || canonicalLastPlay.type !== lastPlay.groupType
+      || canonicalLastPlay.type !== lastPlay.patternType
+      || playPublicStableKey(canonicalLastPlay.cards.map((card) => card.id)) !== lastPlay.publicStableKey
+      || !sameCardIdMultiset(canonicalLastPlay.cards.map((card) => card.id), lastPlay.publicCardIds)
+      || (lastPlay.usedWildcardCount !== undefined && canonicalLastPlay.wildcards.length !== lastPlay.usedWildcardCount)) return false;
+  }
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.kind === "play" || event.kind === "pass") {
+      if (derivedCounts[event.seat] !== event.handCountAfter) return false;
+      derivedCounts[event.seat] = event.handCountBefore;
+    } else if (event.kind === "finish") {
+      if (derivedCounts[event.seat] !== event.remainingHandCount) return false;
+    } else if (event.kind === "tribute" || event.kind === "return") {
+      for (const seat of [0, 1, 2, 3] as const) derivedCounts[seat] -= event.handCountChanges[seat];
+    }
+  }
+  if (Object.values(derivedCounts).some((count) => count < 0)) return false;
+  return true;
+}
+
+function isRoomTerminalFinishOrder(finished: readonly PublicSeat[]): boolean {
+  if (finished.length >= 3) return true;
+  return finished.length >= 2 && ((finished[0]! + 2) % 4) === finished[1];
+}
+
+function resolvePublicTrickWinnerSeat(lastPlaySeat: PublicSeat, finished: readonly PublicSeat[]): PublicSeat | undefined {
+  if (!finished.includes(lastPlaySeat)) return lastPlaySeat;
+  const partner = ((lastPlaySeat + 2) % 4) as PublicSeat;
+  if (!finished.includes(partner)) return partner;
+  for (let offset = 1; offset <= 4; offset += 1) {
+    const seat = ((lastPlaySeat + 4 - offset) % 4) as PublicSeat;
+    if (!finished.includes(seat)) return seat;
+  }
+  return undefined;
 }
 
 function isValidPublicEvent(value: unknown): value is PublicActionEvent {
@@ -156,23 +324,27 @@ function isValidPublicEvent(value: unknown): value is PublicActionEvent {
   }
 }
 
-function isCanonicalCardGroup(value: unknown, gameRank: GameRank): value is CardGroup {
-  if (!isPlainDataRecord(value, ["id", "type", "label", "purpose", "cards", "wildcards", "strength"], true)) return false;
+function canonicalizeCardGroup(value: unknown, gameRank: GameRank): CardGroup | undefined {
+  if (!isPlainDataRecord(value, ["id", "type", "label", "purpose", "cards", "wildcards", "strength"], true)) return undefined;
   const group = value as Record<string, unknown>;
-  if (typeof group.id !== "string" || group.id.length === 0 || typeof group.type !== "string" || typeof group.label !== "string" || typeof group.purpose !== "string" || !isNonNegativeSafeInteger(group.strength) || !isCardArray(group.cards) || group.cards.length === 0 || !isCardArray(group.wildcards)) return false;
+  if (typeof group.id !== "string" || group.id.length === 0 || typeof group.type !== "string" || typeof group.label !== "string" || typeof group.purpose !== "string" || !isNonNegativeSafeInteger(group.strength) || !isCardArray(group.cards) || group.cards.length === 0 || !isCardArray(group.wildcards)) return undefined;
   const cardIds = group.cards.map((card) => card.id);
   const wildcardIds = group.wildcards.map((card) => card.id);
-  if (new Set(cardIds).size !== cardIds.length || new Set(wildcardIds).size !== wildcardIds.length || wildcardIds.some((id) => !cardIds.includes(id))) return false;
-  if (group.wildcards.some((card) => !isHeartRankWild(card, gameRank))) return false;
+  if (new Set(cardIds).size !== cardIds.length || new Set(wildcardIds).size !== wildcardIds.length || wildcardIds.some((id) => !cardIds.includes(id))) return undefined;
+  if (group.wildcards.some((card) => !isHeartRankWild(card, gameRank))) return undefined;
   try {
     const classified = classifyPlay([...group.cards], gameRank);
-    return classified !== undefined
+    const matches = classified !== undefined
       && classified.type === group.type
       && classified.id === group.id
+      && classified.label === group.label
+      && classified.purpose === group.purpose
       && classified.strength === group.strength
-      && sameCardIdMultiset(classified.cards.map((card) => card.id), cardIds);
+      && sameCardIdMultiset(classified.cards.map((card) => card.id), cardIds)
+      && sameCardIdMultiset(classified.wildcards.map((card) => card.id), wildcardIds);
+    return matches ? classified : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -219,13 +391,15 @@ function isolateContext(input: unknown): RolloutPolicyDecisionContext | undefine
   }
 }
 
-function safeContextField(input: Record<string, unknown>): "ply" | "actingSeat" {
+function safeContextFailure(input: Record<string, unknown>): Extract<RolloutPolicyResult, { ok: false }>["failure"] {
   try {
     const plyDescriptor = Object.getOwnPropertyDescriptor(input, "ply");
-    if (plyDescriptor === undefined || !isDataDescriptor(plyDescriptor) || !isNonNegativeSafeInteger(plyDescriptor.value)) return "ply";
-    return "actingSeat";
+    if (plyDescriptor === undefined || !isDataDescriptor(plyDescriptor) || !isNonNegativeSafeInteger(plyDescriptor.value)) {
+      return { kind: "invalid-policy-context", field: "ply", reason: "invalid-ply" };
+    }
+    return { kind: "invalid-policy-context", field: "actingSeat", reason: "invalid-acting-seat" };
   } catch {
-    return "ply";
+    return { kind: "invalid-policy-context", field: "ply", reason: "invalid-ply" };
   }
 }
 
