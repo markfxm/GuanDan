@@ -330,6 +330,174 @@ describe("D2F fixed internal rollout policy", () => {
     expect(getterCalls).toBe(0);
   });
 
+  test("rejects a hash-valid foreign public play card before CRN", async () => {
+    const policy = await loadPolicyModule();
+    const factory = policy.createInternalRolloutPolicy as (policyId: unknown) => {
+      ok: boolean;
+      policy?: { chooseAction: (observation: unknown, context: unknown, crn: unknown) => unknown };
+    };
+    const result = factory("d2f-lightweight-v1");
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.policy === undefined) return;
+
+    const foreignPlay = finalizePublicActionEvent({
+      schemaVersion: "d2-public-event-v2",
+      gameId: "policy-observation",
+      roundIdentity: "policy-observation:round:0",
+      handIdentity: "policy-observation:round:0:hand:0",
+      eventIndex: 0,
+      kind: "play",
+      seat: 1,
+      publicStableKey: "play:foreign-card",
+      patternType: "single",
+      groupType: "single",
+      handCountBefore: 2,
+      handCountAfter: 1,
+      trickIndex: 0,
+      publicCardIds: ["not-a-deck-card"],
+    });
+    const observation = makeObservation();
+    observation.publicHistoryEvents = [
+      foreignPlay,
+      makePassEvent(1, "policy-observation", 0),
+      makePassEvent(2, "policy-observation", 2),
+      makePassEvent(3, "policy-observation", 3),
+      makeTrickClearEvent(4, 1),
+    ];
+    let crnCalls = 0;
+    let action: unknown;
+    expect(() => {
+      action = result.policy!.chooseAction(observation, {
+        replicateIdentity: "2".repeat(64),
+        ply: 0,
+        actingSeat: 0,
+      }, { value: () => { crnCalls += 1; return 0.5; } });
+    }).not.toThrow();
+    expect(action).toEqual({
+      ok: false,
+      failure: { kind: "invalid-policy-context", field: "publicHistoryEvents[].publicCardIds", reason: "foreign-card-id" },
+    });
+    expect(crnCalls).toBe(0);
+    expect(JSON.stringify(action)).not.toContain("not-a-deck-card");
+  });
+
+  test("rejects a duplicate physical public play identity before CRN", async () => {
+    const policy = await loadPolicyModule();
+    const factory = policy.createInternalRolloutPolicy as (policyId: unknown) => {
+      ok: boolean;
+      policy?: { chooseAction: (observation: unknown, context: unknown, crn: unknown) => unknown };
+    };
+    const result = factory("d2f-lightweight-v1");
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.policy === undefined) return;
+
+    const group = classifiedGroup("S3-1");
+    const observation = makeObservation();
+    observation.hand = createDeck().slice(2, 4);
+    observation.currentLastPlay = group;
+    observation.publicHistoryEvents = [
+      makePlayEvent(group, 0, 1, 2, 1),
+      makePlayEvent(group, 1, 0, 2, 1),
+    ];
+    let crnCalls = 0;
+    const action = result.policy.chooseAction(observation, {
+      replicateIdentity: "2".repeat(64),
+      ply: 0,
+      actingSeat: 0,
+    }, { value: () => { crnCalls += 1; return 0.5; } });
+    expect(action).toEqual({
+      ok: false,
+      failure: { kind: "invalid-policy-context", field: "publicHistoryEvents[].publicCardIds", reason: "cross-event-duplicate-card-id" },
+    });
+    expect(crnCalls).toBe(0);
+  });
+
+  test("rejects a public played card that remains in the acting hand before CRN", async () => {
+    const policy = await loadPolicyModule();
+    const factory = policy.createInternalRolloutPolicy as (policyId: unknown) => {
+      ok: boolean;
+      policy?: { chooseAction: (observation: unknown, context: unknown, crn: unknown) => unknown };
+    };
+    const result = factory("d2f-lightweight-v1");
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.policy === undefined) return;
+
+    const group = classifiedGroup("S3-1");
+    const observation = makeObservation();
+    observation.hand = [createDeck().find((card) => card.id === "S3-1")!, createDeck()[0]!];
+    observation.publicHistoryEvents = [
+      makePlayEvent(group, 0, 1, 2, 1),
+      makePassEvent(1, "policy-observation", 0),
+      makePassEvent(2, "policy-observation", 2),
+      makePassEvent(3, "policy-observation", 3),
+      makeTrickClearEvent(4, 1),
+    ];
+    let crnCalls = 0;
+    const action = result.policy.chooseAction(observation, {
+      replicateIdentity: "2".repeat(64),
+      ply: 0,
+      actingSeat: 0,
+    }, { value: () => { crnCalls += 1; return 0.5; } });
+    expect(action).toEqual({
+      ok: false,
+      failure: { kind: "invalid-policy-context", field: "publicHistoryEvents[].publicCardIds", reason: "acting-hand-overlap" },
+    });
+    expect(crnCalls).toBe(0);
+  });
+
+  test("real finalization rejects a duplicate physical ID within one play event", () => {
+    expect(() => finalizePublicActionEvent({
+      schemaVersion: "d2-public-event-v2",
+      gameId: "policy-observation",
+      roundIdentity: "policy-observation:round:0",
+      handIdentity: "policy-observation:round:0:hand:0",
+      eventIndex: 0,
+      kind: "play",
+      seat: 1,
+      publicStableKey: "play:S3-1,S3-1",
+      patternType: "single",
+      groupType: "single",
+      handCountBefore: 2,
+      handCountAfter: 0,
+      trickIndex: 0,
+      publicCardIds: ["S3-1", "S3-1"],
+    })).toThrow("PUBLIC_CARD_DUPLICATE");
+  });
+
+  test("rejects fake card IDs on finalized no-card event projections before CRN", async () => {
+    const policy = await loadPolicyModule();
+    const factory = policy.createInternalRolloutPolicy as (policyId: unknown) => {
+      ok: boolean;
+      policy?: { chooseAction: (observation: unknown, context: unknown, crn: unknown) => unknown };
+    };
+    const result = factory("d2f-lightweight-v1");
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.policy === undefined) return;
+
+    for (const event of [makePassEvent(0), makeTrickClearEvent(0, 0)]) {
+      const fakeEvent = structuredClone(event);
+      Object.defineProperty(fakeEvent, "publicCardIds", {
+        configurable: true,
+        enumerable: true,
+        value: ["S3-1"],
+        writable: true,
+      });
+      const observation = makeObservation();
+      observation.publicHistoryEvents = [fakeEvent];
+      let crnCalls = 0;
+      const action = result.policy.chooseAction(observation, {
+        replicateIdentity: "2".repeat(64),
+        ply: 0,
+        actingSeat: 0,
+      }, { value: () => { crnCalls += 1; return 0.5; } });
+      expect(action).toEqual({
+        ok: false,
+        failure: { kind: "invalid-policy-context", field: "publicHistoryEvents[].publicCardIds", reason: "non-play-event-card-ids" },
+      });
+      expect(crnCalls).toBe(0);
+    }
+  });
+
   test("replaces caller classification authority with the exact canonical currentLastPlay", async () => {
     const policy = await loadPolicyModule();
     const factory = policy.createInternalRolloutPolicy as (policyId: unknown) => {

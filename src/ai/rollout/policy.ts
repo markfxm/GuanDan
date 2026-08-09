@@ -1,5 +1,5 @@
 import { detectGroups, type CardGroup } from "../../engine/groups";
-import { RANKS, SUITS, isHeartRankWild, type Card, type GameRank } from "../../engine/cards";
+import { createDeck, RANKS, SUITS, isHeartRankWild, type Card, type GameRank } from "../../engine/cards";
 import { canBeatPlay, classifyPlay } from "../../game/playRules";
 import { assertFinalizedPublicActionEvent, playPublicStableKey, trickClearPublicStableKey } from "../../game/publicEvent";
 import { verifyPublicActionEventHash } from "../../game/publicEventHash";
@@ -11,6 +11,7 @@ import {
   type RolloutAction,
   type RolloutPolicyDecisionContext,
   type RolloutPolicyId,
+  type RolloutPolicyFailure,
   type RolloutPolicyResult,
   type SeatLocalObservation,
 } from "./contracts";
@@ -32,12 +33,15 @@ export type SeatLocalObservationValidationResult =
   | Readonly<{ ok: true; observation: SeatLocalObservation }>
   | Readonly<{
       ok: false;
-      failure: {
-        kind: "invalid-policy-context";
-        field: "observation";
-        reason: "malformed-observation";
-      };
+      failure: Extract<RolloutPolicyFailure, { kind: "invalid-policy-context" }>;
     }>;
+
+type ObservationFailure = Extract<RolloutPolicyFailure, { kind: "invalid-policy-context" }>;
+type ObservationIsolationResult =
+  | Readonly<{ ok: true; observation: SeatLocalObservation }>
+  | Readonly<{ ok: false; failure: ObservationFailure }>;
+
+const CANONICAL_CARD_IDS = new Set(createDeck().map((card) => card.id));
 
 const fixedPolicy: InternalRolloutPolicy = Object.freeze({
   listLegalActions,
@@ -52,23 +56,13 @@ export function createInternalRolloutPolicy(policyId: RolloutPolicyId): Internal
 }
 
 export function validateSeatLocalObservation(input: unknown): SeatLocalObservationValidationResult {
-  const observation = isolateObservation(input);
-  if (observation === undefined) {
-    return Object.freeze({
-      ok: false as const,
-      failure: Object.freeze({
-        kind: "invalid-policy-context" as const,
-        field: "observation" as const,
-        reason: "malformed-observation" as const,
-      }),
-    });
-  }
-  return Object.freeze({ ok: true as const, observation });
+  return isolateObservation(input);
 }
 
 function listLegalActions(input: SeatLocalObservation): readonly RolloutAction[] {
-  const observation = isolateObservation(input);
-  if (observation === undefined) return Object.freeze([]);
+  const isolated = isolateObservation(input);
+  if (!isolated.ok) return Object.freeze([]);
+  const observation = isolated.observation;
 
   try {
     const lastPlay = observation.currentLastPlay as CardGroup | null;
@@ -136,29 +130,33 @@ function chooseAction(
   return Object.freeze({ ok: true as const, action: selected });
 }
 
-function isolateObservation(input: unknown): SeatLocalObservation | undefined {
+function isolateObservation(input: unknown): ObservationIsolationResult {
   try {
-    if (!isPlainDataRecord(input, ["hand", "publicHistoryEvents", "handCounts", "currentLastPlay", "finishOrder", "gameRank"], true)) return undefined;
+    if (!isPlainDataRecord(input, ["hand", "publicHistoryEvents", "handCounts", "currentLastPlay", "finishOrder", "gameRank"], true)) return malformedObservation();
     const hand = getDataProperty(input, "hand");
     const publicHistoryEvents = getDataProperty(input, "publicHistoryEvents");
     const handCounts = getDataProperty(input, "handCounts");
     const currentLastPlay = getDataProperty(input, "currentLastPlay");
     const finishOrder = getDataProperty(input, "finishOrder");
     const gameRank = getDataProperty(input, "gameRank");
-    if (!isPlainDataGraph(hand) || !isPlainDataGraph(publicHistoryEvents) || !isPlainDataGraph(handCounts) || !isPlainDataGraph(finishOrder) || (currentLastPlay !== null && !isPlainDataGraph(currentLastPlay)) || !isGameRank(gameRank)) return undefined;
-    if (!isObservationSemantics(hand, publicHistoryEvents, handCounts, currentLastPlay, finishOrder, gameRank)) return undefined;
+    if (!isPlainDataGraph(hand) || !isPlainDataGraph(publicHistoryEvents) || !isPlainDataGraph(handCounts) || !isPlainDataGraph(finishOrder) || (currentLastPlay !== null && !isPlainDataGraph(currentLastPlay)) || !isGameRank(gameRank)) return malformedObservation();
+    const semanticFailure = isObservationSemantics(hand, publicHistoryEvents, handCounts, currentLastPlay, finishOrder, gameRank);
+    if (semanticFailure !== undefined) return Object.freeze({ ok: false as const, failure: Object.freeze(semanticFailure) });
     const canonicalLastPlay = currentLastPlay === null ? null : canonicalizeCardGroup(currentLastPlay, gameRank);
-    if (currentLastPlay !== null && canonicalLastPlay === undefined) return undefined;
-    return deepFreeze({
-      hand: structuredClone(hand) as readonly Card[],
-      publicHistoryEvents: structuredClone(publicHistoryEvents),
-      handCounts: structuredClone(handCounts) as Readonly<Record<0 | 1 | 2 | 3, number>>,
-      currentLastPlay: canonicalLastPlay === null ? null : structuredClone(canonicalLastPlay),
-      finishOrder: structuredClone(finishOrder) as readonly (0 | 1 | 2 | 3)[],
-      gameRank,
-    }) as SeatLocalObservation;
+    if (currentLastPlay !== null && canonicalLastPlay === undefined) return malformedObservation();
+    return Object.freeze({
+      ok: true as const,
+      observation: deepFreeze({
+        hand: structuredClone(hand) as readonly Card[],
+        publicHistoryEvents: structuredClone(publicHistoryEvents),
+        handCounts: structuredClone(handCounts) as Readonly<Record<0 | 1 | 2 | 3, number>>,
+        currentLastPlay: canonicalLastPlay === null ? null : structuredClone(canonicalLastPlay),
+        finishOrder: structuredClone(finishOrder) as readonly (0 | 1 | 2 | 3)[],
+        gameRank,
+      }) as SeatLocalObservation,
+    });
   } catch {
-    return undefined;
+    return malformedObservation();
   }
 }
 
@@ -169,19 +167,57 @@ function isObservationSemantics(
   currentLastPlay: unknown,
   finishOrder: unknown,
   gameRank: GameRank,
-): boolean {
-  if (!isCardArray(hand) || new Set(hand.map((card) => card.id)).size !== hand.length) return false;
-  if (!isPlainDataRecord(handCounts, ["0", "1", "2", "3"], true)) return false;
+): ObservationFailure | undefined {
+  if (!isCardArray(hand) || new Set(hand.map((card) => card.id)).size !== hand.length) return malformedObservationFailure();
+  if (!isPlainDataRecord(handCounts, ["0", "1", "2", "3"], true)) return malformedObservationFailure();
   const counts = handCounts as Record<string, unknown>;
-  if (!["0", "1", "2", "3"].every((seat) => isNonNegativeSafeInteger(counts[seat]))) return false;
-  if (!isCanonicalSeatArray(finishOrder)) return false;
+  if (!["0", "1", "2", "3"].every((seat) => isNonNegativeSafeInteger(counts[seat]))) return malformedObservationFailure();
+  if (!isCanonicalSeatArray(finishOrder)) return malformedObservationFailure();
   const finished = finishOrder as readonly (0 | 1 | 2 | 3)[];
-  if (![0, 1, 2, 3].every((seat) => finished.includes(seat as 0 | 1 | 2 | 3) ? counts[String(seat)] === 0 : (counts[String(seat)] as number) > 0)) return false;
-  if (isRoomTerminalFinishOrder(finished)) return false;
-  if (currentLastPlay !== null && canonicalizeCardGroup(currentLastPlay, gameRank) === undefined) return false;
-  if (!isPlainDataArray(publicHistoryEvents)) return false;
-  if (!publicHistoryEvents.every((event) => isValidPublicEvent(event))) return false;
-  return isCoherentPublicHistory(publicHistoryEvents as readonly PublicActionEvent[], counts, finished, currentLastPlay, gameRank);
+  if (![0, 1, 2, 3].every((seat) => finished.includes(seat as 0 | 1 | 2 | 3) ? counts[String(seat)] === 0 : (counts[String(seat)] as number) > 0)) return malformedObservationFailure();
+  if (isRoomTerminalFinishOrder(finished)) return malformedObservationFailure();
+  if (currentLastPlay !== null && canonicalizeCardGroup(currentLastPlay, gameRank) === undefined) return malformedObservationFailure();
+  if (!isPlainDataArray(publicHistoryEvents)) return malformedObservationFailure();
+  const handIds = new Set((hand as readonly Card[]).map((card) => card.id));
+  const playedIds = new Set<string>();
+  for (const event of publicHistoryEvents) {
+    if (!isPlainDataGraph(event)) return malformedObservationFailure();
+    const eventRecord = event as Record<string, unknown>;
+    if (eventRecord.kind !== "play" && eventRecord.kind !== "tribute" && eventRecord.kind !== "return") {
+      const publicCardIdsDescriptor = Object.getOwnPropertyDescriptor(eventRecord, "publicCardIds");
+      if (isDataDescriptor(publicCardIdsDescriptor) && publicCardIdsDescriptor.value !== undefined) {
+        return { kind: "invalid-policy-context", field: "publicHistoryEvents[].publicCardIds", reason: "non-play-event-card-ids" };
+      }
+    }
+    if (!isValidPublicEvent(event)) return malformedObservationFailure();
+    if (eventRecord.kind !== "play") continue;
+    const publicCardIds = eventRecord.publicCardIds;
+    if (!Array.isArray(publicCardIds)) return malformedObservationFailure();
+    const eventIds = publicCardIds as readonly string[];
+    if (eventIds.some((id) => !CANONICAL_CARD_IDS.has(id))) {
+      return { kind: "invalid-policy-context", field: "publicHistoryEvents[].publicCardIds", reason: "foreign-card-id" };
+    }
+    if (new Set(eventIds).size !== eventIds.length) {
+      return { kind: "invalid-policy-context", field: "publicHistoryEvents[].publicCardIds", reason: "duplicate-card-id" };
+    }
+    if (eventIds.some((id) => playedIds.has(id))) {
+      return { kind: "invalid-policy-context", field: "publicHistoryEvents[].publicCardIds", reason: "cross-event-duplicate-card-id" };
+    }
+    if (eventIds.some((id) => handIds.has(id))) {
+      return { kind: "invalid-policy-context", field: "publicHistoryEvents[].publicCardIds", reason: "acting-hand-overlap" };
+    }
+    for (const id of eventIds) playedIds.add(id);
+  }
+  if (!isCoherentPublicHistory(publicHistoryEvents as readonly PublicActionEvent[], counts, finished, currentLastPlay, gameRank)) return malformedObservationFailure();
+  return undefined;
+}
+
+function malformedObservation(): ObservationIsolationResult {
+  return Object.freeze({ ok: false as const, failure: Object.freeze(malformedObservationFailure()) });
+}
+
+function malformedObservationFailure(): ObservationFailure {
+  return { kind: "invalid-policy-context", field: "observation", reason: "malformed-observation" };
 }
 
 function isCoherentPublicHistory(

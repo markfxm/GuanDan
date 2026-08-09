@@ -37,6 +37,7 @@ import {
   type RolloutPublicState,
   type RolloutReplicateInput,
   type RolloutReplicateResult,
+  type RolloutScenarioProjectionMismatchField,
 } from "./contracts";
 import type { RootIdentity } from "./contracts";
 
@@ -69,6 +70,10 @@ type InputIsolationResult =
   | { ok: true; input: RolloutReplicateInput }
   | { ok: false; failure: Extract<RolloutKernelFailure, { kind: "simulation-failed" }> };
 
+type ReplayValidationResult =
+  | { ok: true }
+  | { ok: false; failure: Extract<RolloutKernelFailure, { kind: "simulation-failed"; stage: "replay" }> };
+
 type ActionApplicationResult =
   | { ok: true; state: MutableRolloutState }
   | {
@@ -89,14 +94,28 @@ export function runRolloutReplicate(
   if (!budget.ok) return simulationFailure({ kind: "simulation-failed", stage: "input", reason: "invalid-budget" });
   if (!isRootIdentity(rootIdentity)) return simulationFailure({ kind: "simulation-failed", stage: "input", reason: "invalid-root-identity" });
 
+  const scenarioPrivateState = isolatedInput.scenario.privateState as Record<string, unknown>;
+  const scenarioCurrentTrick = scenarioPrivateState.currentTrick as Record<string, unknown>;
+  const initialConservation = validateRolloutState({
+    hands: scenarioPrivateState.hands,
+    publicPlayedCardIds: scenarioPrivateState.publicPlayedCardIds,
+    currentLastPlay: scenarioPrivateState.currentLastPlay === undefined ? null : scenarioPrivateState.currentLastPlay,
+    currentLastPlaySeat: scenarioCurrentTrick.lastPlaySeat ?? null,
+    currentTrick: scenarioPrivateState.currentTrick,
+    handCounts: scenarioPrivateState.handCounts,
+    finishOrder: scenarioPrivateState.finishOrder,
+    actingSeat: isolatedInput.publicState.actingSeat,
+    expectedCardIds: createDeck().map((card) => card.id),
+    gameRank: isolatedInput.publicState.gameRank,
+  });
+  if (!initialConservation.ok) return simulationFailure(classifyConservationFailure(initialConservation.failure));
+
   let state: MutableRolloutState;
   try {
     state = createIsolatedState(isolatedInput);
   } catch {
     return simulationFailure({ kind: "simulation-failed", stage: "replay", reason: "invalid-scenario" });
   }
-  const initialConservation = validateRolloutState(toConservationState(state));
-  if (!initialConservation.ok) return simulationFailure(classifyConservationFailure(initialConservation.failure));
 
   let workUnits = 1;
   if (workUnits > budget.value.maximumWorkUnits) return budgetFailure(workUnits, budget.value.maximumWorkUnits);
@@ -192,7 +211,8 @@ function isolateRolloutInput(input: unknown): InputIsolationResult {
     if (!isPlainDataGraph(candidate) || !isCandidateInput(candidate)) return isolationFailure("input", "invalid-candidate");
     if (!isPlainDataGraph(scenario) || !isScenarioInput(scenario)) return isolationFailure("replay", "invalid-scenario");
     if (!isPlainDataGraph(publicState) || !isPublicStateInput(publicState)) return isolationFailure("input", "invalid-public-state");
-    if (!isPlainDataGraph(publicReplayContext) || !isValidPublicReplayContext(publicReplayContext, scenario)) return isolationFailure("replay", "invalid-replay-context");
+    const replayValidation = isValidPublicReplayContext(publicReplayContext, scenario, publicState);
+    if (!replayValidation.ok) return replayValidation;
     if (!isPlainDataGraph(replicateIdentity) || typeof replicateIdentity !== "string" || !/^[a-f0-9]{64}$/.test(replicateIdentity) || !isCrnViewEnvelope(random)) return isolationFailure("input", "malformed-envelope");
     if (!isPlainDataGraph(validatedBudget)) return isolationFailure("input", "invalid-budget");
     const safeInput = {
@@ -219,33 +239,182 @@ function isolationFailure(
   return { ok: false, failure: { kind: "simulation-failed", stage, reason } as Extract<RolloutKernelFailure, { kind: "simulation-failed" }> };
 }
 
-function isValidPublicReplayContext(value: unknown, scenario: unknown): boolean {
-  if (!isPlainDataRecord(value, ["publicHistoryEvents", "initialLedger", "finalLedger"], true)) return false;
+function isValidPublicReplayContext(value: unknown, scenario: unknown, publicState: unknown): ReplayValidationResult {
+  if (!isPlainDataRecord(value, ["publicHistoryEvents", "initialLedger", "finalLedger"], true)) return invalidReplayContextFailure();
   const events = value.publicHistoryEvents;
   const initialLedger = value.initialLedger;
   const finalLedger = value.finalLedger;
-  if (!isPlainDataArray(events) || !isHardPublicLedger(initialLedger) || !isHardPublicLedger(finalLedger)) return false;
-  if (!isPlainDataRecord(scenario) || !isPlainDataRecord(scenario.privateState) || !isPlainDataRecord(scenario.privateState.ledger)) return false;
+  if (!isPlainDataArray(events) || !isHardPublicLedger(initialLedger) || !isHardPublicLedger(finalLedger)) return invalidReplayContextFailure();
+  if (!isPlainDataRecord(scenario) || !isPlainDataRecord(scenario.privateState) || !isPlainDataRecord(scenario.privateState.ledger)) return invalidReplayContextFailure();
+  if (!isPlainDataRecord(publicState)) return invalidReplayContextFailure();
   try {
     const initial = initialLedger as HardPublicLedger;
     const final = finalLedger as HardPublicLedger;
-    if (!isInitialOpeningLedger(initial)) return false;
-    if (events.length !== final.nextEventIndex || final.lastAppliedEventIndex !== events.length - 1) return false;
-    if (events.length === 0 && canonicalPublicLedgerHash(initial) !== canonicalPublicLedgerHash(final)) return false;
-    let ledger = initialLedger as HardPublicLedger;
+    const scenarioPrivateState = scenario.privateState as Record<string, unknown>;
+    const replayPublicState = publicState as RolloutPublicState;
+    if (!isInitialOpeningLedger(initial)) return invalidReplayContextFailure();
+
+    let replayedLedger = initial;
     for (let index = 0; index < events.length; index += 1) {
       const event = events[index] as PublicActionEvent;
-      if (event.eventIndex !== index) return false;
+      if (event.eventIndex !== index) return invalidReplayContextFailure();
       verifyPublicActionEventHash(event);
-      const applied = applyPublicEvent(ledger, event);
-      if (!applied.ok || applied.kind !== "applied") return false;
-      ledger = applied.ledger;
+      const applied = applyPublicEvent(replayedLedger, event);
+      if (!applied.ok || applied.kind !== "applied") return invalidReplayContextFailure();
+      replayedLedger = applied.ledger;
     }
-    return canonicalPublicLedgerHash(ledger) === canonicalPublicLedgerHash(finalLedger as HardPublicLedger)
-      && canonicalPublicLedgerHash(finalLedger as HardPublicLedger) === canonicalPublicLedgerHash(scenario.privateState.ledger as HardPublicLedger);
+
+    const initialLedgerMismatch = compareInitialLedgerProjection(initial, final, events as readonly PublicActionEvent[]);
+    if (initialLedgerMismatch !== undefined) return projectionMismatchFailure(initialLedgerMismatch);
+    const finalLedgerMismatch = compareLedgerProjection(replayedLedger, final, "publicReplayContext.finalLedger");
+    if (finalLedgerMismatch !== undefined) return projectionMismatchFailure(finalLedgerMismatch);
+    if (canonicalPublicLedgerHash(replayedLedger) !== canonicalPublicLedgerHash(final)) return projectionMismatchFailure("canonicalPublicLedgerHash(publicReplayContext.finalLedger)");
+    if (canonicalPublicLedgerHash(replayedLedger) !== canonicalPublicLedgerHash(scenarioPrivateState.ledger as HardPublicLedger)) return projectionMismatchFailure("scenario.privateState.ledger");
+
+    const currentLastPlay = deriveCurrentLastPlay(events as readonly PublicActionEvent[], replayedLedger, replayPublicState.gameRank);
+    if (!currentLastPlay.ok) {
+      return currentLastPlay.reason === "game-rank-mismatch"
+        ? projectionMismatchFailure("publicState.gameRank")
+        : invalidReplayContextFailure();
+    }
+    if (!sameNumbers(scenarioPrivateState.handCounts as Record<PublicSeat, number>, replayedLedger.handCounts)) return projectionMismatchFailure("scenario.privateState.handCounts");
+    if (!sameArray(scenarioPrivateState.finishOrder as readonly PublicSeat[], replayedLedger.finishOrder)) return projectionMismatchFailure("scenario.privateState.finishOrder");
+    if (!sameCurrentTrick(scenarioPrivateState.currentTrick, replayedLedger.currentTrick)) return projectionMismatchFailure("scenario.privateState.currentTrick");
+    if (!sameCanonicalCardGroup(currentLastPlay.value, scenarioPrivateState.currentLastPlay)) {
+      return currentLastPlay.value !== null
+        && sameCardGroupIdentity(currentLastPlay.value, scenarioPrivateState.currentLastPlay)
+        && !sameCardGroupStructure(currentLastPlay.value, scenarioPrivateState.currentLastPlay)
+        ? projectionMismatchFailure("publicState.gameRank")
+        : projectionMismatchFailure("scenario.privateState.currentLastPlay");
+    }
+    if (!sameTransferRecords(scenarioPrivateState.revealedTransferEvents, replayedLedger.revealedTransferEvents)) return projectionMismatchFailure("scenario.privateState.revealedTransferEvents");
+    if (!sameArray(scenarioPrivateState.publicPlayedCardIds as readonly string[], replayedLedger.playedCardIds)) return projectionMismatchFailure("scenario.privateState.publicPlayedCardIds");
+
+    const hands = scenarioPrivateState.hands as Record<string, readonly Card[]>;
+    if (!SEATS.every((seat) => hands[String(seat)]!.length === replayedLedger.handCounts[seat])) return projectionMismatchFailure("scenario.privateState.hands");
+
+    if (!sameNumbers(replayPublicState.handCounts, replayedLedger.handCounts)) return projectionMismatchFailure("publicState.handCounts");
+    if (!sameArray(replayPublicState.finishOrder, replayedLedger.finishOrder)) return projectionMismatchFailure("publicState.finishOrder");
+    if (!sameArray(replayPublicState.publicPlayedCardIds, replayedLedger.playedCardIds)) return projectionMismatchFailure("publicState.publicPlayedCardIds");
+    if (!sameCanonicalCardGroup(currentLastPlay.value, replayPublicState.currentLastPlay)) {
+      return currentLastPlay.value !== null
+        && sameCardGroupIdentity(currentLastPlay.value, replayPublicState.currentLastPlay)
+        && !sameCardGroupStructure(currentLastPlay.value, replayPublicState.currentLastPlay)
+        ? projectionMismatchFailure("publicState.gameRank")
+        : projectionMismatchFailure("publicState.currentLastPlay");
+    }
+    if ((replayedLedger.currentTrick.lastPlaySeat ?? null) !== replayPublicState.currentLastPlaySeat) return projectionMismatchFailure("publicState.currentLastPlaySeat");
+
+    const actingSeat = deriveActingSeat(events as readonly PublicActionEvent[], replayedLedger);
+    if (actingSeat !== undefined && actingSeat !== replayPublicState.actingSeat) return projectionMismatchFailure("publicState.actingSeat");
+    return { ok: true };
   } catch {
-    return false;
+    return invalidReplayContextFailure();
   }
+}
+
+function invalidReplayContextFailure(): ReplayValidationResult {
+  return { ok: false, failure: { kind: "simulation-failed", stage: "replay", reason: "invalid-replay-context" } };
+}
+
+function projectionMismatchFailure(field: RolloutScenarioProjectionMismatchField): ReplayValidationResult {
+  return { ok: false, failure: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field } };
+}
+
+function compareLedgerProjection(
+  expected: HardPublicLedger,
+  actual: HardPublicLedger,
+  prefix: "publicReplayContext.finalLedger",
+): RolloutScenarioProjectionMismatchField | undefined {
+  if (expected.gameId !== actual.gameId) return `${prefix}.gameId`;
+  if (expected.roundIdentity !== actual.roundIdentity) return `${prefix}.roundIdentity`;
+  if (expected.handIdentity !== actual.handIdentity) return `${prefix}.handIdentity`;
+  if (expected.lastAppliedEventIndex !== actual.lastAppliedEventIndex) return `${prefix}.lastAppliedEventIndex`;
+  if (expected.nextEventIndex !== actual.nextEventIndex) return `${prefix}.nextEventIndex`;
+  if (!sameSeenEventHashes(expected.seenEventHashes, actual.seenEventHashes)) return "publicReplayContext.publicHistoryEvents";
+  if (!sameNumbers(expected.handCounts, actual.handCounts)) return `${prefix}.handCounts`;
+  if (!sameArray(expected.finishOrder, actual.finishOrder)) return `${prefix}.finishOrder`;
+  if (expected.currentTrick.trickIndex !== actual.currentTrick.trickIndex) return `${prefix}.currentTrick.trickIndex`;
+  if (expected.currentTrick.leadSeat !== actual.currentTrick.leadSeat) return `${prefix}.currentTrick.leadSeat`;
+  if ((expected.currentTrick.lastPlaySeat ?? null) !== (actual.currentTrick.lastPlaySeat ?? null)) return `${prefix}.currentTrick.lastPlaySeat`;
+  if ((expected.currentTrick.lastPlayStableKey ?? null) !== (actual.currentTrick.lastPlayStableKey ?? null)) return `${prefix}.currentTrick.lastPlayStableKey`;
+  if (!sameArray(expected.currentTrick.passSeats, actual.currentTrick.passSeats)) return `${prefix}.currentTrick.passSeats`;
+  if (!sameArray(expected.playedCardIds, actual.playedCardIds)) return `${prefix}.playedCardIds`;
+  if (!sameTransferRecords(expected.revealedTransferEvents, actual.revealedTransferEvents)) return `${prefix}.revealedTransferEvents`;
+  return undefined;
+}
+
+function sameSeenEventHashes(left: Readonly<Record<number, string>>, right: Readonly<Record<number, string>>): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key) => Object.prototype.hasOwnProperty.call(right, key) && left[Number(key)] === right[Number(key)]);
+}
+
+function compareInitialLedgerProjection(
+  initial: HardPublicLedger,
+  final: HardPublicLedger,
+  _events: readonly PublicActionEvent[],
+): RolloutScenarioProjectionMismatchField | undefined {
+  if (initial.publicTributeEvents[0] !== final.publicTributeEvents[0]) return "publicReplayContext.initialLedger.publicTributeEvents";
+  if (initial.currentTrick.trickIndex === final.currentTrick.trickIndex && initial.currentTrick.leadSeat !== final.currentTrick.leadSeat) {
+    return "publicReplayContext.initialLedger.currentTrick.leadSeat";
+  }
+  return undefined;
+}
+
+type CurrentLastPlayValidationResult =
+  | { ok: true; value: CardGroup | null }
+  | { ok: false; reason: "invalid-replay-context" | "game-rank-mismatch" };
+
+function deriveCurrentLastPlay(
+  events: readonly PublicActionEvent[],
+  ledger: HardPublicLedger,
+  gameRank: RolloutPublicState["gameRank"],
+): CurrentLastPlayValidationResult {
+  if (ledger.currentTrick.lastPlaySeat === undefined) return { ok: true, value: null };
+  let lastPlay: Extract<PublicActionEvent, { kind: "play" }> | undefined;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.kind === "play" && event.trickIndex === ledger.currentTrick.trickIndex) {
+      lastPlay = event;
+      break;
+    }
+  }
+  if (lastPlay === undefined || lastPlay.seat !== ledger.currentTrick.lastPlaySeat || lastPlay.publicStableKey !== ledger.currentTrick.lastPlayStableKey) {
+    return { ok: false, reason: "invalid-replay-context" };
+  }
+  const deckById = new Map(createDeck().map((card) => [card.id, card] as const));
+  const cards: Card[] = [];
+  for (const id of lastPlay.publicCardIds) {
+    const card = deckById.get(id);
+    if (card === undefined) return { ok: false, reason: "invalid-replay-context" };
+    cards.push(card);
+  }
+  let group: CardGroup | undefined;
+  try {
+    group = classifyPlay(cards, gameRank);
+  } catch {
+    return { ok: false, reason: "game-rank-mismatch" };
+  }
+  if (group === undefined
+    || group.type !== lastPlay.groupType
+    || group.type !== lastPlay.patternType
+    || playPublicStableKey(group.cards.map((card) => card.id)) !== lastPlay.publicStableKey
+    || (lastPlay.usedWildcardCount !== undefined && group.wildcards.length !== lastPlay.usedWildcardCount)) {
+    return { ok: false, reason: "game-rank-mismatch" };
+  }
+  return { ok: true, value: group };
+}
+
+function deriveActingSeat(events: readonly PublicActionEvent[], ledger: HardPublicLedger): PublicSeat | undefined {
+  if (ledger.currentTrick.lastPlaySeat === undefined) return ledger.currentTrick.leadSeat;
+  let candidateSeat = ((ledger.currentTrick.lastPlaySeat + 3) % 4) as PublicSeat;
+  for (let count = 0; count < SEATS.length; count += 1) {
+    if (!ledger.finishOrder.includes(candidateSeat) && !ledger.currentTrick.passSeats.includes(candidateSeat)) return candidateSeat;
+    candidateSeat = ((candidateSeat + 3) % 4) as PublicSeat;
+  }
+  return undefined;
 }
 
 function isInitialOpeningLedger(ledger: HardPublicLedger): boolean {
@@ -791,6 +960,64 @@ function resolveTrickWinnerSeat(state: MutableRolloutState, lastPlaySeat: Public
 
 function sameNumbers(left: Record<PublicSeat, number>, right: Readonly<Record<PublicSeat, number>>): boolean {
   return SEATS.every((seat) => left[seat] === right[seat]);
+}
+
+function sameCurrentTrick(left: unknown, right: HardPublicLedger["currentTrick"]): boolean {
+  if (!isPlainDataRecord(left)) return false;
+  return left.trickIndex === right.trickIndex
+    && left.leadSeat === right.leadSeat
+    && (left.lastPlaySeat ?? null) === (right.lastPlaySeat ?? null)
+    && (left.lastPlayStableKey ?? null) === (right.lastPlayStableKey ?? null)
+    && sameArray(left.passSeats as readonly PublicSeat[], right.passSeats);
+}
+
+function sameTransferRecords(left: unknown, right: HardPublicLedger["revealedTransferEvents"]): boolean {
+  if (!Array.isArray(left) || left.length !== right.length) return false;
+  return right.every((expected, index) => {
+    const actual = left[index];
+    if (!isPlainDataRecord(actual)) return false;
+    const actualKeys = Reflect.ownKeys(actual);
+    const allowedKeys = new Set(["eventIndex", "kind", "fromSeat", "toSeat", "cardId"]);
+    if (actualKeys.length < 4 || actualKeys.length > 5 || actualKeys.some((key) => typeof key !== "string" || !allowedKeys.has(key))) return false;
+    const expectedHasCardKey = Object.prototype.hasOwnProperty.call(expected, "cardId");
+    const actualHasCardKey = Object.prototype.hasOwnProperty.call(actual, "cardId");
+    if (expectedHasCardKey !== actualHasCardKey) return false;
+    const expectedHasCard = expected.cardId !== undefined;
+    const actualHasCard = actualHasCardKey && actual.cardId !== undefined;
+    return actual.eventIndex === expected.eventIndex
+      && actual.kind === expected.kind
+      && actual.fromSeat === expected.fromSeat
+      && actual.toSeat === expected.toSeat
+      && actualHasCard === expectedHasCard
+      && (!expectedHasCard || actual.cardId === expected.cardId);
+  });
+}
+
+function sameCanonicalCardGroup(left: CardGroup | null, right: unknown): boolean {
+  if (left === null) return right === null || right === undefined;
+  if (!isPlainDataRecord(right)) return false;
+  const group = right as CardGroup;
+  return left.label === group.label
+    && left.purpose === group.purpose
+    && sameCardGroupStructure(left, group);
+}
+
+function sameCardGroupStructure(left: CardGroup, right: unknown): boolean {
+  if (!isPlainDataRecord(right)) return false;
+  const group = right as CardGroup;
+  return left.id === group.id
+    && left.type === group.type
+    && left.strength === group.strength
+    && sameArray(left.cards.map((card) => card.id).sort(), group.cards.map((card) => card.id).sort())
+    && sameArray(left.wildcards.map((card) => card.id).sort(), group.wildcards.map((card) => card.id).sort());
+}
+
+function sameCardGroupIdentity(left: CardGroup | null, right: unknown): boolean {
+  if (left === null || !isPlainDataRecord(right)) return left === null && (right === null || right === undefined);
+  const group = right as CardGroup;
+  return left.id === group.id
+    && left.type === group.type
+    && sameArray(left.cards.map((card) => card.id).sort(), group.cards.map((card) => card.id).sort());
 }
 
 function sameArray(left: readonly unknown[], right: readonly unknown[]): boolean {

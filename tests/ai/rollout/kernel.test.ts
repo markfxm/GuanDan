@@ -137,7 +137,7 @@ describe("D2F isolated rollout kernel", () => {
     expect(input.scenario.privateState).toEqual(before);
   });
 
-  test("validates the seat-local observation before constructing CRN or fixed policy", () => {
+  test("rejects a noncanonical current last play before observation", () => {
     const deck = createDeck();
     const canonicalLastPlay = singleAction(deck[4]!).group;
     const forgedLastPlay = { ...canonicalLastPlay, label: `${canonicalLastPlay.label}-forged` };
@@ -151,7 +151,7 @@ describe("D2F isolated rollout kernel", () => {
         lastPlayStableKey: playPublicStableKey(canonicalLastPlay.cards.map((card) => card.id)),
         passSeats: [],
       },
-      actingSeat: 1,
+      actingSeat: 3,
       candidate: { type: "pass" },
     });
     const coordinate = vi.spyOn(identityModule, "createCrnCoordinate");
@@ -164,8 +164,10 @@ describe("D2F isolated rollout kernel", () => {
     expect.soft(result).toEqual({
       ok: false,
       failure: {
-        kind: "policy-failed",
-        failure: { kind: "invalid-policy-context", field: "observation", reason: "malformed-observation" },
+        kind: "simulation-failed",
+        stage: "replay",
+        reason: "scenario-projection-mismatch",
+        field: "scenario.privateState.currentLastPlay",
       },
     });
     expect.soft(coordinate).toHaveBeenCalledTimes(0);
@@ -173,6 +175,275 @@ describe("D2F isolated rollout kernel", () => {
     expect.soft(view).toHaveBeenCalledTimes(0);
     expect.soft(policy).toHaveBeenCalledTimes(0);
     vi.restoreAllMocks();
+  });
+
+  test("rejects a replay-valid scenario projection with an extra public played card before simulation", () => {
+    const deck = createDeck();
+    const input = makeInput({
+      hands: { 0: [deck[0]!,], 1: [deck[1]!], 2: [deck[2]!], 3: [deck[3]!, deck[4]!] },
+      actingSeat: 1,
+      candidate: singleAction(deck[1]!),
+      maxPliesPerReplicate: 1,
+    });
+    const privateState = input.scenario.privateState as Record<string, unknown>;
+    const hands = privateState.hands as Record<string, Card[]>;
+    const publicPlayedCardIds = privateState.publicPlayedCardIds as string[];
+    const movedFromHand = hands[3]![0]!;
+    const movedFromPublicId = publicPlayedCardIds[0]!;
+    const movedFromPublic = deck.find((card) => card.id === movedFromPublicId);
+    expect(movedFromPublic).toBeDefined();
+
+    hands[3] = [movedFromPublic!, hands[3]![1]!];
+    privateState.publicPlayedCardIds = [...publicPlayedCardIds.slice(1), movedFromHand.id];
+    (input.publicState as Record<string, unknown>).publicPlayedCardIds = [...(privateState.publicPlayedCardIds as string[])];
+
+    const beforeScenario = structuredClone(input.scenario.privateState);
+    const beforePublicState = structuredClone(input.publicState);
+    const observation = vi.spyOn(rolloutPolicyModule, "validateSeatLocalObservation");
+    const coordinate = vi.spyOn(identityModule, "createCrnCoordinate");
+    const policy = vi.spyOn(rolloutPolicyModule, "createInternalRolloutPolicy");
+    const transition = vi.spyOn(stateConservationModule, "validateActionTransition");
+
+    try {
+      const result = runRolloutReplicate(input, ROOT_IDENTITY);
+
+      expect(result).toEqual({
+        ok: false,
+        failure: {
+          kind: "simulation-failed",
+          stage: "replay",
+          reason: "scenario-projection-mismatch",
+          field: "scenario.privateState.publicPlayedCardIds",
+        },
+      });
+      expect(observation).toHaveBeenCalledTimes(0);
+      expect(coordinate).toHaveBeenCalledTimes(0);
+      expect(policy).toHaveBeenCalledTimes(0);
+      expect(transition).toHaveBeenCalledTimes(0);
+      expect(input.scenario.privateState).toEqual(beforeScenario);
+      expect(input.publicState).toEqual(beforePublicState);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  test("rejects a forged final ledger hash prefix before simulation", () => {
+    const input = makeInput();
+    const finalLedger = structuredClone(input.publicReplayContext.finalLedger);
+    const originalHash = finalLedger.seenEventHashes[0];
+    const forgedSeenEventHashes = {
+      ...finalLedger.seenEventHashes,
+      0: originalHash === "0".repeat(64) ? "1".repeat(64) : "0".repeat(64),
+    };
+    const forgedInput: RolloutReplicateInput = {
+      ...input,
+      publicReplayContext: {
+        ...input.publicReplayContext,
+        finalLedger: {
+          ...finalLedger,
+          seenEventHashes: forgedSeenEventHashes,
+        },
+      },
+    };
+    const observation = vi.spyOn(rolloutPolicyModule, "validateSeatLocalObservation");
+    const coordinate = vi.spyOn(identityModule, "createCrnCoordinate");
+    const policy = vi.spyOn(rolloutPolicyModule, "createInternalRolloutPolicy");
+    const transition = vi.spyOn(stateConservationModule, "validateActionTransition");
+
+    try {
+      expect(runRolloutReplicate(forgedInput, ROOT_IDENTITY)).toEqual({
+        ok: false,
+        failure: {
+          kind: "simulation-failed",
+          stage: "replay",
+          reason: "scenario-projection-mismatch",
+          field: "publicReplayContext.publicHistoryEvents",
+        },
+      });
+      expect(observation).toHaveBeenCalledTimes(0);
+      expect(coordinate).toHaveBeenCalledTimes(0);
+      expect(policy).toHaveBeenCalledTimes(0);
+      expect(transition).toHaveBeenCalledTimes(0);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  test("rejects a real finalized public-history mutation before simulation", () => {
+    const input = makeInput();
+    const history = [...input.publicReplayContext.publicHistoryEvents];
+    const firstEvent = history[0];
+    if (firstEvent?.kind !== "play") throw new Error("KERNEL_HISTORY_FIXTURE_INVALID");
+    const { publicPayloadHash: _originalHash, ...draft } = firstEvent;
+    const mutatedEvent = finalizePublicActionEvent({ ...draft, publicStableKey: "play:forged" });
+    history[0] = mutatedEvent;
+    const forgedInput: RolloutReplicateInput = {
+      ...input,
+      publicReplayContext: {
+        ...input.publicReplayContext,
+        publicHistoryEvents: history,
+      },
+    };
+    const observation = vi.spyOn(rolloutPolicyModule, "validateSeatLocalObservation");
+    const coordinate = vi.spyOn(identityModule, "createCrnCoordinate");
+    const policy = vi.spyOn(rolloutPolicyModule, "createInternalRolloutPolicy");
+    const transition = vi.spyOn(stateConservationModule, "validateActionTransition");
+
+    try {
+      expect(runRolloutReplicate(forgedInput, ROOT_IDENTITY)).toEqual({
+        ok: false,
+        failure: {
+          kind: "simulation-failed",
+          stage: "replay",
+          reason: "scenario-projection-mismatch",
+          field: "publicReplayContext.publicHistoryEvents",
+        },
+      });
+      expect(observation).toHaveBeenCalledTimes(0);
+      expect(coordinate).toHaveBeenCalledTimes(0);
+      expect(policy).toHaveBeenCalledTimes(0);
+      expect(transition).toHaveBeenCalledTimes(0);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  test("rejects a forged private current last-play label before observation", () => {
+    const input = makeProjectionLastPlayInput();
+    const privateState = input.scenario.privateState as Record<string, unknown>;
+    const currentLastPlay = structuredClone(privateState.currentLastPlay) as Record<string, unknown>;
+    currentLastPlay.label = "forged-private-current-last-play";
+    privateState.currentLastPlay = currentLastPlay;
+    const observation = vi.spyOn(rolloutPolicyModule, "validateSeatLocalObservation");
+    const coordinate = vi.spyOn(identityModule, "createCrnCoordinate");
+    const policy = vi.spyOn(rolloutPolicyModule, "createInternalRolloutPolicy");
+    const transition = vi.spyOn(stateConservationModule, "validateActionTransition");
+
+    try {
+      expect(runRolloutReplicate(input, ROOT_IDENTITY)).toEqual({
+        ok: false,
+        failure: {
+          kind: "simulation-failed",
+          stage: "replay",
+          reason: "scenario-projection-mismatch",
+          field: "scenario.privateState.currentLastPlay",
+        },
+      });
+      expect(observation).toHaveBeenCalledTimes(0);
+      expect(coordinate).toHaveBeenCalledTimes(0);
+      expect(policy).toHaveBeenCalledTimes(0);
+      expect(transition).toHaveBeenCalledTimes(0);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  test("rejects extra fields in a private transfer projection before simulation", () => {
+    const input = makeInput();
+    const events = [...input.publicReplayContext.publicHistoryEvents];
+    let finalLedger = input.publicReplayContext.finalLedger;
+    const identityFields = {
+      schemaVersion: "d2-public-event-v2" as const,
+      gameId: finalLedger.gameId,
+      roundIdentity: finalLedger.roundIdentity,
+      handIdentity: finalLedger.handIdentity,
+      trickIndex: finalLedger.currentTrick.trickIndex,
+    };
+    const appendTransfer = (draft: PublicActionEventDraft): void => {
+      const event = finalizePublicActionEvent(draft);
+      const applied = applyPublicEvent(finalLedger, event);
+      if (!applied.ok || applied.kind !== "applied") throw new Error("KERNEL_TRANSFER_FIXTURE_INVALID");
+      finalLedger = applied.ledger;
+      events.push(event);
+    };
+    appendTransfer({
+      ...identityFields,
+      eventIndex: finalLedger.nextEventIndex,
+      kind: "tribute",
+      seat: 1,
+      publicCardIds: [],
+      fromSeat: 1,
+      toSeat: 0,
+      handCountChanges: { 0: 1, 1: -1, 2: 0, 3: 0 },
+      publicStableKey: "tribute:1:0:hidden",
+    });
+    appendTransfer({
+      ...identityFields,
+      eventIndex: finalLedger.nextEventIndex,
+      kind: "return",
+      seat: 0,
+      publicCardIds: [],
+      fromSeat: 0,
+      toSeat: 1,
+      handCountChanges: { 0: -1, 1: 1, 2: 0, 3: 0 },
+      publicStableKey: "return:0:1:hidden",
+    });
+    const privateState = input.scenario.privateState as Record<string, unknown>;
+    privateState.ledger = finalLedger;
+    const forgedTransfers: Array<Record<string, unknown>> = finalLedger.revealedTransferEvents.map((transfer) => ({ ...transfer }));
+    forgedTransfers[0] = { ...forgedTransfers[0], forged: true };
+    privateState.revealedTransferEvents = forgedTransfers;
+    const forgedInput: RolloutReplicateInput = {
+      ...input,
+      publicReplayContext: {
+        ...input.publicReplayContext,
+        publicHistoryEvents: events,
+        finalLedger,
+      },
+    };
+    const observation = vi.spyOn(rolloutPolicyModule, "validateSeatLocalObservation");
+    const coordinate = vi.spyOn(identityModule, "createCrnCoordinate");
+    const policy = vi.spyOn(rolloutPolicyModule, "createInternalRolloutPolicy");
+    const transition = vi.spyOn(stateConservationModule, "validateActionTransition");
+
+    try {
+      expect(runRolloutReplicate(forgedInput, ROOT_IDENTITY)).toEqual({
+        ok: false,
+        failure: {
+          kind: "simulation-failed",
+          stage: "replay",
+          reason: "scenario-projection-mismatch",
+          field: "scenario.privateState.revealedTransferEvents",
+        },
+      });
+      expect(observation).toHaveBeenCalledTimes(0);
+      expect(coordinate).toHaveBeenCalledTimes(0);
+      expect(policy).toHaveBeenCalledTimes(0);
+      expect(transition).toHaveBeenCalledTimes(0);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  test("rejects a replay-aligned private hand that overlaps authoritative public cards", () => {
+    const input = makeInput();
+    const privateState = input.scenario.privateState as Record<string, unknown>;
+    const hands = privateState.hands as Record<string, Card[]>;
+    const publicPlayedCardIds = privateState.publicPlayedCardIds as string[];
+    const publicCard = createDeck().find((card) => card.id === publicPlayedCardIds[0]);
+    expect(publicCard).toBeDefined();
+    hands["0"] = [publicCard!];
+    const beforeScenario = structuredClone(input.scenario.privateState);
+    const beforePublicState = structuredClone(input.publicState);
+    const observation = vi.spyOn(rolloutPolicyModule, "validateSeatLocalObservation");
+    const coordinate = vi.spyOn(identityModule, "createCrnCoordinate");
+    const policy = vi.spyOn(rolloutPolicyModule, "createInternalRolloutPolicy");
+    const transition = vi.spyOn(stateConservationModule, "validateActionTransition");
+
+    try {
+      expect(runRolloutReplicate(input, ROOT_IDENTITY)).toEqual({
+        ok: false,
+        failure: { kind: "simulation-failed", stage: "state-conservation", reason: "public-card-overlap" },
+      });
+      expect(observation).toHaveBeenCalledTimes(0);
+      expect(coordinate).toHaveBeenCalledTimes(0);
+      expect(policy).toHaveBeenCalledTimes(0);
+      expect(transition).toHaveBeenCalledTimes(0);
+      expect(input.scenario.privateState).toEqual(beforeScenario);
+      expect(input.publicState).toEqual(beforePublicState);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   test("proves public-card prefixes and finalized history are append-only before commit", () => {
@@ -362,7 +633,10 @@ describe("D2F isolated rollout kernel", () => {
     ledger.nextEventIndex = Number.NaN;
     const before = structuredClone(input.scenario.privateState);
     const result = runRolloutReplicate(input, ROOT_IDENTITY);
-    expect(result).toEqual({ ok: false, failure: { kind: "simulation-failed", stage: "replay", reason: "invalid-replay-context" } });
+    expect(result).toEqual({
+      ok: false,
+      failure: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "scenario.privateState.ledger" },
+    });
     expect(input.scenario.privateState).toEqual(before);
     expect(input.scenario.privateState).not.toHaveProperty("nextState");
     expect(result).not.toHaveProperty("utility");
@@ -542,7 +816,7 @@ describe("D2F isolated rollout kernel", () => {
       currentLastPlay: singleAction(deck[4]!).group,
       currentLastPlaySeat: 0,
       currentTrick: { trickIndex: 0, leadSeat: 0, lastPlaySeat: 0, lastPlayStableKey: `play:${deck[4]!.id}`, passSeats: [] },
-      actingSeat: 2,
+      actingSeat: 3,
       candidate: { type: "pass" },
       maxPliesPerReplicate: 1,
     });
@@ -566,7 +840,7 @@ describe("D2F isolated rollout kernel", () => {
       currentLastPlay: singleAction(deck[0]!).group,
       currentLastPlaySeat: 0,
       currentTrick: { trickIndex: 0, leadSeat: 0, lastPlaySeat: 0, lastPlayStableKey: `play:${deck[0]!.id}`, passSeats: [] },
-      actingSeat: 1,
+      actingSeat: 3,
       maxPliesPerReplicate: 3,
       candidate: { type: "pass" },
     });
@@ -775,6 +1049,392 @@ describe("D2F isolated rollout kernel", () => {
       expect(result).not.toHaveProperty("privateState");
     }
   });
+
+  for (const identityField of ["gameId", "roundIdentity", "handIdentity"] as const) {
+    test(`rejects a forged initial ledger ${identityField} as invalid replay context`, () => {
+      const input = makeInput();
+      const initialLedger = input.publicReplayContext.initialLedger;
+      const forgedInitialLedger = identityField === "gameId"
+        ? { ...initialLedger, gameId: "forged-initial-game" }
+        : identityField === "roundIdentity"
+          ? { ...initialLedger, roundIdentity: "forged-initial-round" }
+          : { ...initialLedger, handIdentity: "forged-initial-hand" };
+      const forgedInput: RolloutReplicateInput = {
+        ...input,
+        publicReplayContext: {
+          ...input.publicReplayContext,
+          initialLedger: forgedInitialLedger,
+        },
+      };
+      const observation = vi.spyOn(rolloutPolicyModule, "validateSeatLocalObservation");
+      const coordinate = vi.spyOn(identityModule, "createCrnCoordinate");
+      const policy = vi.spyOn(rolloutPolicyModule, "createInternalRolloutPolicy");
+      const transition = vi.spyOn(stateConservationModule, "validateActionTransition");
+
+      try {
+        expect(runRolloutReplicate(forgedInput, ROOT_IDENTITY)).toEqual({
+          ok: false,
+          failure: { kind: "simulation-failed", stage: "replay", reason: "invalid-replay-context" },
+        });
+        expect(observation).toHaveBeenCalledTimes(0);
+        expect(coordinate).toHaveBeenCalledTimes(0);
+        expect(policy).toHaveBeenCalledTimes(0);
+        expect(transition).toHaveBeenCalledTimes(0);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+  }
+
+  const projectionMismatchCases: Array<{
+    name: string;
+    createInput: () => RolloutReplicateInput;
+    mutate: (input: RolloutReplicateInput) => void;
+    expected: unknown;
+  }> = [
+    {
+      name: "final ledger last-play seat",
+      createInput: () => makeProjectionLastPlayInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        (final.currentTrick as Record<string, unknown>).lastPlaySeat = 2;
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.currentTrick.lastPlaySeat" },
+    },
+    {
+      name: "final ledger last-play stable key",
+      createInput: () => makeProjectionLastPlayInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        (final.currentTrick as Record<string, unknown>).lastPlayStableKey = "play:forged";
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.currentTrick.lastPlayStableKey" },
+    },
+    {
+      name: "final ledger pass seats",
+      createInput: () => makeProjectionLastPlayInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        (final.currentTrick as Record<string, unknown>).passSeats = [2];
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.currentTrick.passSeats" },
+    },
+    {
+      name: "final ledger hash prefix",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        (final.seenEventHashes as Record<string, string>) ["0"] = "0".repeat(64);
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.publicHistoryEvents" },
+    },
+    {
+      name: "final ledger canonical hash",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        const summaries = final.recentActionSummaries as Array<Record<string, string | number | boolean>>;
+        summaries[0] = { ...summaries[0], publicStableKey: "forged-ledger-summary" };
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "canonicalPublicLedgerHash(publicReplayContext.finalLedger)" },
+    },
+    {
+      name: "final ledger game identity",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        final.gameId = "forged-final-game";
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.gameId" },
+    },
+    {
+      name: "final ledger round identity",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        final.roundIdentity = "forged-final-round";
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.roundIdentity" },
+    },
+    {
+      name: "final ledger hand identity",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        final.handIdentity = "forged-final-hand";
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.handIdentity" },
+    },
+    {
+      name: "final ledger last event index",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        const lastAppliedEventIndex = (final.lastAppliedEventIndex as number) + 1;
+        final.lastAppliedEventIndex = lastAppliedEventIndex;
+        final.nextEventIndex = lastAppliedEventIndex + 1;
+        (final.seenEventHashes as Record<string, string>)[String(lastAppliedEventIndex)] = "0".repeat(64);
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.lastAppliedEventIndex" },
+    },
+    {
+      name: "final ledger hand counts",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        const counts = final.handCounts as Record<string, number>;
+        counts["0"] += 1;
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.handCounts" },
+    },
+    {
+      name: "final ledger finish order",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        final.finishOrder = [0];
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.finishOrder" },
+    },
+    {
+      name: "final ledger trick lead",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        (final.currentTrick as Record<string, unknown>).leadSeat = 1;
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.currentTrick.leadSeat" },
+    },
+    {
+      name: "final ledger trick index",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        const trick = final.currentTrick as Record<string, unknown>;
+        trick.trickIndex = (trick.trickIndex as number) + 1;
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.currentTrick.trickIndex" },
+    },
+    {
+      name: "final ledger played card order",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        const ids = final.playedCardIds as string[];
+        final.playedCardIds = [...ids.slice(1), ids[0]!];
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.playedCardIds" },
+    },
+    {
+      name: "final ledger transfer state",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const final = structuredClone(context.finalLedger) as Record<string, unknown>;
+        final.revealedTransferEvents = [{ eventIndex: 0, kind: "tribute", fromSeat: 0, toSeat: 1, cardId: "S3-1" }];
+        context.finalLedger = final;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.finalLedger.revealedTransferEvents" },
+    },
+    {
+      name: "opening leader",
+      createInput: () => makeProjectionLastPlayInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const initial = structuredClone(context.initialLedger) as Record<string, unknown>;
+        (initial.currentTrick as Record<string, unknown>).leadSeat = 1;
+        context.initialLedger = initial;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.initialLedger.currentTrick.leadSeat" },
+    },
+    {
+      name: "opening tribute state",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const context = input.publicReplayContext as unknown as Record<string, unknown>;
+        const initial = structuredClone(context.initialLedger) as Record<string, unknown>;
+        initial.publicTributeEvents = ["forged-opening"];
+        context.initialLedger = initial;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicReplayContext.initialLedger.publicTributeEvents" },
+    },
+    {
+      name: "private ledger",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const privateState = input.scenario.privateState as Record<string, unknown>;
+        const ledger = privateState.ledger as Record<string, unknown>;
+        const counts = ledger.handCounts as Record<string, number>;
+        counts["0"] += 1;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "scenario.privateState.ledger" },
+    },
+    {
+      name: "private hand counts",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const privateState = input.scenario.privateState as Record<string, unknown>;
+        const counts = privateState.handCounts as Record<string, number>;
+        counts["0"] += 1;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "scenario.privateState.handCounts" },
+    },
+    {
+      name: "private finish order",
+      createInput: () => makeInput(),
+      mutate: (input) => { (input.scenario.privateState as Record<string, unknown>).finishOrder = [0]; },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "scenario.privateState.finishOrder" },
+    },
+    {
+      name: "private current trick",
+      createInput: () => makeInput(),
+      mutate: (input) => { ((input.scenario.privateState as Record<string, unknown>).currentTrick as Record<string, unknown>).leadSeat = 1; },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "scenario.privateState.currentTrick" },
+    },
+    {
+      name: "private current last play",
+      createInput: () => makeProjectionLastPlayInput(),
+      mutate: (input) => { ((input.scenario.privateState as Record<string, unknown>).currentLastPlay as Record<string, unknown>).id = "forged-current-last-play"; },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "scenario.privateState.currentLastPlay" },
+    },
+    {
+      name: "private transfer state",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        (input.scenario.privateState as Record<string, unknown>).revealedTransferEvents = [{ eventIndex: 0, kind: "tribute", fromSeat: 0, toSeat: 1, cardId: "S3-1" }];
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "scenario.privateState.revealedTransferEvents" },
+    },
+    {
+      name: "private played card projection",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const privateState = input.scenario.privateState as Record<string, unknown>;
+        const ids = privateState.publicPlayedCardIds as string[];
+        privateState.publicPlayedCardIds = [...ids.slice(1), ids[0]!];
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "scenario.privateState.publicPlayedCardIds" },
+    },
+    {
+      name: "private hand length",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const hands = (input.scenario.privateState as Record<string, unknown>).hands as Record<string, Card[]>;
+        hands["0"] = [];
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "scenario.privateState.hands" },
+    },
+    {
+      name: "public acting turn",
+      createInput: () => makeInput(),
+      mutate: (input) => { (input.publicState as Record<string, unknown>).actingSeat = 1; },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicState.actingSeat" },
+    },
+    {
+      name: "public game rank",
+      createInput: () => makeProjectionLastPlayInput("H2-1"),
+      mutate: (input) => { (input.publicState as Record<string, unknown>).gameRank = "3"; },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicState.gameRank" },
+    },
+    {
+      name: "public hand counts",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const publicState = input.publicState as Record<string, unknown>;
+        const counts = { ...(publicState.handCounts as Record<string, number>) };
+        counts["0"] += 1;
+        publicState.handCounts = counts;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicState.handCounts" },
+    },
+    {
+      name: "public finish order",
+      createInput: () => makeInput(),
+      mutate: (input) => { (input.publicState as Record<string, unknown>).finishOrder = [0]; },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicState.finishOrder" },
+    },
+    {
+      name: "public played card projection",
+      createInput: () => makeInput(),
+      mutate: (input) => {
+        const state = input.publicState as Record<string, unknown>;
+        const ids = state.publicPlayedCardIds as string[];
+        state.publicPlayedCardIds = [...ids.slice(1), ids[0]!];
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicState.publicPlayedCardIds" },
+    },
+    {
+      name: "public current last play",
+      createInput: () => makeProjectionLastPlayInput(),
+      mutate: (input) => {
+        const publicState = input.publicState as Record<string, unknown>;
+        const currentLastPlay = structuredClone(publicState.currentLastPlay) as Record<string, unknown>;
+        currentLastPlay.id = "forged-public-current-last-play";
+        publicState.currentLastPlay = currentLastPlay;
+      },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicState.currentLastPlay" },
+    },
+    {
+      name: "public current last-play seat",
+      createInput: () => makeProjectionLastPlayInput(),
+      mutate: (input) => { (input.publicState as Record<string, unknown>).currentLastPlaySeat = 2; },
+      expected: { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "publicState.currentLastPlaySeat" },
+    },
+  ];
+
+  for (const projectionCase of projectionMismatchCases) {
+    test(`reconciles ${projectionCase.name} before simulation`, () => {
+      const input = projectionCase.createInput();
+      projectionCase.mutate(input);
+      const beforeScenario = structuredClone(input.scenario.privateState);
+      const beforePublicState = structuredClone(input.publicState);
+      const beforeReplayContext = structuredClone(input.publicReplayContext);
+      const observation = vi.spyOn(rolloutPolicyModule, "validateSeatLocalObservation");
+      const coordinate = vi.spyOn(identityModule, "createCrnCoordinate");
+      const policy = vi.spyOn(rolloutPolicyModule, "createInternalRolloutPolicy");
+      const transition = vi.spyOn(stateConservationModule, "validateActionTransition");
+      try {
+        expect(runRolloutReplicate(input, ROOT_IDENTITY)).toEqual({ ok: false, failure: projectionCase.expected });
+        expect(observation).toHaveBeenCalledTimes(0);
+        expect(coordinate).toHaveBeenCalledTimes(0);
+        expect(policy).toHaveBeenCalledTimes(0);
+        expect(transition).toHaveBeenCalledTimes(0);
+        expect(input.scenario.privateState).toEqual(beforeScenario);
+        expect(input.publicState).toEqual(beforePublicState);
+        expect(input.publicReplayContext).toEqual(beforeReplayContext);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+  }
 });
 
 const ROOT_IDENTITY = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
@@ -788,6 +1448,26 @@ function singleAction(card: Card): Extract<RolloutAction, { type: "play" }> {
     type: "play",
     group: classified,
   };
+}
+
+function makeProjectionLastPlayInput(cardId = "S3-1"): RolloutReplicateInput {
+  const card = createDeck().find((candidate) => candidate.id === cardId);
+  if (card === undefined) throw new Error(`PROJECTION_CARD_MISSING:${cardId}`);
+  const currentLastPlay = singleAction(card).group;
+  return makeInput({
+    currentLastPlay,
+    currentLastPlaySeat: 0,
+    currentTrick: {
+      trickIndex: 0,
+      leadSeat: 0,
+      lastPlaySeat: 0,
+      lastPlayStableKey: playPublicStableKey([card.id]),
+      passSeats: [1],
+    },
+    actingSeat: 3,
+    candidate: { type: "pass" },
+    maxPliesPerReplicate: 1,
+  });
 }
 
 function makeInput(options: Readonly<{

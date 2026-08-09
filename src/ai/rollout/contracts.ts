@@ -223,6 +223,11 @@ export type LeafEvaluationFailure =
 
 export type RolloutPolicyFailure =
   | { kind: "invalid-policy-context"; field: "observation"; reason: "malformed-observation" }
+  | {
+      kind: "invalid-policy-context";
+      field: "publicHistoryEvents[].publicCardIds";
+      reason: "foreign-card-id" | "duplicate-card-id" | "cross-event-duplicate-card-id" | "acting-hand-overlap" | "non-play-event-card-ids";
+    }
   | { kind: "invalid-policy-context"; field: "ply"; reason: "invalid-ply" }
   | { kind: "invalid-policy-context"; field: "actingSeat"; reason: "invalid-acting-seat" }
   | { kind: "no-legal-action"; actingSeat: PublicSeat }
@@ -232,6 +237,44 @@ export type RolloutPolicyFailure =
       reason: "construction-failed" | "throwing-value" | "non-finite-value" | "out-of-range-value";
     };
 
+export type RolloutScenarioProjectionMismatchField =
+  | "publicReplayContext.initialLedger.gameId"
+  | "publicReplayContext.initialLedger.roundIdentity"
+  | "publicReplayContext.initialLedger.handIdentity"
+  | "publicReplayContext.initialLedger.currentTrick.leadSeat"
+  | "publicReplayContext.initialLedger.publicTributeEvents"
+  | "publicReplayContext.finalLedger.gameId"
+  | "publicReplayContext.finalLedger.roundIdentity"
+  | "publicReplayContext.finalLedger.handIdentity"
+  | "publicReplayContext.finalLedger.lastAppliedEventIndex"
+  | "publicReplayContext.finalLedger.nextEventIndex"
+  | "publicReplayContext.finalLedger.handCounts"
+  | "publicReplayContext.finalLedger.finishOrder"
+  | "publicReplayContext.finalLedger.currentTrick.trickIndex"
+  | "publicReplayContext.finalLedger.currentTrick.leadSeat"
+  | "publicReplayContext.finalLedger.currentTrick.lastPlaySeat"
+  | "publicReplayContext.finalLedger.currentTrick.lastPlayStableKey"
+  | "publicReplayContext.finalLedger.currentTrick.passSeats"
+  | "publicReplayContext.finalLedger.playedCardIds"
+  | "publicReplayContext.finalLedger.revealedTransferEvents"
+  | "publicReplayContext.publicHistoryEvents"
+  | "canonicalPublicLedgerHash(publicReplayContext.finalLedger)"
+  | "scenario.privateState.ledger"
+  | "scenario.privateState.handCounts"
+  | "scenario.privateState.finishOrder"
+  | "scenario.privateState.currentTrick"
+  | "scenario.privateState.currentLastPlay"
+  | "scenario.privateState.revealedTransferEvents"
+  | "scenario.privateState.publicPlayedCardIds"
+  | "scenario.privateState.hands"
+  | "publicState.gameRank"
+  | "publicState.actingSeat"
+  | "publicState.handCounts"
+  | "publicState.finishOrder"
+  | "publicState.publicPlayedCardIds"
+  | "publicState.currentLastPlay"
+  | "publicState.currentLastPlaySeat";
+
 export type RolloutKernelFailure =
   | {
       kind: "simulation-failed";
@@ -239,6 +282,7 @@ export type RolloutKernelFailure =
       reason: "malformed-envelope" | "invalid-budget" | "invalid-root-identity" | "invalid-public-state" | "invalid-candidate";
     }
   | { kind: "simulation-failed"; stage: "replay"; reason: "invalid-scenario" | "invalid-replay-context" }
+  | { kind: "simulation-failed"; stage: "replay"; reason: "scenario-projection-mismatch"; field: RolloutScenarioProjectionMismatchField }
   | { kind: "simulation-failed"; stage: "root-action"; reason: "illegal-action" }
   | { kind: "simulation-failed"; stage: "policy-action"; reason: "illegal-action" }
   | { kind: "simulation-failed"; stage: "crn"; reason: "coordinate" | "random-domain" | "view" }
