@@ -1,7 +1,7 @@
 # D2F CRN Rollout Implementation Plan
 
 状态：
-TASK 4 STATE-MACHINE REMEDIATION DESIGN FROZEN
+TASK 4 FINAL BOUNDARY/GATE DESIGN FROZEN
 TASK 4 CODE REMEDIATION PENDING
 TASK 5 NOT STARTED
 
@@ -1873,3 +1873,346 @@ Task 9 full permitted regression
 ```
 
 This is a Task 4 design freeze only and does not claim D2F Shadow release readiness. Task 5 has not started.
+
+# D2F_TASK4_FINAL_BOUNDARY_GATE_FREEZE_REPORT
+
+## Verdict and scene lock
+
+Verdict:
+
+TASK 4 FINAL BOUNDARY/GATE DESIGN FROZEN
+TASK 4 CODE REMEDIATION PENDING
+TASK 5 NOT STARTED
+
+The locked worktree is E:/workspace/掼蛋游戏开发/.worktrees/d2f-crn-rollout-source on branch codex/d2f-crn-rollout-source. The complete start HEAD is bde8d5f3b7b3a87a0868de4e0bef2a9a0d3c5057 and its message is fix(ai): preserve D2F rollout history and transitions. The scene-lock checks passed with no staged, unstaged, or untracked changes and git diff --check passed.
+
+The exact changed paths are only:
+
+~~~text
+docs/superpowers/specs/2026-08-02-d2f-design-spec.md
+docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md
+docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
+~~~
+
+The end HEAD is the complete commit ID printed by the required post-commit git rev-parse HEAD check; it cannot be known before the commit is created. The required commit message is docs(ai): freeze final D2F Task 4 boundaries. The final handoff records that complete end HEAD and the clean-worktree result.
+
+## Important Finding A — D2 audited shard partition
+
+Finding A is CONFIRMED. The existing D2 manifest is complete at 19 tracked files. D2e's old four-file parallel run containing Room exceeded 15 seconds twice; the same Room file alone was about 12.38 seconds and passed, with no assertion-failure evidence. That is a resource-contention result, not a pass, and no timeout is changed.
+
+The new partition is a gate-partition correction. Every file enters exactly one independent explicit-file command; no glob discovery, accumulated excludes, or timeout change is allowed. The source-audited case counts below are rechecked from the current files and are not runtime results:
+
+### fast-public-ledger — 12 files, 66 source-audited cases
+
+~~~text
+tests/ai/lightweightPublicEvidence.test.ts
+tests/ai/publicEvent.test.ts
+tests/ai/publicEventHash.test.ts
+tests/ai/publicLedger.test.ts
+tests/ai/publicLedgerDependency.test.ts
+tests/ai/publicLedgerPrivacy.test.ts
+tests/ai/publicLedgerReplay.test.ts
+tests/ai/publicLedgerTributeReset.test.ts
+tests/ai/publicLedgerTrickFinish.test.ts
+tests/game/publicEventIdentity.test.ts
+tests/game/publicEventReplayIdentity.test.ts
+tests/game/publicEventRoomAdapter.test.ts
+~~~
+
+~~~powershell
+& .\node_modules\.bin\vitest.cmd run tests/ai/lightweightPublicEvidence.test.ts tests/ai/publicEvent.test.ts tests/ai/publicEventHash.test.ts tests/ai/publicLedger.test.ts tests/ai/publicLedgerDependency.test.ts tests/ai/publicLedgerPrivacy.test.ts tests/ai/publicLedgerReplay.test.ts tests/ai/publicLedgerTributeReset.test.ts tests/ai/publicLedgerTrickFinish.test.ts tests/game/publicEventIdentity.test.ts tests/game/publicEventReplayIdentity.test.ts tests/game/publicEventRoomAdapter.test.ts --reporter=dot
+~~~
+
+### fast-ai-policy-reducer — 5 files, 144 source-audited cases
+
+~~~text
+tests/ai/beliefGuidedPlanPolicy.test.ts
+tests/ai/representativeActionReducer.test.ts
+tests/ai/representativeActionReducerDetached.test.ts
+tests/ai/representativeActionShadowByteLock.test.ts
+tests/ai/representativeActionShadowIntegration.test.ts
+~~~
+
+~~~powershell
+& .\node_modules\.bin\vitest.cmd run tests/ai/beliefGuidedPlanPolicy.test.ts tests/ai/representativeActionReducer.test.ts tests/ai/representativeActionReducerDetached.test.ts tests/ai/representativeActionShadowByteLock.test.ts tests/ai/representativeActionShadowIntegration.test.ts --reporter=dot
+~~~
+
+### ast — 1 file, 1 source-audited case
+
+~~~text
+tests/ai/representativeActionShadowAst.test.ts
+~~~
+
+~~~powershell
+& .\node_modules\.bin\vitest.cmd run tests/ai/representativeActionShadowAst.test.ts --reporter=dot
+~~~
+
+### room — 1 file, 1 source-audited case
+
+~~~text
+tests/ai/representativeActionShadowRoom.test.ts
+~~~
+
+~~~powershell
+& .\node_modules\.bin\vitest.cmd run tests/ai/representativeActionShadowRoom.test.ts --reporter=dot
+~~~
+
+The four shards are 19 assigned paths, 19 unique paths, and 212 source-audited cases. The coverage proof must print exactly:
+
+~~~text
+assigned=19
+unique=19
+missing=0
+duplicate=0
+overlap=0
+extra=0
+failed=0
+skipped=0
+~~~
+
+The proof compares the flattened explicit paths with the exact 19-path manifest, checks each path exists and is tracked, and rejects a path assigned to more than one shard. No shard is run in this docs-only turn.
+
+## Important Finding B — canonical public-card identity
+
+Finding B is CONFIRMED. A finalized event can have a valid shape and valid public payload hash while its publicCardIds are not members of the physical deck; hash validity is not card-identity validity.
+
+The policy/public-observation authority is:
+
+~~~text
+U = Set(createDeck().map(card => card.id))
+|U| = 108
+~~~
+
+For every public play event, each publicCardId must be in U, must be duplicate-free within that event, and must not occur in another play event. A public played card must not remain in the acting seat's current hand. Pass, trick-clear, finish, anti-tribute, and every other no-card event carry no play card IDs. Tribute and return may expose zero or one transfer card ID; transfer IDs move cards and do not enter the played-card set. All ID equality is exact code-unit equality; localeCompare is not used. A valid eventHash never bypasses these checks. The result is a frozen invalid-policy-context failure with the exact public-history field and reason, never a throw or partial action, and diagnostics never include the foreign ID or full history.
+
+The next contract delta extends RolloutPolicyFailure with this exact branch while retaining the existing observation, ply, actingSeat, no-legal-action, and CRN branches:
+
+~~~ts
+| {
+    kind: "invalid-policy-context";
+    field: "publicHistoryEvents[].publicCardIds";
+    reason:
+      | "foreign-card-id"
+      | "duplicate-card-id"
+      | "cross-event-duplicate-card-id"
+      | "acting-hand-overlap"
+      | "non-play-event-card-ids";
+  }
+~~~
+
+Policy proves canonical membership, public-play uniqueness, and acting-hand overlap only. It does not receive opponent hands. Full four-seat physical conservation remains the kernel's responsibility.
+
+There is one authenticity limitation: the real finalizePublicActionEvent path rejects a same-event duplicate before hashing with PUBLIC_CARD_DUPLICATE. Therefore the P2 row below is a real finalizer construction guard and is not reported as a fabricated hash-valid policy event. Cross-event duplication uses separately finalized real events. No wrong hash, test-only hook, or double assertion is permitted.
+
+### Policy RED matrix
+
+~~~text
+P1  real finalized/hash-valid play with a foreign-card ID -> invalid-policy-context / foreign-card-id
+P2  real finalizer receives same-event duplicate -> construction rejection PUBLIC_CARD_DUPLICATE; policy duplicate guard remains frozen
+P3  two real finalized play events repeat one physical ID -> invalid-policy-context / cross-event-duplicate-card-id
+P4  public played ID remains in acting hand -> invalid-policy-context / acting-hand-overlap
+P5  pass/trick-clear/no-card event carries play IDs -> invalid-policy-context / non-play-event-card-ids
+P6  canonical valid history -> fixed policy accepts or returns the real legal-action result
+P7  real transfer followed by a legal play -> fixed policy accepts
+P8  hostile getter count -> 0
+P9  typed failure, no throw, no partial action, no private diagnostics
+P10 CRN call count -> 0 for rejected public observation
+~~~
+
+## Important Finding C — replay and projection reconciliation
+
+Finding C is CONFIRMED. The exported runRolloutReplicate entry accepts a required publicReplayContext, but the current boundary does not reconcile every scenario/private and public projection against the replayed final ledger before action observation and CRN use. A real source-produced scenario is necessary evidence but cannot replace the direct kernel boundary.
+
+The frozen entry order is:
+
+~~~text
+validate input envelope
+→ validate required publicReplayContext
+→ replay history from canonical initial ledger
+→ derive authoritative final public ledger/state
+→ validate scenario projections against replay result
+→ validate canonical 108-card physical universe
+→ create isolated accepted state
+→ observation/CRN/policy
+~~~
+
+Before projection reconciliation completes, observation calls = 0, CRN calls = 0, policy calls = 0, and transition calls = 0.
+
+The exact contract delta is one new field union and one new RolloutKernelFailure member. Existing invalid-scenario and invalid-replay-context members remain distinct, and StateConservationFailure remains the existing closed union:
+
+~~~ts
+export type RolloutScenarioProjectionMismatchField =
+  | "publicReplayContext.initialLedger.gameId"
+  | "publicReplayContext.initialLedger.roundIdentity"
+  | "publicReplayContext.initialLedger.handIdentity"
+  | "publicReplayContext.initialLedger.currentTrick.leadSeat"
+  | "publicReplayContext.initialLedger.publicTributeEvents"
+  | "publicReplayContext.finalLedger.gameId"
+  | "publicReplayContext.finalLedger.roundIdentity"
+  | "publicReplayContext.finalLedger.handIdentity"
+  | "publicReplayContext.finalLedger.lastAppliedEventIndex"
+  | "publicReplayContext.finalLedger.nextEventIndex"
+  | "publicReplayContext.finalLedger.handCounts"
+  | "publicReplayContext.finalLedger.finishOrder"
+  | "publicReplayContext.finalLedger.currentTrick.trickIndex"
+  | "publicReplayContext.finalLedger.currentTrick.leadSeat"
+  | "publicReplayContext.finalLedger.currentTrick.lastPlaySeat"
+  | "publicReplayContext.finalLedger.currentTrick.lastPlayStableKey"
+  | "publicReplayContext.finalLedger.currentTrick.passSeats"
+  | "publicReplayContext.finalLedger.playedCardIds"
+  | "publicReplayContext.finalLedger.revealedTransferEvents"
+  | "publicReplayContext.publicHistoryEvents"
+  | "canonicalPublicLedgerHash(publicReplayContext.finalLedger)"
+  | "scenario.privateState.ledger"
+  | "scenario.privateState.handCounts"
+  | "scenario.privateState.finishOrder"
+  | "scenario.privateState.currentTrick"
+  | "scenario.privateState.currentLastPlay"
+  | "scenario.privateState.revealedTransferEvents"
+  | "scenario.privateState.publicPlayedCardIds"
+  | "scenario.privateState.hands"
+  | "publicState.gameRank"
+  | "publicState.actingSeat"
+  | "publicState.handCounts"
+  | "publicState.finishOrder"
+  | "publicState.publicPlayedCardIds"
+  | "publicState.currentLastPlay"
+  | "publicState.currentLastPlaySeat";
+
+| {
+    kind: "simulation-failed";
+    stage: "replay";
+    reason: "scenario-projection-mismatch";
+    field: RolloutScenarioProjectionMismatchField;
+  }
+~~~
+
+### Exact kernel reconciliation table
+
+| Authoritative replay value | Exact projection or existing indirect proof | Failure mapping |
+| --- | --- | --- |
+| canonicalPublicLedgerHash(replayed final ledger), plus initial/final schema and game identity | publicReplayContext.initialLedger and finalLedger; gameId, roundIdentity, handIdentity; scenario.privateState.ledger | replay / scenario-projection-mismatch / exact field |
+| event cursor and hash prefix | publicHistoryEvents.length, eventIndex sequence, finalLedger.nextEventIndex, finalLedger.lastAppliedEventIndex, seenEventHashes, and publicHistoryEvents | replay / scenario-projection-mismatch / publicReplayContext.publicHistoryEvents or final cursor field |
+| finalLedger.handCounts[0..3] | scenario.privateState.handCounts[0..3] and publicState.handCounts[0..3] | replay / scenario-projection-mismatch / handCounts |
+| finalLedger.finishOrder | scenario.privateState.finishOrder and publicState.finishOrder | replay / scenario-projection-mismatch / finishOrder |
+| finalLedger.currentTrick.trickIndex, leadSeat, lastPlaySeat, lastPlayStableKey, passSeats | scenario.privateState.currentTrick; publicState.currentLastPlaySeat; currentLastPlay is checked against the authoritative last play | replay / scenario-projection-mismatch / currentTrick field |
+| authoritative last play event | scenario.privateState.currentLastPlay and publicState.currentLastPlay are canonicalized with classifyPlay(cards, publicState.gameRank); event groupType, patternType, publicCardIds, publicStableKey and card IDs must agree | replay / scenario-projection-mismatch / currentLastPlay field |
+| finalLedger.playedCardIds | scenario.privateState.publicPlayedCardIds and publicState.publicPlayedCardIds must be exact ordered arrays; publicHistoryEvents must preserve the complete played-card prefix | replay / scenario-projection-mismatch / playedCardIds or publicHistoryEvents |
+| opening leader and opening status | opening leader is initialLedger.currentTrick.leadSeat; opening transfer state is initialLedger.publicTributeEvents plus the history transfer prefix and finalLedger.revealedTransferEvents; no new openingLeader field is invented | replay / scenario-projection-mismatch / existing initial or final field |
+| publicState.gameRank | existing publicState.gameRank and the source-owned ParticleSnapshotIdentity.gameRank; scenario.privateState has no gameRank field | replay / scenario-projection-mismatch / publicState.gameRank |
+| acting/current turn | derive the next eligible seat from the replay history and finalLedger.finishOrder, then compare with publicState.actingSeat; scenario.privateState has no actingSeat field | replay / scenario-projection-mismatch / publicState.actingSeat |
+| snapshot/replay identity | existing ParticleSnapshotIdentity fields are gameId, roundIdentity, handIdentity, initialLedgerHash, lastAppliedEventIndex, ledgerHash, perspectiveSeat, gameRank; this identity is source-owned and no raw snapshot field exists in RolloutReplicateInput | source-owned identity proof; no invented kernel field |
+| authoritative hand counts | scenario.privateState.hands[0..3].length must equal finalLedger.handCounts[0..3] and the corresponding hand objects must be exact card records | replay / scenario-projection-mismatch / scenario.privateState.hands or handCounts |
+| public/private physical separation | no card ID in scenario.privateState.hands may occur in finalLedger.playedCardIds | state-conservation / public-card-overlap |
+| canonical physical universe | unique hands plus finalLedger.playedCardIds must equal U exactly, where U is the 108 IDs from createDeck(); existing state-conservation reasons remain authoritative | state-conservation / unexpected-card, duplicate-card, missing-card, or public-card-overlap |
+
+This table does not overclaim hidden ownership. If a caller reassigns hidden cards while preserving every public projection, the four-seat cover, and all existing conservation invariants, the direct kernel cannot identify that alternate hidden allocation from public data alone; source-owned scenario identity and replay remain the authority. No private diagnostic is returned.
+
+### Failure mapping
+
+~~~text
+malformed envelope, invalid budget, invalid root identity, invalid public state, invalid candidate
+  -> kind=simulation-failed, stage=input, existing input reason
+invalid scenario shape or private-state shape
+  -> kind=simulation-failed, stage=replay, reason=invalid-scenario
+invalid required history, initial ledger, event hash, event application, or replay cursor
+  -> kind=simulation-failed, stage=replay, reason=invalid-replay-context
+valid replay with a mismatching scenario/public projection
+  -> kind=simulation-failed, stage=replay, reason=scenario-projection-mismatch, field=RolloutScenarioProjectionMismatchField
+illegal root action
+  -> kind=simulation-failed, stage=root-action, reason=illegal-action
+illegal fixed-policy action
+  -> kind=simulation-failed, stage=policy-action, reason=illegal-action
+CRN construction or value failure
+  -> kind=simulation-failed, stage=crn, existing coordinate/random-domain/view reason
+transition, append-only, or pass-quorum failure
+  -> kind=simulation-failed, stage=transition, existing exact reason
+card universe or state invariant failure
+  -> kind=simulation-failed, stage=state-conservation, existing StateConservationFailure reason
+terminal or utility failure
+  -> kind=simulation-failed, stage=terminal-projection, existing exact reason
+fixed policy context or no legal action failure
+  -> kind=policy-failed, failure=RolloutPolicyFailure
+work-unit exhaustion
+  -> kind=budget-exhausted, exact workUnits and maximumWorkUnits
+~~~
+
+Every branch is no-throw, atomic, and free of hands, raw scenarios, raw weights, foreign card details, or partial state in diagnostics.
+
+## Test authenticity and RED matrices
+
+Policy cases call the real fixed policy. Finalized event hashes use the real finalization and verification APIs; the same-event duplicate construction caveat above is retained. Kernel mismatch cases call exported runRolloutReplicate directly. Valid integration remains buildParticleBank → registered ParticleBank → createParticleScenarioSource → validated replicate input → runRolloutReplicate. Expected replay ledgers use real createInitialPublicLedger and applyPublicEvent. No copied replay algorithm, as any, double assertion, optional context, or test-only hook is allowed, and existing 238 tests are not weakened.
+
+### Kernel RED matrix
+
+~~~text
+K1  scenario has one extra public played card
+K2  scenario.privateState.handCounts differs from finalLedger.handCounts
+K3  scenario.privateState.finishOrder differs
+K4  scenario.privateState.currentTrick differs
+K5  currentTrick.passSeats differs
+K6  currentLastPlay differs from the canonical last play
+K7  public played-card prefix or event order differs
+K8  publicState.actingSeat differs from the replay-derived turn
+K9  a private hand length differs from authoritative handCounts
+K10 a private hand overlaps authoritative public played IDs
+K11 all 108 physical IDs are covered but a public projection differs from the ledger
+K12 real source-produced scenario succeeds through the kernel
+K13 hostile getter count is 0
+K14 observation, CRN, policy, and transition call counts are all 0 before mismatch rejection
+K15 typed failure, no throw, no partial result, and no private diagnostics
+~~~
+
+## Next-round exact allowlist and TDD order
+
+The minimum next-round allowlist is identical in all three D2F documents:
+
+~~~text
+src/ai/rollout/contracts.ts                 # policy and projection failure unions
+src/ai/rollout/policy.ts                    # canonical public-card and hand-overlap gate
+src/ai/rollout/kernel.ts                    # replay order and projection reconciliation
+src/ai/rollout/stateConservation.ts        # canonical universe and existing conservation proofs
+tests/ai/rollout/policy.test.ts             # P1–P10 real fixed-policy cases
+tests/ai/rollout/kernel.test.ts             # K1–K15 direct kernel cases
+~~~
+
+particleScenarioSource.ts and its test are not in the implementation allowlist because the current real builder → registered handle → source → kernel chain already preserves the required replay context and remains a regression gate. particleBankRolloutBoundary.test.ts and rolloutPrivacyAst.test.ts are not changed unless a RED proves an exact contract/AST dependency; no such dependency is frozen here. Forbidden paths are src/game/**, src/engine/**, src/ai/particles/**, src/ai/planning/**, src/ai/aiDecisionEngine.ts, package files, lock files, configuration, benchmark files, and all Task 5–9 files.
+
+The TDD sequence is: (1) forged public-card membership; (2) duplicate public-play identity and no-card events; (3) acting-hand/public-play overlap; (4) direct kernel replay/projection mismatch; (5) the exact projection table; (6) real source-to-kernel success regression; (7) privacy and zero-call boundary; (8) focused affected-file regression; (9) the new D2 audited shards; (10) independent review. Each item must produce a real RED, rerun the same focused command after the smallest fix for GREEN, and preserve failure type, atomicity, and diagnostics rules.
+
+## Documentation Gate, commit, deferred gates, and Task 5
+
+The documentation Gate commands are exactly:
+
+~~~text
+git diff --name-status
+git diff --check
+git status --short
+~~~
+
+The Gate requires the canonical report block to be byte-identical in all three documents; exact changed paths; identical D2 manifest, shard commands, coverage output, policy identity rules, kernel reconciliation table, failure mapping, allowlist, and RED/TDD order; balanced Markdown fences; and no implementation placeholder tokens or vague placeholder wording. This turn runs no Vitest, tsc, build, or benchmark and modifies no production or test file.
+
+Commit only after the Gate passes:
+
+~~~text
+docs(ai): freeze final D2F Task 4 boundaries
+~~~
+
+After commit, run exactly:
+
+~~~text
+git rev-parse HEAD
+git show --stat --oneline HEAD
+git status --short
+git diff --check
+~~~
+
+The worktree must be clean. Deferred gates remain exactly:
+
+~~~text
+AWAITING_FIXED_BENCHMARK_RUNNER
+AWAITING_NODE22_CI
+Task 9 full permitted regression
+~~~
+
+Task 5 remains NOT STARTED. This report freezes final Task 4 boundary and gate design only; it does not claim D2F Shadow release readiness.
