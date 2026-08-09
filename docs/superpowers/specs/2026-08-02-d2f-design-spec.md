@@ -1056,7 +1056,7 @@ type RolloutAggregationResult =
 
 所有失败均为真正的 discriminated union，不使用所有 `kind` 共享的模糊 `count?: number`。utility、leaf、policy、kernel、aggregation 在进入下一个阶段前必须检查 `ok`；任何失败都不返回部分排序。
 
-### 3.5.1 D2F Task 4 State-Machine Remediation Design Freeze
+### 3.5.1 Historical D2F Task 4 State-Machine Remediation Design Freeze (superseded by the final integration freeze report)
 
 本节替换旧的 Private Boundary Reconciliation 条款，是本轮唯一有效的 Task 4 state-machine remediation 规范。当前 HEAD 的真实代码复核结论如下：F1、F2、F3、F4、F5、F6、F7 均确认；没有 reviewer finding 被无证据驳回。
 
@@ -1403,7 +1403,7 @@ binary 执行 `tsx --version` 和 benchmark。不得用 `npx tsx`、临时网络
 纳入普通 correctness 回归。Node 22 证据同样是最终 release Gate 的前置条件而非 Task 1 blocker；
 未取得 Node 22 证据前不得称为 D2F SHADOW RELEASE READY。
 
-## D2F Task 4 cross-document canonical literals
+## Historical D2F Task 4 cross-document canonical literals (superseded by the final integration freeze report)
 
 The following lines are the shared literal contract for all three D2F documents; every occurrence must remain word-for-word identical.
 
@@ -1433,3 +1433,255 @@ tests/ai/rollout/rolloutPrivacyAst.test.ts
 ~~~
 
 Canonical RED IDs: MC-PAIR, MC-COMPOUND, MC-DUPLICATE, MC-MISSING, MC-EXTRA, MC-FOREIGN, K-GETTER, K-NESTED-GETTER, K-BUDGET-GETTER, K-SYMBOL, K-ACCESSOR, K-PROTOTYPE, K-ITERATOR, K-SPARSE, K-CYCLE, P-COUNT-NUMBERS, P-COUNT-KEYS, P-FINISH, P-CARD, P-NESTED-GETTER, P-EVENT, P-CRN-THROW, T-ROOT-EARLY, T-POLICY-EARLY, T-THREE-FINISH, T-NONTERMINAL, T-NO-POLICY, T-NO-LEAF, T-PROJECTION, T-UTILITY, T-ROTATION, U-CANONICAL, U-MISSING, U-EXTRA, U-DUPLICATE, U-OVERLAP, U-HISTORY-VIEW, U-TRANSFER, U-FORGED, U-SOURCE, X-PLAY-POST, X-PASS-POST, X-CONSERVATION, X-TERMINAL-PROJECTION, X-ILLEGAL-ACTION, X-STATE-UNCHANGED, X-CALLER-UNCHANGED, X-NO-PARTIAL, X-NO-DIAGNOSTIC.
+
+# D2F_TASK4_INTEGRATION_TRANSITION_REMEDIATION_FREEZE_REPORT
+
+This is the active Task 4 integration/transition freeze. It supersedes the historical Task 4 sections above and is the only source of truth for the next implementation turn.
+
+### Verdict and scene
+
+`start HEAD`: `472b5d47b5ae0e5676d4bae34e14aa766ae16f98`.
+
+`end HEAD` for this docs-only verification window: `472b5d47b5ae0e5676d4bae34e14aa766ae16f98`.
+
+The scene lock matched the requested worktree, branch `codex/d2f-crn-rollout-source`, commit message `fix(ai): make D2F rollout transitions atomic`, clean status, and clean `git diff --check` before editing. This turn changed no production or tests. The only authorized commit message is `docs(ai): freeze Task 4 integration transition remediation`; its resulting commit HEAD is recorded in the final handoff because a commit cannot contain its own object ID.
+
+Final conclusion:
+
+```text
+TASK 4 INTEGRATION/TRANSITION REMEDIATION DESIGN FROZEN
+TASK 4 CODE REMEDIATION PENDING
+TASK 5 NOT STARTED
+```
+
+### I1 — Policy failure classification: confirmed and corrected
+
+The finding is confirmed against `src/ai/rollout/policy.ts`. `listLegalActions` currently turns an invalid observation into `[]`; `chooseAction` then maps that to `no-legal-action`. A throwing, non-finite, or out-of-range `CrnView.value()` currently maps to `invalid-policy-context` with `field: "ply"`. That is not sufficient to distinguish malformed observation, an actually verified empty legal-action set, and CRN failure.
+
+The next turn must change `src/ai/rollout/contracts.ts` to this closed union; no arbitrary field or reason string is permitted:
+
+```ts
+type RolloutPolicyFailure =
+  | { kind: "invalid-policy-context"; field: "observation"; reason: "malformed-observation" }
+  | { kind: "invalid-policy-context"; field: "ply"; reason: "invalid-ply" }
+  | { kind: "invalid-policy-context"; field: "actingSeat"; reason: "invalid-acting-seat" }
+  | { kind: "no-legal-action"; actingSeat: PublicSeat }
+  | {
+      kind: "crn-failure";
+      field: "coordinate" | "randomDomain" | "view" | "value";
+      reason: "construction-failed" | "throwing-value" | "non-finite-value" | "out-of-range-value";
+    };
+```
+
+`no-legal-action` is legal only after the observation has passed the complete schema, public-event/hash, card, count, finish-order, and canonical CardGroup checks. Malformed or hostile observation returns `invalid-policy-context` with `field: "observation"` and no action. An acting-seat context error uses the exact `actingSeat` field. A CRN throw is `crn-failure`, never `no-legal-action`; the direct policy path does not throw and does not return a partial action. Policy diagnostics contain only the closed enums and public seat, never observation, hand, scenario, weight, or seed data.
+
+The existing `RolloutFailure.invalid-request.field: string` is also narrowed in the same contract edit: `type RolloutRequestField = "request" | "schemaVersion" | "mode" | "formalExecutionAllowed" | "rootIdentity" | "scenarioSourceInput" | "candidates" | "budget" | "limits" | "evidenceRequirements" | "riskPolicy" | "policyId" | "assemblyInput" | "requestInput" | "candidateSummaries" | "ranking" | "aggregateDiagnostics";` and `invalid-request.field` uses that union. Hostile property names are mapped to `"request"`, never echoed. `RolloutKernelFailure` below is the kernel-level closed union.
+
+### I2 — Public history: authoritative owner and complete data flow
+
+The verified history currently exists in `RolloutScenarioSourceInput.publicHistoryEvents`. `createRolloutRequest` calls `cloneScenarioSourceInput`, which validates finalized event schema and hashes, then derives `rootIdentity` through `canonicalReplayContextIdentity`; the source calls the same replay-context validation before `replayParticleScenario`. `ReplayedParticleState` and the emitted `RolloutScenario.privateState` intentionally contain the final ledger/state but no public-history array. This is the correct private-state boundary and no history field is added to `ReplayedParticleState`.
+
+The defect is in the hand-off: `RolloutReplicateInput` currently has no replay-history or ledger context, and `kernel.ts:createIsolatedState` initializes `publicEvents: []`. Therefore the root action runs without the validated pre-root history. The kernel must not read history from `Room`, `ReplayedParticleState` beyond its validated public ledger projection, or a private scenario record.
+
+The minimal next-turn contract addition is one immutable public replay-context field, not three independent arrays:
+
+```ts
+type ValidatedPublicReplayContext = Readonly<{
+  publicHistoryEvents: readonly PublicActionEvent[];
+  initialLedger: HardPublicLedger;
+  finalLedger: HardPublicLedger;
+}>;
+
+type RolloutReplicateInput = Readonly<{
+  candidate: RolloutCandidate;
+  scenario: RolloutScenario;
+  publicState: RolloutPublicState;
+  publicReplayContext: ValidatedPublicReplayContext;
+  replicateIdentity: string;
+  random: CrnView;
+  validatedBudget: ValidatedRolloutBudget;
+}>;
+```
+
+`createParticleScenarioSource` remains the source owner. After its existing request/replay validation succeeds, a private branded context is created and consumed by the exact internal factory `createRolloutReplicateInputFromValidatedSource(context, scenarioIndex, candidate, replicateIdentity, random, validatedBudget): RolloutContractResult<RolloutReplicateInput>` in `src/ai/rollout/particleScenarioSource.ts`. The factory accepts no caller-supplied history argument. It copies and recursively freezes the validated `publicHistoryEvents`, `initialLedger`, and `finalLedger`; it derives provenance from the already validated replay context and requires the selected scenario identity to be one of the source result identities. The public source result shape is not widened with raw records, hands, or weights.
+
+Validation has two layers: `createRolloutRequest`/`canonicalReplayContextIdentity` and the source replay are the authoritative producers; `kernel.ts:isolateRolloutInput` revalidates the frozen context, its ledger identities/indexes/hashes, its canonical event hashes, and equality with the scenario final public ledger before cloning it into the working state. A caller cannot inject an unverified history by constructing a structural object. The logical owner remains the validated replay context; the kernel holds one append-only working cursor initialized from it, not a second authoritative copy.
+
+The complete flow is:
+
+```text
+RolloutRequest.scenarioSourceInput.publicHistoryEvents
+  -> cloneScenarioSourceInput + canonicalReplayContextIdentity
+  -> createParticleScenarioSource / replayParticleScenario
+  -> branded ValidatedPublicReplayContext
+  -> createRolloutReplicateInputFromValidatedSource
+  -> kernel state: pre-root public history + final ledger cursor
+  -> seat-local observation.publicHistoryEvents
+  -> fixed policy
+```
+
+The observation is exactly the validated pre-root history followed by rollout-generated finalized public events. The pre-root prefix is present before root action; each rollout event is appended after its transaction is accepted. Event indexes are contiguous. `PublicActionEvent` has no separate `previousHash` member: the previous hash is the preceding `HardPublicLedger.seenEventHashes[index - 1]`, and the new event hash is `publicPayloadHash`; both are checked by `applyPublicEvent` plus `verifyPublicActionEventHash`. Pre-root history does not consume `ply`, `workUnits`, or budget. Only accepted rollout decisions consume the existing root work unit or policy-action work units. History includes public event identity and card projections only; it never includes private assignment, raw hands, weights, or seed.
+
+Adding `publicReplayContext` does not change `rootIdentity`, `scenarioIdentity`, `replicateIdentity`, CRN coordinates, random domain, or Task 3 known vectors. Those identities already include the validated replay context where required; the new field is a validated transport of the same provenance, not a new identity input.
+
+### I3 — Observation-before-CRN interface
+
+`src/ai/rollout/policy.ts` adds this pure/no-throw boundary:
+
+```ts
+type SeatLocalObservationValidationResult =
+  | Readonly<{ ok: true; observation: SeatLocalObservation }>
+  | Readonly<{
+      ok: false;
+      failure: {
+        kind: "invalid-policy-context";
+        field: "observation";
+        reason: "malformed-observation";
+      };
+    }>;
+
+export function validateSeatLocalObservation(
+  input: unknown,
+): SeatLocalObservationValidationResult;
+```
+
+It performs descriptor/prototype/own-key, nested graph, exact card, public event/hash, count, finish-order, and canonical CardGroup validation, then creates a detached frozen observation. It does not read or call CRN and does not invoke policy. `currentLastPlay` is replaced by the canonical result of the real classifier before any legality decision.
+
+Every decision follows this exact order:
+
+```text
+current stable state
+-> create seat-local observation data
+-> validate/copy/freeze observation
+-> failure: return without CRN
+-> create current ply/acting-seat coordinate
+-> derive random domain/view
+-> fixed policy on the validated observation
+-> validate action
+-> independent next-state transaction
+```
+
+For a hostile observation, `createCrnCoordinate`, `deriveRandomDomain`, `createCrnView`, and the fixed policy are each called zero times. `current ply` and `actingSeat` are read from the same stable state snapshot. `publicHistoryEvents` contains no CRN bytes or digest. This ordering is an entrance-boundary correction only; it does not alter the CRN coordinate/domain/semantic-key algorithm or Task 3 vectors. The policy entry must revalidate direct callers without mapping invalid observations to `no-legal-action`; the kernel passes the already validated observation to the fixed policy.
+
+### I4 — Before/after transition proof
+
+`stateConservation.ts` must validate the relation between an accepted immutable `before` state and an independent `after` state, not only whether `after` is self-consistent. `publicPlayedCardIds` uses exact code-unit equality; `localeCompare` is forbidden for prefix checks.
+
+For every append operation the exact public-history proof is:
+
+```text
+afterHistory = beforeHistory + [one finalized event]
+```
+
+The validator `validatePublicHistoryAppend(beforeHistory, afterHistory, beforeLedger, afterLedger): StateConservationResult` checks exact unchanged prefix, length plus one, finalized schema, event index equal to `beforeLedger.nextEventIndex`, identity, `verifyPublicActionEventHash`, `applyPublicEvent(beforeLedger, appendedEvent).ledger`, and `afterLedger.seenEventHashes[eventIndex] === appendedEvent.publicPayloadHash`. It checks the preceding ledger hash as the previous-hash link. A play that also emits a separate `finish` event has two ordered append steps, each individually satisfying the one-event equation; it must not collapse the events or bypass the chain proof.
+
+For a play, `after.publicPlayedCardIds` is the exact old prefix followed by the current finalized event's canonical `publicCardIds`. The action card IDs must equal that suffix as an exact set/multiset, and every action ID must be a unique member of the trusted 108-card deck. For a pass, public card IDs are byte-for-byte unchanged. Any prefix mutation, deletion, reorder, replacement, duplicate, missing, extra, or foreign ID fails before commit.
+
+The real Room quorum is `passesNeededToReset(room) = Math.max(1, room.players.length - room.finishOrder.length - 1)`, hence for four seats `max(1, 4 - finishOrder.length - 1)`. A passing actor must be unfinished; finished seats are excluded from candidate turns. `lastPlaySeat` is not put into `passSeats`, but the formula still reserves one seat even when `lastPlaySeat` is already finished. A clear is legal only after the newly appended pass makes `passSeats.length >= requiredPasses`; `lastPlay === null` alone is never evidence of a legal clear. Before the clear, terminal status is checked using the Room rule, so an early-terminal boundary cannot continue to a trick clear.
+
+The three required examples are frozen identically in all three documents:
+
+1. All four active, `finishOrder = []`, `lastPlaySeat = 0`: required quorum is 3; only seats 1, 2, and 3 can pass, and exactly the third pass clears the trick with lead seat 0.
+2. One finished, `finishOrder = [0]`, `lastPlaySeat = 1`: required quorum is 2; seat 0 is skipped, seats 2 and 3 supply the two passes, and clear leads seat 1.
+3. Last-play seat finished but not terminal, `finishOrder = [0,1]`, `lastPlaySeat = 0`: the first two are non-partners, so the round continues; the required quorum is 1, one pass by seat 2 or 3 clears, and `resolveTrickWinnerSeat` leads with unfinished partner seat 2. At the early-terminal boundary `finishOrder = [0,2]`, the first two are partners, so the round terminates immediately and no pass or clear is allowed.
+
+### I5 — Failure-stage preservation
+
+The existing union is insufficient because `simulation-failed/replay` currently absorbs unrelated causes. The next contract edit freezes this exact kernel union:
+
+```ts
+type RolloutKernelFailure =
+  | {
+      kind: "simulation-failed";
+      stage: "input";
+      reason: "malformed-envelope" | "invalid-budget" | "invalid-root-identity" | "invalid-public-state" | "invalid-candidate";
+    }
+  | { kind: "simulation-failed"; stage: "replay"; reason: "invalid-scenario" | "invalid-replay-context" }
+  | { kind: "simulation-failed"; stage: "root-action"; reason: "illegal-action" }
+  | { kind: "simulation-failed"; stage: "policy-action"; reason: "illegal-action" }
+  | { kind: "simulation-failed"; stage: "crn"; reason: "coordinate" | "random-domain" | "view" }
+  | {
+      kind: "simulation-failed";
+      stage: "transition";
+      reason: "invalid-action-transition" | "invalid-pass-quorum" | "public-history-not-append-only";
+    }
+  | { kind: "simulation-failed"; stage: "state-conservation"; reason: Exclude<StateConservationFailure["reason"], "invalid-action-transition"> }
+  | { kind: "simulation-failed"; stage: "terminal-projection"; reason: "invalid-finish-order" | "utility-failed" }
+  | { kind: "policy-failed"; failure: RolloutPolicyFailure }
+  | { kind: "budget-exhausted"; workUnits: number; maximumWorkUnits: number };
+```
+
+The mapping is fixed: malformed input -> `input`; invalid scenario/replay context -> `replay`; illegal root action -> `root-action`; illegal fixed-policy action -> `policy-action`; policy context/CRN value failure -> `policy-failed` carrying the closed policy union, while coordinate/domain/view construction failure -> `crn`; transition/quorum/history append failure -> `transition`; card universe and state invariant failure -> `state-conservation` with the exact existing reason; terminal projection or team utility failure -> `terminal-projection`; exhausted budget -> the exact counts. Illegal action is never replay, transition is never replay, and state conservation reason is never discarded. Every branch is no-throw, atomic, and diagnostic-free of private data.
+
+### I6 — Canonical `CardGroup` validation
+
+`currentLastPlay` is first checked against the exact card schema and trusted deck membership. The validator then calls the real `classifyPlay(cards, gameRank)` from `src/game/playRules.ts`; it never trusts caller `type`, `strength`, `id`, `label`, or `purpose`. The input group is accepted only when the canonical result is defined and has semantic equality for `type`, `strength`, card-ID set, wildcard-ID set, `id`, `label`, and `purpose`. `label`, `purpose`, and `wildcards` are canonical outputs of `createGroup` inside `src/engine/groups.ts`/`classifyPlay`, not strings guessed by rollout code.
+
+Wildcard IDs must be a duplicate-free subset of the group cards, and each wildcard must satisfy the real current-game-rank heart rule `isHeartRankWild`. Duplicate, foreign, malformed, wrong-rank wildcard, wrong label, wrong purpose, and wrong classification all fail. The stored observation uses the detached canonical `classifyPlay` result; both pass/play legality and transition validation consume that canonical projection. No `localeCompare` or caller-provided classification is used as authority.
+
+### Acceptance tests frozen for the next implementation turn
+
+The full-house root fixture uses `gameRank = "2"` and the real deck cards `S3-1`, `C3-1`, `H3-1`, `S4-1`, `C4-1`. `classifyPlay` must report the exact real type `"full-house"`, never bomb. The candidate action presents those five IDs in reverse order while the finalized public-event oracle expects the independent literal code-unit order `C3-1, C4-1, H3-1, S3-1, S4-1`; the test calls the real `runRolloutReplicate` root path and asserts success, no replay failure, the full-house type, exact hand/card projection, and the literal event-order oracle. It must not assert only that the implementation's comparator agrees with itself.
+
+The strengthened terminal test makes the second partner actually finish. For finish prefix `[0,2]`, it asserts perspective partner utility `+3` and opponent utility `-3`; for rotated prefix `[1,3]`, it asserts perspective 0 utility `-3`. It instruments policy, CRN, and leaf calls and asserts all three counts are zero after root terminal detection. The minimum valid budget still succeeds. A two-finished non-partner fixture remains non-terminal and proves the kernel does not over-terminate.
+
+The real source-to-kernel integration test belongs in the existing `tests/ai/rollout/particleScenarioSource.test.ts`, not a new large file and not `particleBankRolloutBoundary.test.ts`. It must execute `buildParticleBank` with the existing deterministic public fixture and at least two accepted particles, retain only the registered `ParticleBank` handle, call `createParticleScenarioSource`, select a real emitted scenario, build the validated replicate input through `createRolloutReplicateInputFromValidatedSource`, and call `runRolloutReplicate`. The test asserts the verified pre-root history reaches policy observation, the 108-card universe succeeds, registered/unregistered handle duties remain unchanged, source/kernel outputs are detached and frozen, no raw scenario/hands/weights enter diagnostics, and malformed source results never enter kernel. It may not use a handcrafted scenario/private state as its only integration evidence.
+
+Transition negatives use the real kernel/transition entry and assert the exact stage plus unchanged accepted state and caller input: mutate/delete/reorder the public-card prefix; append a public card on pass; mismatch the play suffix; clear below quorum; use the wrong one-finished quorum; and force post-transition conservation or projection failure. No failure may contain a partial state, next state, private hand, scenario, or raw weight.
+
+### Next-round exact allowlist and exclusions
+
+The final minimal allowlist is identical in all three D2F documents:
+
+```text
+src/ai/rollout/contracts.ts                 # publicReplayContext and closed failure unions
+src/ai/rollout/particleScenarioSource.ts    # source-owned validated replicate-input factory
+src/ai/rollout/policy.ts                    # no-throw observation gate and CRN failure mapping
+src/ai/rollout/kernel.ts                    # history cursor, decision order, transaction/stage mapping
+src/ai/rollout/stateConservation.ts         # before/after prefix, append, quorum, and universe proofs
+tests/ai/rollout/policy.test.ts             # I1, I3, I6 focused RED/GREEN tests
+tests/ai/rollout/kernel.test.ts             # I4, I5, full-house, terminal, and transition tests
+tests/ai/rollout/particleScenarioSource.test.ts # real builder/source/kernel integration
+tests/ai/rollout/rolloutPrivacyAst.test.ts  # exact private/public and CRN-order boundary gate
+```
+
+`contracts.ts` is required because the current `RolloutReplicateInput`, `RolloutPolicyFailure`, `RolloutKernelFailure`, and arbitrary request field cannot express the frozen contract. `particleScenarioSource.ts` is required because the source must create the validated, provenance-preserving transport context; `ReplayedParticleState` remains unchanged. Policy, kernel, and state conservation each have a direct confirmed defect. The four existing test files are the smallest focused evidence set; no new large integration file is allowed. `rolloutPrivacyAst.test.ts` is updated only if its exact AST symbols must recognize the new public replay-context hand-off; it must continue to reject private particle imports and policy/CRN leakage.
+
+Forbidden in the next turn: `src/game/**`, `src/engine/**`, `src/ai/particles/**`, `src/ai/planning/**`, `src/ai/aiDecisionEngine.ts`, `tests/ai/rollout/particleBankRolloutBoundary.test.ts`, `tests/ai/particles/particleBankBuilder.test.ts`, package/lock/config files, benchmark runner files, and all Task 5–9 files. No formal decision path is modified.
+
+### Frozen RED/GREEN order
+
+The next turn must execute these ten stages in order. Each stage writes a real production-entry RED, runs the same focused command to confirm the expected behavior fails, applies the smallest production fix, reruns the same command GREEN, then runs only the affected focused regression. A missing module/import or empty fixture is not a valid RED.
+
+1. Policy failure classification — `tests/ai/rollout/policy.test.ts`; malformed observation, verified empty legal set, and throwing CRN must produce the three distinct typed classes.
+2. CurrentLastPlay canonical validation — `tests/ai/rollout/policy.test.ts`; wrong type/strength/cards/wildcards/label/purpose and foreign/duplicate cards fail while canonical classifier output succeeds.
+3. Observation-before-CRN — policy/kernel focused tests; hostile observation proves zero coordinate/domain/view/policy calls and no action.
+4. Public-history authoritative data flow — `tests/ai/rollout/particleScenarioSource.test.ts`; real source context reaches the first kernel observation and pre-root history is not reset.
+5. Append-only transition proof — `tests/ai/rollout/kernel.test.ts`; prefix and history mutations fail with no state change and exact transition reason.
+6. Pass quorum — `tests/ai/rollout/kernel.test.ts`; the three frozen examples and insufficient-clear cases use the Room formula exactly.
+7. Failure-stage preservation — `tests/ai/rollout/kernel.test.ts`; input/root/policy/CRN/transition/conservation/terminal/budget cases retain the closed stage/reason union.
+8. Full-house real production test — `tests/ai/rollout/kernel.test.ts`; non-bomb real classifier, reversed action order, literal event-order oracle, successful root path.
+9. Early-terminal assertion strengthening — `tests/ai/rollout/kernel.test.ts`; actual partner finish, `+3/-3`, rotated `-3`, minimum budget, zero policy/CRN/leaf calls.
+10. Real source-to-kernel integration — `tests/ai/rollout/particleScenarioSource.test.ts` plus the privacy AST gate; real builder -> registered handle -> source -> validated replicate input -> kernel.
+
+Focused commands are `& .\\node_modules\\.bin\\vitest.cmd run tests/ai/rollout/policy.test.ts`, `& .\\node_modules\\.bin\\vitest.cmd run tests/ai/rollout/kernel.test.ts`, `& .\\node_modules\\.bin\\vitest.cmd run tests/ai/rollout/particleScenarioSource.test.ts`, and the same command for `rolloutPrivacyAst.test.ts`, with the affected file only and no full suite. This docs-only turn ran none of them.
+
+### Documentation gate, commit, and deferred gates
+
+Before commit, run exactly `git diff --name-status`, `git diff --check`, and `git status --short`; verify changed paths are exactly the three named D2F documents, compare this report's public-history owner, observation/CRN order, failure union, append proof, quorum examples, canonical CardGroup fields, source chain, allowlist, and RED order across all three documents, balance Markdown fences, and run the repository's prohibited-placeholder scan with zero new implementation placeholders. This turn does not run Vitest, tsc, build, benchmark, or modify production/tests.
+
+Commit only after those gates pass, with:
+
+```text
+docs(ai): freeze Task 4 integration transition remediation
+```
+
+After commit, verify `git rev-parse HEAD`, `git show --stat --oneline HEAD`, `git status --short`, and `git diff --check`; the worktree must be clean. Deferred gates remain exactly:
+
+```text
+AWAITING_FIXED_BENCHMARK_RUNNER
+AWAITING_NODE22_CI
+Task 9 full permitted regression
+```
+
+This is a Task 4 design freeze only and does not claim D2F Shadow release readiness. Task 5 has not started.
