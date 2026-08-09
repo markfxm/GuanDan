@@ -1,7 +1,7 @@
 # D2F Test Gate Matrix
 
 状态：
-TASK 4 FINAL BOUNDARY/GATE DESIGN FROZEN
+TASK 4 FINAL ACCEPTANCE REMEDIATION DESIGN FROZEN
 TASK 4 CODE REMEDIATION PENDING
 TASK 5 NOT STARTED
 
@@ -2363,3 +2363,158 @@ Task 9 full permitted regression
 ~~~
 
 Task 5 remains NOT STARTED. This report freezes final Task 4 boundary and gate design only; it does not claim D2F Shadow release readiness.
+
+D2F_TASK4_FINAL_BOUNDARY_BLOCK_BEGIN
+# D2F_TASK4_FINAL_ACCEPTANCE_REMEDIATION_FREEZE_REPORT
+
+This is the current Task 4 acceptance-remediation source of truth. Earlier Task 4 freeze blocks in this document are retained as historical audit material and are superseded by this block.
+
+## Verdict
+
+~~~text
+TASK 4 FINAL ACCEPTANCE REMEDIATION DESIGN FROZEN
+TASK 4 CODE REMEDIATION PENDING
+TASK 5 NOT STARTED
+~~~
+
+start HEAD: 0bc1c02c01ed757a5e5c68b7c789438c813a92e3
+branch: codex/d2f-crn-rollout-source
+worktree: E:/workspace/掼蛋游戏开发/.worktrees/d2f-crn-rollout-source
+end HEAD: the post-commit HEAD printed by the final handoff check; the commit object cannot contain its own object ID.
+commit: docs(ai): freeze final D2F Task 4 acceptance remediation
+
+This round is docs-only. It does not modify production or tests, does not start Task 5, and does not claim D2F Shadow release readiness.
+
+Changed paths:
+
+~~~text
+docs/superpowers/specs/2026-08-02-d2f-design-spec.md
+docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md
+docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md
+~~~
+
+## Finding 1 — nested publicReplayContext replay boundary: CONFIRMED
+
+The root cause is in the direct kernel boundary, not in the source-owned request/replay path. runRolloutReplicate calls isolateRolloutInput; that function checks the outer input record, then reads publicReplayContext into isValidPublicReplayContext. The current replay-context check validates only the outer context record, array container and ledger containers. It can read events[index].eventIndex and invoke verifyPublicActionEventHash/applyPublicEvent before a recursive plain-data/schema validation of every event and nested ledger value. isPlainDataArray validates the array container and numeric descriptors but does not recursively validate its elements. A nested event getter, inherited getter, custom prototype, accessor, symbol, expando, sparse element, cycle or hostile nested ledger graph can therefore be reached by replay code before the boundary has established a safe graph.
+
+The existing trusted source-side authorities are assertReplayContextInput and clonePublicHistoryEvents in src/ai/rollout/contracts.ts; they already establish recursive public-event shape, finalized-event semantics and hash validity for the source/request path. The remediation reuses one of those existing meanings at the direct kernel boundary, or moves the shared implementation within contracts.ts for reuse. It must not create a second validator with a different schema or use structuredClone, JSON.stringify or replay execution as validation.
+
+The frozen order is:
+
+~~~text
+unknown kernel input
+  -> outer descriptor/prototype/own-key validation
+  -> recursive plain-data and publicReplayContext schema validation
+  -> detached projection and freeze of the validated graph
+  -> canonical replay of initial ledger plus public history
+  -> scenario/private/public projection reconciliation
+  -> canonical card-universe validation
+  -> seat-local observation
+  -> CRN coordinate/domain/view
+  -> fixed policy
+~~~
+
+Before recursive replay-context validation completes, nested getter/callback calls are 0, replay/observation/CRN/policy/transition calls are 0, and the kernel returns the closed typed failure { kind: "simulation-failed", stage: "replay", reason: "invalid-replay-context" }. The failure contains no history, card ID, ledger, scenario, private state or hostile property name; it never throws and never returns a partial state. A semantically valid replay whose scenario/public projection differs uses { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: RolloutScenarioProjectionMismatchField }, with the exact projection field and no forged value.
+
+Minimum RED cases are: a getter on publicHistoryEvents[0].eventIndex, a getter/custom prototype in a nested ledger/current-trick or transfer record, a symbol or expando on a nested event, and a cycle or sparse nested event array. Each case must call the real runRolloutReplicate entry and assert no throw, zero downstream calls, no partial result and diagnostics without caller/private data. GREEN must prove the same cases are rejected after the recursive schema boundary while a real source-produced canonical replay remains valid.
+
+## Finding 2 — canonical transfer card membership: CONFIRMED
+
+The trusted physical-card universe is:
+
+~~~text
+U = Set(createDeck().map(card => card.id))
+|U| = 108
+~~~
+
+The current root cause is distributed across the public event and direct policy paths. assertTransferDraft in src/game/publicEvent.ts checks only that a transfer publicCardIds member is a string. publicEventHash.ts hashes that value but does not prove membership in U, and publicLedger.ts applies tribute/return as hand-transfer views without adding the ID to playedCardIds or checking deck membership. policy.ts applies the foreign/duplicate/overlap card checks only to play events; its non-play branch allows a hash-valid foreign tribute/return ID to reach later CRN/policy work. The source request path's syntactic card checks do not remove this direct policy/kernel boundary defect.
+
+Every physical-card public event—play, tribute, return, and any real card-bearing transfer—must prove each publicCardIds member is in U, has the event's canonical transfer/play shape, and is accepted by the finalized-event hash and replay validators. Only play IDs enter the public played-card set. Tribute/return IDs are ownership-transfer views: they change the receiving/losing hand projection and remain absent from publicPlayedCardIds; a canonical transfer card may legally appear in the receiver's hand. The play-only acting-hand overlap rule is not applied to a transfer. No transfer event may create, destroy or double-count a physical card.
+
+At the policy boundary, a foreign transfer fails before observation/CRN/policy with the existing exact union member { kind: "invalid-policy-context", field: "publicHistoryEvents[].publicCardIds", reason: "foreign-card-id" }. The failure contains no foreign ID or full history, never throws, and returns no action or partial projection. The field name is exactly publicHistoryEvents[].publicCardIds; cardId is not a substitute.
+
+Minimum RED cases are: hash-valid foreign tribute, hash-valid foreign return, canonical tribute/return with a receiver hand containing the transferred card, a transfer ID incorrectly entering publicPlayedCardIds, and a hostile transfer nested graph. GREEN must prove canonical membership and replay shape for both transfer kinds, preserve transfer/played accounting, allow the legal receiver hand, reject the foreign cases with the exact field/reason, and keep CRN/policy call counts at 0 for rejected observations.
+
+## Finding 3 — currentLastPlay field attribution: CONFIRMED
+
+The authoritative current last play is reconstructed from replayed public events and classified with the real card group semantics under the actual game rank. The current kernel then compares the reconstructed group with scenario.privateState.currentLastPlay and publicState.currentLastPlay using identity and structure helpers. A mismatch in strength or wildcards can satisfy identity while failing structure, so the current code incorrectly maps that forged group detail to publicState.gameRank. The analogous public comparison has the same defect. A forged group detail must never be used to infer a game-rank mismatch.
+
+The frozen field mapping is table-driven and changes exactly one field per case:
+
+| forged source | changed field | exact projection-mismatch field |
+| --- | --- | --- |
+| scenario.privateState.currentLastPlay | type, label, purpose, cards, strength, wildcards, or null/non-null | scenario.privateState.currentLastPlay |
+| publicState.currentLastPlay | type, label, purpose, cards, strength, wildcards, or null/non-null | publicState.currentLastPlay |
+| publicState.currentLastPlaySeat | seat value | publicState.currentLastPlaySeat |
+| publicState.gameRank | actual game rank used by replay classification | publicState.gameRank |
+
+The private mismatch must not map to a public projection field; the public group mismatch must not map to game rank; only a real classifier/game-rank inconsistency maps to publicState.gameRank. Reconciliation occurs before observation, CRN construction/value calls, policy, transition or commit. Every case returns the exact closed projection-mismatch failure, does not throw, produces no partial state, leaves caller input unchanged, and emits no forged group details.
+
+## RED/GREEN remediation order
+
+The next code turn uses three real-entry stages in this order; this freeze ran none of their tests:
+
+| stage | RED minimum | GREEN evidence |
+| --- | --- | --- |
+| A — nested replay boundary | hostile nested event/ledger/trick/transfer graph at runRolloutReplicate | recursive schema validation precedes replay; zero getter/callback/downstream calls; typed replay failure; no throw/partial/private diagnostics; canonical replay still succeeds |
+| B — transfer membership | foreign tribute/return, canonical transfer, receiver-hand ownership, played-set exclusion | exact U membership and transfer schema; exact publicHistoryEvents[].publicCardIds/foreign-card-id; no play-overlap rule for transfer; no CRN/policy call on rejection |
+| C — currentLastPlay | one-field mutations across the private/public group, seat and game-rank table | exact field mapping above; actual game-rank mismatch remains publicState.gameRank; all checks precede observation/CRN/policy/transition |
+
+Each RED must fail for the named behavior at the real production entry, not for a missing module, import, fixture or environment. Each GREEN reruns the same focused command and keeps no-throw, no-partial, input-immutability, privacy, observation-call and CRN-call assertions.
+
+## Allowlist and exclusions
+
+The next-round allowlist is a maximum set, not a requirement that every path change:
+
+~~~text
+src/ai/rollout/contracts.ts
+src/ai/rollout/policy.ts
+src/ai/rollout/kernel.ts
+tests/ai/rollout/policy.test.ts
+tests/ai/rollout/kernel.test.ts
+tests/ai/rollout/rolloutPrivacyAst.test.ts
+~~~
+
+rolloutPrivacyAst.test.ts is allowed to remain unchanged; it is still a required gate file, not a mandatory delta. A shared validator is added outside this set only if direct inspection proves that the existing trusted validator cannot be reused or shared inside contracts.ts; no such extra path is currently confirmed. The actual docs-only delta is limited to these three canonical documents.
+
+Forbidden in the remediation turn: Room, decision engine, planning, ParticleBank internals, formal action path, package/lock/config files and all Task 5–9 files. No production/test file is changed in this freeze.
+
+## SHA root cause and non-self-referential canonical algorithm
+
+The old final block is the same raw worktree/Git-blob byte sequence in all three documents: LF line endings, a final LF, and 20,935 bytes from the old boundary through EOF. Hashing that exact old boundary-through-EOF byte range produces 5d3d8684e27f154b9f077a96d4cd8318a0f7a513a7a49fb13a475a68e51eec24, which explains the independently reproducible 5d3… value. The independent implementer literal 70994a939a116d85ca5b4a93f8ca9801c982aeb7ec43da0066264fff646896d8 is not present in current Git history and cannot be reproduced from current worktree/blob bytes by the tested marker inclusion/exclusion, LF/CRLF, trailing-LF, full-file or common-encoding variants. The evidence identifies an undocumented prior boundary/input as the root cause; it does not support a CRLF claim.
+
+The two unique boundary lines surrounding this report define the canonical payload. The hash input is the exact raw byte slice strictly between the first unique begin boundary and the first unique end boundary in each file. Boundary bytes are excluded; all payload line endings and other bytes are included exactly as stored. The validator reads raw Git/worktree bytes, rejects missing or duplicate boundaries, performs no CRLF/LF conversion, Unicode conversion, trimming, whitespace normalization, Markdown parsing or JSON serialization, and compares payload length, bytes and SHA-256 across all three files. The recorded length and digest lines follow the end boundary and are outside the hashed payload, so the expected digest does not self-reference.
+
+## D2 gate partition and remaining gates
+
+The audited D2 gate remains four explicit, non-overlapping shards: fast-public-ledger 12 files/66 source-audited cases, fast-ai-policy-reducer 5 files/144 cases, ast 1 file/1 case, and room 1 file/1 case. The exact proof is:
+
+~~~text
+assigned=19
+unique=19
+missing=0
+duplicate=0
+overlap=0
+extra=0
+failed=0
+skipped=0
+~~~
+
+No timeout is changed, and no shard is run in this docs-only turn. The future acceptance sequence remains focused policy/kernel/privacy checks, the real source integration gate, the D2 exact 19-file/212-case gate, TypeScript/build/diff checks and independent acceptance. Full regression, fixed benchmark runner and Node 22 evidence remain separate gates.
+
+## Docs-only verification and handoff
+
+The required documentation checks are git diff --name-status 0bc1c02c01ed757a5e5c68b7c789438c813a92e3..HEAD, git diff --check, git status --short, changed-path allowlist validation, balanced Markdown-fence validation, prohibited-placeholder scan, cross-document interface/failure/allowlist comparison, unique-boundary validation, raw payload length/SHA equality, and confirmation that production, test, package, lock and config diffs are empty. This turn runs no Vitest, TypeScript compile, build or benchmark. The only authorized commit message is docs(ai): freeze final D2F Task 4 acceptance remediation; after commit, verify the new HEAD, commit summary, clean status and git diff --check HEAD^..HEAD.
+
+Deferred gates:
+
+~~~text
+AWAITING_FIXED_BENCHMARK_RUNNER
+AWAITING_NODE22_CI
+Task 9 full permitted regression
+~~~
+
+Task 5 is not started. This freeze does not claim D2F Shadow release readiness.
+D2F_TASK4_FINAL_BOUNDARY_BLOCK_END
+Canonical block raw payload bytes: 13986
+Canonical block raw SHA-256: 0220ec7d6076e5f6a51d9dc5789957ce820fd38492052719e237429f95e5aa96
