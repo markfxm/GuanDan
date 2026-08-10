@@ -4,11 +4,39 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
+import * as benchmark from "../../../scripts/benchmarks/d2f-rollout-budget-calibration";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const FIXTURE_PATH = resolve(ROOT, "tests/fixtures/ai/d2f-public-rollout-fixture.json");
 const TSX_CLI_PATH = resolve(ROOT, "node_modules/tsx/dist/cli.mjs");
 const tempPaths: string[] = [];
+
+type BenchmarkRunPhase = "correctness" | "warmup" | "measured";
+type BenchmarkRunRecord = Readonly<{
+  phase: BenchmarkRunPhase;
+  durationMs: number;
+  includedInSamples: boolean;
+}>;
+type BenchmarkExecution = Readonly<{
+  runs: readonly BenchmarkRunRecord[];
+  correctnessComparisons: number;
+  warmupIterations: number;
+  measuredIterations: number;
+  samples: readonly number[];
+}>;
+type ExecuteBenchmarkRuns = <T>(options: Readonly<{
+  warmup: 3;
+  iterations: 10;
+  runOnce: () => T;
+  compare: (result: T) => void;
+  now: () => number;
+}>) => BenchmarkExecution;
+type EvaluateCompletedRunDuration = (durationMs: number) => void;
+
+const internalBenchmark = benchmark as unknown as {
+  executeBenchmarkRuns?: ExecuteBenchmarkRuns;
+  evaluateCompletedRunDuration?: EvaluateCompletedRunDuration;
+};
 
 function runFixedBenchmark(fixturePath = FIXTURE_PATH) {
   return spawnSync(process.execPath, [
@@ -86,7 +114,7 @@ describe("fixed D2F benchmark runner contract", () => {
       warmupIterations: 3,
       measuredIterations: 10,
       correctness: "passed",
-      threshold: { kind: "hang-ceiling", maximumSingleIterationMs: 60000, passed: true },
+      threshold: { kind: "completed-run-duration-ceiling", maximumSingleIterationMs: 60000, passed: true },
       verdict: "PASS",
     });
     expect(report.evidenceLevel).toBe(process.version === "v22.22.2" ? "NODE22_RELEASE_EVIDENCE" : "SUPPLEMENTAL_LOCAL_EVIDENCE");
@@ -97,6 +125,94 @@ describe("fixed D2F benchmark runner contract", () => {
     expect(report.metrics.meanMs).toBeGreaterThan(0);
     expect(report.metrics.throughputPerSecond).toBeGreaterThan(0);
     expect(fixtureBefore).toBe(readFileSync(FIXTURE_PATH, "utf8"));
+  });
+
+  test("executes one correctness, three warm-ups, and ten measured runs in order", () => {
+    const execute = internalBenchmark.executeBenchmarkRuns;
+    expect(execute).toBeTypeOf("function");
+    if (execute === undefined) throw new Error("executeBenchmarkRuns is not available");
+
+    let runCalls = 0;
+    let comparisonCalls = 0;
+    let clock = 0;
+    const execution = execute({
+      warmup: 3,
+      iterations: 10,
+      runOnce: () => {
+        runCalls += 1;
+        return { ok: true };
+      },
+      compare: () => {
+        comparisonCalls += 1;
+      },
+      now: () => {
+        const value = clock;
+        clock += 10;
+        return value;
+      },
+    });
+
+    expect(runCalls).toBe(14);
+    expect(comparisonCalls).toBe(14);
+    expect(execution.runs.map((run) => run.phase)).toEqual([
+      "correctness", "warmup", "warmup", "warmup",
+      "measured", "measured", "measured", "measured", "measured",
+      "measured", "measured", "measured", "measured", "measured",
+    ]);
+    expect(execution.runs.every((run) => run.durationMs === 10)).toBe(true);
+    expect(execution.runs.slice(0, 4).every((run) => run.includedInSamples === false)).toBe(true);
+    expect(execution.runs.slice(4).every((run) => run.includedInSamples === true)).toBe(true);
+    expect(execution.samples).toEqual([10, 10, 10, 10, 10, 10, 10, 10, 10, 10]);
+    expect(execution.samples).toHaveLength(10);
+    expect(execution.warmupIterations).toBe(3);
+    expect(execution.measuredIterations).toBe(10);
+    expect(execution.warmupIterations).toBe(execution.runs.filter((run) => run.phase === "warmup").length);
+    expect(execution.measuredIterations).toBe(execution.runs.filter((run) => run.phase === "measured").length);
+  });
+
+  test("allows exactly 60000 ms and maps a completed measured overage to exit code 4", () => {
+    const evaluate = internalBenchmark.evaluateCompletedRunDuration;
+    const execute = internalBenchmark.executeBenchmarkRuns;
+    expect(evaluate).toBeTypeOf("function");
+    expect(execute).toBeTypeOf("function");
+    if (evaluate === undefined || execute === undefined) throw new Error("benchmark duration helpers are not available");
+
+    expect(() => evaluate(60000)).not.toThrow();
+    expect(() => evaluate(60000.0001)).toThrow();
+
+    const durations = [1, 1, 1, 1, 60000.0001];
+    let durationIndex = 0;
+    let readingEnd = false;
+    let runCalls = 0;
+    let comparisonCalls = 0;
+    let failure: unknown;
+    try {
+      execute({
+        warmup: 3,
+        iterations: 10,
+        runOnce: () => {
+          runCalls += 1;
+          return null;
+        },
+        compare: () => {
+          comparisonCalls += 1;
+        },
+        now: () => {
+          if (!readingEnd) {
+            readingEnd = true;
+            return 0;
+          }
+          readingEnd = false;
+          return durations[durationIndex++]!;
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(runCalls).toBe(5);
+    expect(comparisonCalls).toBe(4);
+    expect(failure).toMatchObject({ exitCode: 4 });
   });
 
   test("literal median and p95 formulas use sorted ten-sample input", async () => {
@@ -112,8 +228,8 @@ describe("fixed D2F benchmark runner contract", () => {
     });
   });
 
-  test("hang ceiling is exclusive above 60000 milliseconds", () => {
-    const result = runTsxExpression('import { exceedsHangCeiling } from "./scripts/benchmarks/d2f-rollout-budget-calibration.ts"; console.log(JSON.stringify([exceedsHangCeiling(60000), exceedsHangCeiling(60000.0001)]));');
+  test("completed-run duration ceiling is exclusive above 60000 milliseconds", () => {
+    const result = runTsxExpression('import { isCompletedRunDurationOverCeiling } from "./scripts/benchmarks/d2f-rollout-budget-calibration.ts"; console.log(JSON.stringify([isCompletedRunDurationOverCeiling(60000), isCompletedRunDurationOverCeiling(60000.0001)]));');
     expect(result).toEqual([false, true]);
   });
 

@@ -27,6 +27,30 @@ export type BenchmarkMetrics = Readonly<{
   throughputPerSecond: number;
 }>;
 
+export type BenchmarkRunPhase = "correctness" | "warmup" | "measured";
+
+export type BenchmarkRunRecord = Readonly<{
+  phase: BenchmarkRunPhase;
+  durationMs: number;
+  includedInSamples: boolean;
+}>;
+
+export type BenchmarkExecution = Readonly<{
+  runs: readonly BenchmarkRunRecord[];
+  correctnessComparisons: number;
+  warmupIterations: number;
+  measuredIterations: number;
+  samples: readonly number[];
+}>;
+
+export type BenchmarkExecutionOptions<T> = Readonly<{
+  warmup: 3;
+  iterations: 10;
+  runOnce: () => T;
+  compare: (result: T) => void;
+  now: () => number;
+}>;
+
 export type BenchmarkReport = Readonly<{
   schemaVersion: "d2f-rollout-benchmark-report-v1";
   fixtureId: "d2f-public-rollout-calibration-v1";
@@ -39,7 +63,7 @@ export type BenchmarkReport = Readonly<{
   measuredIterations: 10;
   correctness: "passed";
   metrics: BenchmarkMetrics & { sampleCount: 10 };
-  threshold: Readonly<{ kind: "hang-ceiling"; maximumSingleIterationMs: 60000; passed: true }>;
+  threshold: Readonly<{ kind: "completed-run-duration-ceiling"; maximumSingleIterationMs: 60000; passed: true }>;
   verdict: "PASS";
 }>;
 
@@ -73,8 +97,42 @@ export function calculateBenchmarkMetrics(samples: readonly number[]): Benchmark
   return { sampleCount: samples.length, minMs: sorted[0]!, maxMs: sorted[sorted.length - 1]!, meanMs, medianMs, p95Ms, throughputPerSecond };
 }
 
-export function exceedsHangCeiling(durationMs: number): boolean {
+export function isCompletedRunDurationOverCeiling(durationMs: number): boolean {
   return durationMs > HANG_CEILING_MS;
+}
+
+export function evaluateCompletedRunDuration(durationMs: number): void {
+  if (!Number.isFinite(durationMs) || durationMs < 0) throw new BenchmarkFailure(3, "invalid benchmark duration");
+  if (isCompletedRunDurationOverCeiling(durationMs)) throw new BenchmarkFailure(4, "completed-run duration ceiling exceeded");
+}
+
+export function executeBenchmarkRuns<T>(options: BenchmarkExecutionOptions<T>): BenchmarkExecution {
+  const runs: BenchmarkRunRecord[] = [];
+  const samples: number[] = [];
+  let correctnessComparisons = 0;
+
+  const executeOne = (phase: BenchmarkRunPhase, includedInSamples: boolean): void => {
+    const start = options.now();
+    const result = options.runOnce();
+    const durationMs = options.now() - start;
+    evaluateCompletedRunDuration(durationMs);
+    options.compare(result);
+    correctnessComparisons += 1;
+    runs.push({ phase, durationMs, includedInSamples });
+    if (includedInSamples) samples.push(durationMs);
+  };
+
+  executeOne("correctness", false);
+  for (let index = 0; index < options.warmup; index += 1) executeOne("warmup", false);
+  for (let index = 0; index < options.iterations; index += 1) executeOne("measured", true);
+
+  return {
+    runs,
+    correctnessComparisons,
+    warmupIterations: runs.filter((run) => run.phase === "warmup").length,
+    measuredIterations: runs.filter((run) => run.phase === "measured").length,
+    samples,
+  };
 }
 
 export function parseBenchmarkArguments(argv: readonly string[]): CliOptions {
@@ -118,29 +176,39 @@ function main(argv: readonly string[]): void {
   const request = buildRequest(fixture);
   const requestBefore = requestSnapshot(request);
 
-  runAndCheck(request, fixture, fixtureBefore, requestBefore);
-  for (let index = 0; index < options.warmup; index += 1) runAndCheck(request, fixture, fixtureBefore, requestBefore);
+  let execution: BenchmarkExecution;
+  try {
+    execution = executeBenchmarkRuns({
+      warmup: options.warmup,
+      iterations: options.iterations,
+      runOnce: () => {
+        try {
+          return runDetachedRollout(request);
+        } catch {
+          throw new BenchmarkFailure(3, "benchmark execution failed");
+        }
+      },
+      compare: (result) => {
+        checkResult(result, fixture.expected);
+        checkUnchanged(fixture, fixtureBefore, request, requestBefore);
+      },
+      now: () => performance.now(),
+    });
+  } catch (error) {
+    if (error instanceof BenchmarkFailure) throw error;
+    throw new BenchmarkFailure(3, "benchmark execution failed");
+  }
 
-  const samples: number[] = [];
-  for (let index = 0; index < options.iterations; index += 1) {
-    const start = performance.now();
-    let result: RolloutExecutionResult;
-    try {
-      result = runDetachedRollout(request);
-    } catch {
-      throw new BenchmarkFailure(3, "benchmark execution failed");
-    }
-    const durationMs = performance.now() - start;
-    if (!Number.isFinite(durationMs) || durationMs < 0) throw new BenchmarkFailure(3, "invalid benchmark duration");
-    if (exceedsHangCeiling(durationMs)) throw new BenchmarkFailure(4, "hang ceiling exceeded");
-    checkResult(result, fixture.expected);
-    checkUnchanged(fixture, fixtureBefore, request, requestBefore);
-    samples.push(durationMs);
+  if (execution.correctnessComparisons !== execution.runs.length
+    || execution.warmupIterations !== options.warmup
+    || execution.measuredIterations !== options.iterations
+    || execution.samples.length !== options.iterations) {
+    throw new BenchmarkFailure(3, "incomplete benchmark execution");
   }
 
   let metrics: BenchmarkMetrics;
   try {
-    metrics = calculateBenchmarkMetrics(samples);
+    metrics = calculateBenchmarkMetrics(execution.samples);
   } catch {
     throw new BenchmarkFailure(3, "invalid benchmark metrics");
   }
@@ -155,11 +223,11 @@ function main(argv: readonly string[]): void {
     platform: process.platform,
     architecture: process.arch,
     evidenceLevel: process.version === "v22.22.2" ? "NODE22_RELEASE_EVIDENCE" : "SUPPLEMENTAL_LOCAL_EVIDENCE",
-    warmupIterations: 3,
-    measuredIterations: 10,
+    warmupIterations: execution.warmupIterations as 3,
+    measuredIterations: execution.measuredIterations as 10,
     correctness: "passed",
     metrics: metrics as BenchmarkReport["metrics"],
-    threshold: { kind: "hang-ceiling", maximumSingleIterationMs: HANG_CEILING_MS, passed: true },
+    threshold: { kind: "completed-run-duration-ceiling", maximumSingleIterationMs: HANG_CEILING_MS, passed: true },
     verdict: "PASS",
   };
   process.stdout.write(`${JSON.stringify(report)}\n`);
@@ -339,21 +407,6 @@ function buildRequest(fixture: JsonRecord): RolloutRequest {
 
 function deriveParticleSeed(fixtureId: string): number {
   return createHash("sha256").update(`d2f-benchmark-particle-seed-v1\0${fixtureId}`, "utf8").digest().readUInt32BE(0);
-}
-
-function runAndCheck(request: RolloutRequest, fixture: JsonRecord, fixtureBefore: string, requestBefore: unknown): void {
-  let result: RolloutExecutionResult;
-  try {
-    result = runDetachedRollout(request);
-  } catch {
-    throw new BenchmarkFailure(2, "rollout correctness failed");
-  }
-  if (!result.ok) {
-    if (result.failure.kind === "invalid-request") throw new BenchmarkFailure(3, "request validation failed");
-    throw new BenchmarkFailure(2, "rollout correctness failed");
-  }
-  checkResult(result, fixture.expected);
-  checkUnchanged(fixture, fixtureBefore, request, requestBefore);
 }
 
 function checkResult(result: RolloutExecutionResult, expected: JsonRecord): void {
