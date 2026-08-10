@@ -433,8 +433,10 @@ or runtime-generated expected oracle is accepted.
 
 ### Correctness oracle
 
-Before timing, the runner executes one untimed correctness run. Every warm-up and measured
-run is also checked after runDetachedRollout returns. A run is correct only when all of the
+Before timing, the runner executes one correctness run. The runner records an internal
+elapsed duration around every completed synchronous invocation only for the completed-run
+duration ceiling; correctness and warm-up durations never enter formal metrics. Every
+correctness, warm-up, and measured run is checked after runDetachedRollout returns. A run is correct only when all of the
 following hold:
 
 ~~~text
@@ -479,9 +481,11 @@ The timed object is exactly one complete runDetachedRollout(benchmarkRequestInpu
 The timed interval includes request validation, scenario source, canonical schedule, kernel,
 evidence validation, aggregation, ranking, and result assembly.
 
-The timed interval excludes Node/module startup, fixture file reading, JSON parsing, fixture
-schema validation, ParticleBank build and registration, correctness comparison, console/JSON
-output, and warm-up.
+The formal measured interval excludes Node/module startup, fixture file reading, JSON parsing,
+fixture schema validation, ParticleBank build and registration, correctness comparison,
+console/JSON output, and correctness/warm-up runs. Correctness and warm-up elapsed durations
+may be observed internally for the completed-run duration ceiling but are not samples,
+metrics, or report values.
 
 The runner uses a monotonic high-resolution clock such as performance.now(). A timing API is
 present only in the benchmark script and never enters production rollout code. Warm-up samples
@@ -529,12 +533,18 @@ warm-up count is exactly 3
 measured count is exactly 10
 sampleCount is exactly 10
 all durations and statistics are finite and non-negative
+no completed correctness, warm-up, or measured run has duration greater than 60000 ms
 no crash and no unhandled rejection
-no single run exceeds 60000 ms
 runner exit code is 0
 ~~~
 
-60000 ms is only a hang ceiling and is not a product performance target.
+60000 ms is a completed-run duration ceiling, not a product performance target. The runner
+records duration around a completed synchronous runDetachedRollout invocation. If that
+invocation returns and durationMs is greater than 60000, the runner fails with exit code 4
+and emits no success report. A synchronous invocation that never returns is not converted to
+an internal runner exit code; the outer CI, Codex, or shell job timeout terminates it. The
+runner does not use worker threads, child processes, IPC, process termination, Promise.race,
+or another pseudo-interrupt mechanism.
 
 The release performance Gate accepts only Node 22.22.2 CI evidence from the fixed fixture,
 fixed runner, and fixed 3/10 rule. Before that evidence exists, the release state remains:
@@ -580,7 +590,7 @@ type D2fBenchmarkReport = Readonly<{
     throughputPerSecond: number;
   }>;
   threshold: Readonly<{
-    kind: "hang-ceiling";
+    kind: "completed-run-duration-ceiling";
     maximumSingleIterationMs: 60000;
     passed: true;
   }>;
@@ -600,13 +610,15 @@ cursor, or raw scenario data. The fixed exit codes are:
 1 = argument or fixture error
 2 = correctness failure
 3 = runtime or benchmark failure
-4 = hang ceiling exceeded
+4 = completed-run duration ceiling exceeded
 ~~~
 
 The runner returns exit code 1 for argument/schema/read/parse failures; exit code 2 for
 correctness oracle mismatch or rollout failure; exit code 3 for ParticleBank build failure,
 request construction failure, incomplete measured execution, invalid metrics, crash, or
-unhandled rejection; and exit code 4 when any single run exceeds 60000 ms.
+unhandled rejection; and exit code 4 when any completed correctness, warm-up, or measured
+run exceeds 60000 ms. A non-returning synchronous invocation remains an outer job-timeout
+case rather than an internal runner exit-code case.
 
 ### Focused contract test and RED/GREEN order
 
@@ -628,13 +640,15 @@ correctness oracle is checked
 warm-up count is exactly 3
 measured count is exactly 10
 warm-up samples are absent from sampleCount
+completed-run duration ceiling allows exactly 60000 ms and rejects 60000 ms plus epsilon
+completed-run duration ceiling failure exits with code 4 and emits no success report
 median and p95 match literal statistical oracles
 success JSON matches D2fBenchmarkReport
 Node evidenceLevel is correct
 invalid CLI argument exits non-zero
 malformed fixture exits non-zero
 correctness mismatch exits non-zero
-hang ceiling exits non-zero
+completed-run duration ceiling exits non-zero
 no skip, only, or test-placeholder modifier
 ~~~
 
@@ -672,7 +686,7 @@ The validation must prove that changed paths are exactly the three canonical doc
 Markdown fences are paired, no implementation placeholder token remains in the changed content, no
 production/test/package/config path changed, and all three documents have identical active
 Task 7 contract lines for allowlist, fixture schema, CLI, correctness oracle, timing,
-iterations, metrics, p95/median, 60000 ms ceiling, report, exit codes, evidence levels,
+iterations, metrics, p95/median, completed-run duration ceiling, report, exit codes, evidence levels,
 focused command, and Task 8 status.
 
 This docs-only turn does not run Vitest, the benchmark, tsc, or build. The deferred gates are:
