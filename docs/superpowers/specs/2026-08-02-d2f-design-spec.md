@@ -53,7 +53,8 @@ Task 7 production code is not started in this freeze. Task 8 is not started.
 The fixed Unix command is:
 
 ~~~text
-tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts \
+npm exec --offline -- tsx \
+  scripts/benchmarks/d2f-rollout-budget-calibration.ts \
   --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json \
   --warmup 3 \
   --iterations 10 \
@@ -63,14 +64,21 @@ tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts \
 The fixed Windows command is:
 
 ~~~powershell
-& .\node_modules\.bin\tsx.cmd scripts/benchmarks/d2f-rollout-budget-calibration.ts --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json --warmup 3 --iterations 10 --json
+npm exec --offline -- tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json --warmup 3 --iterations 10 --json
 ~~~
 
-The Windows command uses the repository-local locked tsx binary. The package declares
-tsx ^4.19.2 and the lockfile resolves the installed dependency version; the command must
-not resolve a package from the network. npx tsx, temporary downloads, global installs,
-plain npm exec, network fixtures, and unpinned external dependencies are forbidden.
+The command uses `npm exec --offline` to resolve only the repository-local locked tsx
+binary. The `--` passes the remaining arguments to local tsx; it does not require a shell
+PATH entry for `node_modules/.bin`, cannot download a missing package, and does not change
+package scripts. npx tsx, bare tsx, temporary downloads, global installs, plain npm exec,
+network fixtures, and unpinned external dependencies are forbidden.
 The package scripts are not changed.
+
+The required Task 7 code preflight is:
+
+~~~text
+npm exec --offline -- tsx --version
+~~~
 
 The accepted CLI is exactly:
 

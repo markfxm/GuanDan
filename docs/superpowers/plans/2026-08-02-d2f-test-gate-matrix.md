@@ -53,7 +53,8 @@ Task 7 production code is not started in this freeze. Task 8 is not started.
 The fixed Unix command is:
 
 ~~~text
-tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts \
+npm exec --offline -- tsx \
+  scripts/benchmarks/d2f-rollout-budget-calibration.ts \
   --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json \
   --warmup 3 \
   --iterations 10 \
@@ -63,14 +64,21 @@ tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts \
 The fixed Windows command is:
 
 ~~~powershell
-& .\node_modules\.bin\tsx.cmd scripts/benchmarks/d2f-rollout-budget-calibration.ts --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json --warmup 3 --iterations 10 --json
+npm exec --offline -- tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json --warmup 3 --iterations 10 --json
 ~~~
 
-The Windows command uses the repository-local locked tsx binary. The package declares
-tsx ^4.19.2 and the lockfile resolves the installed dependency version; the command must
-not resolve a package from the network. npx tsx, temporary downloads, global installs,
-plain npm exec, network fixtures, and unpinned external dependencies are forbidden.
+The command uses `npm exec --offline` to resolve only the repository-local locked tsx
+binary. The `--` passes the remaining arguments to local tsx; it does not require a shell
+PATH entry for `node_modules/.bin`, cannot download a missing package, and does not change
+package scripts. npx tsx, bare tsx, temporary downloads, global installs, plain npm exec,
+network fixtures, and unpinned external dependencies are forbidden.
 The package scripts are not changed.
+
+The required Task 7 code preflight is:
+
+~~~text
+npm exec --offline -- tsx --version
+~~~
 
 The accepted CLI is exactly:
 
@@ -740,10 +748,9 @@ D2F 新测试加入后，最终报告必须记录新的 tracked manifest、每�
 （`.github/workflows/d2a1-verification.yml`）运行，Node 24 不能替代它。`AWAITING_NODE22_CI`
 不是 Task 1 blocker，但在获得 Node 22 证据前不得写 D2F SHADOW RELEASE READY。
 
-package/package-lock 已声明 `tsx ^4.19.2`，当前 worktree 没有 `node_modules/tsx` 或
-`node_modules/.bin/tsx.cmd`。`AWAITING_FIXED_BENCHMARK_RUNNER` 是 Task 7 preflight，
-不是 Task 1 blocker。恢复顺序固定为 `npm ci` -> `git diff --exit-code -- package.json package-lock.json`
--> 验证本地 `tsx.cmd`/`tsx` 存在 -> 用本地 binary 运行 `--version`，再执行 active block
+package/package-lock 已声明 `tsx ^4.19.2`。`AWAITING_FIXED_BENCHMARK_RUNNER` 是 Task 7
+preflight，不是 Task 1 blocker。恢复顺序固定为 `npm ci` -> `git diff --exit-code -- package.json package-lock.json`
+-> `npm ls tsx --depth=0` -> `npm exec --offline -- tsx --version`，再执行 active block
 中的唯一固定 benchmark command；不得使用网络解析、全局安装、临时下载或另一套 runner，
 runner 缺失时不得跳过 RED，也不得把 benchmark timing 混入普通 correctness regression。
 

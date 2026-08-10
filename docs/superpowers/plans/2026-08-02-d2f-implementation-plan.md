@@ -53,7 +53,8 @@ Task 7 production code is not started in this freeze. Task 8 is not started.
 The fixed Unix command is:
 
 ~~~text
-tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts \
+npm exec --offline -- tsx \
+  scripts/benchmarks/d2f-rollout-budget-calibration.ts \
   --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json \
   --warmup 3 \
   --iterations 10 \
@@ -63,14 +64,21 @@ tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts \
 The fixed Windows command is:
 
 ~~~powershell
-& .\node_modules\.bin\tsx.cmd scripts/benchmarks/d2f-rollout-budget-calibration.ts --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json --warmup 3 --iterations 10 --json
+npm exec --offline -- tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json --warmup 3 --iterations 10 --json
 ~~~
 
-The Windows command uses the repository-local locked tsx binary. The package declares
-tsx ^4.19.2 and the lockfile resolves the installed dependency version; the command must
-not resolve a package from the network. npx tsx, temporary downloads, global installs,
-plain npm exec, network fixtures, and unpinned external dependencies are forbidden.
+The command uses `npm exec --offline` to resolve only the repository-local locked tsx
+binary. The `--` passes the remaining arguments to local tsx; it does not require a shell
+PATH entry for `node_modules/.bin`, cannot download a missing package, and does not change
+package scripts. npx tsx, bare tsx, temporary downloads, global installs, plain npm exec,
+network fixtures, and unpinned external dependencies are forbidden.
 The package scripts are not changed.
+
+The required Task 7 code preflight is:
+
+~~~text
+npm exec --offline -- tsx --version
+~~~
 
 The accepted CLI is exactly:
 
@@ -2123,7 +2131,7 @@ Task 9 不添加功能。允许修改仅限于实现后必要的 verification re
 - [ ] 将历史 `23 files / 222 tests` 明确记录为 historical handoff only；当前 checkout 没有可独立核验的 exact 23-path manifest，不得把它作为当前 Gate，也不得用未命名的 19-file list 代替。
 - [ ] 冻结并验证 `D2_CURRENT_REGRESSION_MANIFEST`：按 Test Gate Matrix 列出的 19 个 exact tracked paths（D2a/D2b public ledger/replay、D2c plan policy、D2d reducer、D2e representative Shadow）；验证每条路径存在、tracked、唯一且无 `.worktrees/**`，Task 9 以该 manifest 实际 collection/test count 为准。
 - [ ] 使用 Test Gate Matrix 的 `git ls-files` + PowerShell 显式过滤规则生成 `FULL_PERMITTED_REGRESSION_MANIFEST`；规则必须验证 inclusion/exclusion、唯一性、路径存在/tracked、无遗漏、每个文件恰好进入一个按实测耗时分片，并按 shard 分别运行，不能依赖多次 `--exclude` 累加语义。
-- [ ] benchmark timing 与 correctness 分离；Task 7 仅在 `npm ci`、package/lockfile unchanged、本地固定 `tsx.cmd`/`tsx --version` preflight 后运行。benchmark runner 缺失保持 `AWAITING_FIXED_BENCHMARK_RUNNER`，不是 Task 1 blocker。
+- [ ] benchmark timing 与 correctness 分离；Task 7 仅在 `npm ci`、package/lockfile unchanged、`npm ls tsx --depth=0` 与 `npm exec --offline -- tsx --version` preflight 后运行。benchmark runner 缺失保持 `AWAITING_FIXED_BENCHMARK_RUNNER`，不是 Task 1 blocker。
 - [ ] 在 Node 22.22.2 已存在环境或经授权 CI workflow 运行 `tsc --noEmit`、build、D2F focused、`D2_CURRENT_REGRESSION_MANIFEST`、full permitted shards 和 benchmark；Node 24.15.0 只能 supplemental。未取得 Node 22 证据时最终状态必须为 `AWAITING_NODE22_CI`，不得称为 D2F SHADOW RELEASE READY。
 - [ ] 运行 privacy AST/import scan、candidateId random scan、ESS/risk/sort scan、shadow call-site scan、failure atomicity and immutability checks。
 - [ ] 生成最终阶段报告：start/end HEAD、branch/worktree、changed paths、全部命令/结果/耗时、test counts、privacy/determinism/immutability/fallback/performance、正式决策路径是否修改、遗留风险和下一步精确前置条件。
