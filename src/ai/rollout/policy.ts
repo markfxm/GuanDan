@@ -190,13 +190,14 @@ function isObservationSemantics(
       }
     }
     if (!isValidPublicEvent(event)) return malformedObservationFailure();
-    if (eventRecord.kind !== "play") continue;
+    if (eventRecord.kind !== "play" && eventRecord.kind !== "tribute" && eventRecord.kind !== "return") continue;
     const publicCardIds = eventRecord.publicCardIds;
     if (!Array.isArray(publicCardIds)) return malformedObservationFailure();
     const eventIds = publicCardIds as readonly string[];
     if (eventIds.some((id) => !CANONICAL_CARD_IDS.has(id))) {
       return { kind: "invalid-policy-context", field: "publicHistoryEvents[].publicCardIds", reason: "foreign-card-id" };
     }
+    if (eventRecord.kind !== "play") continue;
     if (new Set(eventIds).size !== eventIds.length) {
       return { kind: "invalid-policy-context", field: "publicHistoryEvents[].publicCardIds", reason: "duplicate-card-id" };
     }
