@@ -1,11 +1,11 @@
 # D2F CRN Rollout / Team Utility Design Specification
 
 状态：
-TASK 4 FINAL ACCEPTANCE REMEDIATION DESIGN FROZEN
-TASK 4 CODE REMEDIATION PENDING
+TASK 4 PRAGMATIC CLOSURE STANDARD FROZEN
+TASK 4 TRANSFER MEMBERSHIP REMEDIATION PENDING
 TASK 5 NOT STARTED
 
-Task 1–3 的历史状态和已完成契约仍保留在下文；本状态块表示本轮 review-remediation freeze 的当前结论。
+Task 1–3 的历史状态和已完成契约仍保留在下文；本状态块及文末 pragmatic closure block 表示当前审查严重度和本轮实现边界。
 
 ## Task 1 Independent Review Findings — formal adjudication
 
@@ -2186,3 +2186,44 @@ Task 5 is not started. This freeze does not claim D2F Shadow release readiness.
 D2F_TASK4_FINAL_BOUNDARY_BLOCK_END
 Canonical block raw payload bytes: 13986
 Canonical block raw SHA-256: 0220ec7d6076e5f6a51d9dc5789957ce820fd38492052719e237429f95e5aa96
+
+D2F_TASK4_PRAGMATIC_CLOSURE_BLOCK_BEGIN
+# D2F_TASK4_PRAGMATIC_CLOSURE_STANDARD
+
+本块是当前 Task 4 的唯一严重度和实现边界 source of truth，覆盖此前文档中针对极端 hostile input、精细 diagnostic field 和 canonical SHA literal 的更高审查要求；历史文字保留用于审计，不再作为本轮阻塞标准。
+
+## Verdict
+
+TASK 4 PRAGMATIC REVIEW STANDARD FROZEN
+TASK 4 TRANSFER MEMBERSHIP REMEDIATION PENDING
+TASK 5 NOT STARTED
+
+## General game-AI blocking standard
+
+只有以下问题可以阻塞 Task 4：合法正常牌局运行错误或崩溃；合法多牌动作、pass、trick 或终局规则错误；108 张物理牌守恒被破坏；rollout 修改正式 Room 或 caller state；policy 看到对手隐藏手牌；raw scenario、完整 hidden hands、assignment 或 weight detail 泄漏；candidate identity 进入 CRN；相同合法输入不能确定性复现；真实 `ParticleBank → scenario source → kernel` 链路失败；TypeScript、build、核心 focused 或回归测试失败；Task 5–9 越界实现；正式动作路径被修改。
+
+## Frozen classification of prior findings
+
+- Nested replay descriptor validation — **NON-BLOCKING HARDENING**. 正常 production source 产生普通冻结数据对象；除非能证明真实 source 产生的合法对象失败、泄漏或污染状态，本轮不修改 kernel/contracts，也不以恶意 getter、accessor、symbol 或 custom prototype 阻塞 Task 4。
+- Transfer canonical card membership — **NORMAL DATA-INTEGRITY FIX — IMPLEMENT**. tribute/return 的真实 physical card ID 必须属于 `Set(createDeck().map(card => card.id))`；transfer 不计入 played-card set，不套用 play-only acting-hand overlap 规则，合法 transfer 链必须保持可用。
+- `currentLastPlay` failure-field precision — **MINOR DIAGNOSTIC DEBT**. 错误输入仍须被拒绝、无 partial result、无隐藏牌泄漏且不影响合法牌局；映射到 `publicState.gameRank` 不再阻塞本轮，不重构 kernel 只为细化字段。
+- Document SHA — **DOCUMENT CONSISTENCY CHECK ONLY**. 三份 canonical block 必须一致、marker 唯一、Markdown 结构合法；具体 SHA literal 不是 production 或 Task 4 acceptance blocker。
+- Allowlist — allowlist 是允许修改的最大集合，不要求其中每个文件都发生变化。
+
+## Transfer remediation boundary
+
+本轮优先只允许修改 `src/ai/rollout/policy.ts` 和 `tests/ai/rollout/policy.test.ts`；只有 TypeScript 真实类型要求时才允许最小修改 `src/ai/rollout/contracts.ts`。除非发现正常合法 production 路径的实际功能错误，不修改 kernel、Room、decision engine、planning、ParticleBank internals、formal action path、package/lock/config 或 Task 5–9 文件。
+
+RED/GREEN 必须使用真实 policy 入口和真实 public-event finalization/hash 流程覆盖：hash-valid foreign tribute、hash-valid foreign return、合法 canonical tribute/return、transfer 不进入 played-card duplicate accounting，以及接收者 hand 含 canonical transfer card 时不触发 acting-hand overlap。修复必须使用 canonical deck membership，保持 typed/no-throw/no-partial failure，不回显 foreign card ID，并在拒绝前不进入 CRN/policy downstream work。
+
+## Required verification
+
+先运行 `npx vitest run tests/ai/rollout/policy.test.ts --exclude "**/.worktrees/**" --reporter=verbose` 完成 RED/GREEN；随后运行 policy、kernel、privacy focused tests，Task 4 focused combined，Task 1–3 regression，Particle regression，冻结的 19-file/4-shard D2 gate，`npx tsc --noEmit`，`npm run build` 和 `git diff --check`。D2 gate 的最终计数必须为 `missing=0`, `duplicate=0`, `overlap=0`, `extra=0`, `failed=0`, `skipped=0`；Room shard 单独运行，不修改 timeout。已知旧默认并行 Room resource contention 不作为代码失败，最终以显式 shards 为准。
+
+独立 reviewer 只检查正常合法牌局功能、game-rule/terminal/transition correctness、108-card conservation、seat-local privacy、CRN independence/determinism、state isolation、source-to-kernel integration、regression、tsc 和 build。hostile graph、diagnostic precision、SHA literal、未变化的 allowlist 文件和不可达分支只能记为 Minor/deferred hardening；新的 Important 必须能用正常 production 数据复现并说明真实影响、入口和现有测试为何未捕获。
+
+## Documentation gate and commit
+
+Phase 0 只修改本三份文档；检查 `git diff --check`、clean production/tests diff、三文档规则一致、无实现占位词、Markdown fences 成对且新 marker 唯一。文档 commit message 为 `docs(ai): adopt pragmatic D2F review standard`。代码通过全部必需验证后，代码 commit message 为 `fix(ai): validate D2F transfer card identities`。deferred gates 保留 `AWAITING_FIXED_BENCHMARK_RUNNER`、`AWAITING_NODE22_CI` 和 `Task 9 full permitted regression`；不得宣称 D2F Shadow release ready。
+
+D2F_TASK4_PRAGMATIC_CLOSURE_BLOCK_END
