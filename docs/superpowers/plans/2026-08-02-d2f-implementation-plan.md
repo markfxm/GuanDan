@@ -1,5 +1,689 @@
 # D2F CRN Rollout Implementation Plan
 
+## D2F Task 7 benchmark interface and threshold freeze (active)
+
+# D2F_TASK7_BENCHMARK_INTERFACE_THRESHOLD_FREEZE_REPORT
+
+This active block is the sole Task 7 source of truth in all three canonical D2F documents.
+Task 7 code is pending. Task 8 has not started. This block freezes a reproducible benchmark
+runner and evidence contract; it does not freeze a product performance SLA on Node 24.
+
+### Scene lock and scope
+
+The verified source worktree is:
+
+~~~text
+E:/workspace/掼蛋游戏开发/.worktrees/d2f-crn-rollout-source
+~~~
+
+The verified branch and HEAD are:
+
+~~~text
+codex/d2f-crn-rollout-source
+fc63d646cb9926b00745e453d9426397fed92319
+feat(ai): add detached D2F rollout orchestration
+~~~
+
+This docs-only correction modifies only the three canonical documents. The next Task 7
+implementation turn may modify exactly:
+
+~~~text
+scripts/benchmarks/d2f-rollout-budget-calibration.ts
+tests/fixtures/ai/d2f-public-rollout-fixture.json
+tests/ai/rollout/d2fBenchmarkContract.test.ts
+~~~
+
+The fixture path is part of the allowlist. The next Task 7 turn must not modify:
+
+~~~text
+package.json
+package-lock.json
+vitest.config.*
+tsconfig*
+src/game/room.ts
+formal AI decision paths
+Task 1-6 production files
+Task 8 files
+~~~
+
+Task 7 production code is not started in this freeze. Task 8 is not started.
+
+### Fixed runner command and CLI
+
+The fixed Unix command is:
+
+~~~text
+tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts \
+  --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json \
+  --warmup 3 \
+  --iterations 10 \
+  --json
+~~~
+
+The fixed Windows command is:
+
+~~~powershell
+& .\node_modules\.bin\tsx.cmd scripts/benchmarks/d2f-rollout-budget-calibration.ts --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json --warmup 3 --iterations 10 --json
+~~~
+
+The Windows command uses the repository-local locked tsx binary. The package declares
+tsx ^4.19.2 and the lockfile resolves the installed dependency version; the command must
+not resolve a package from the network. npx tsx, temporary downloads, global installs,
+plain npm exec, network fixtures, and unpinned external dependencies are forbidden.
+The package scripts are not changed.
+
+The accepted CLI is exactly:
+
+~~~text
+--fixture <path>       required
+--warmup <integer>     required and equal to 3
+--iterations <integer> required and equal to 10
+--json                 required
+~~~
+
+The runner rejects missing, duplicated, unknown, non-integer, non-positive, or mismatched
+arguments. It accepts no callback, caller-provided function, dynamic registry, network
+address, seed override, or random iteration count.
+
+### Real builder-to-orchestrator data flow
+
+The fixture is JSON. JSON never contains a ParticleBank handle, WeakMap key, private record,
+ParticleScenario, raw private hand, hiddenTransferAssignments, normalized weight, particleSeed,
+random tape, cursor, or wall-clock expected value.
+
+After parsing and validating the fixture, the runner performs this exact flow:
+
+~~~text
+read JSON
+→ validate D2fBenchmarkFixture
+→ derive the internal particle seed from fixtureId
+→ call the real buildParticleBank with replay data and particleBank config
+→ retain the returned registered ParticleBank handle in memory
+→ construct the real RolloutScenarioSourceInput from replay data and that handle
+→ derive rootIdentity with canonicalReplayContextIdentity
+→ construct an immutable real rollout request
+→ run one untimed correctness invocation
+→ run three untimed warm-up invocations
+→ run ten measured runDetachedRollout invocations
+→ compare every result with the literal expected oracle
+→ compute statistics from the ten measured durations
+→ emit one success report
+~~~
+
+The runner passes replay.perspectiveSeat as the builder actingSeat because that is the
+real ParticleBankBuildInput contract. The publicState.actingSeat remains the current
+rollout actor in the constructed RolloutScenarioSourceInput.
+
+The internal seed derivation is fixed and is not an input surface:
+
+~~~text
+particleSeed =
+  first four bytes, interpreted as an unsigned big-endian uint32, of
+  SHA-256(UTF-8("d2f-benchmark-particle-seed-v1\0" + fixtureId))
+~~~
+
+The derived seed is used only as buildParticleBank input. It is never printed, serialized,
+or accepted from the CLI.
+
+The request constructed by the runner has:
+
+~~~text
+schemaVersion = "d2f-rollout-request-v2"
+mode = "detached"
+formalExecutionAllowed = false
+policyId = fixture.request.policyId
+scenarioSourceInput = replay fields plus the registered ParticleBank
+rootIdentity = canonicalReplayContextIdentity(replay context plus bank.snapshot)
+candidates = fixture.request.candidates
+budget = fixture.request.budget
+limits = budget copied field-for-field as the matching maximum limits
+evidenceRequirements = fixture.request.evidenceRequirements
+riskPolicy = fixture.request.aggregationPolicy
+~~~
+
+The runner calls buildParticleBank and runDetachedRollout; it does not call
+createParticleBankHandle, readParticleBankInternals, or a private registry directly.
+
+### Exact JSON fixture schema
+
+The following TypeScript notation describes the exact JSON fields. The named unions are
+the current source types in src/engine/cards.ts, src/engine/groups.ts,
+src/game/publicEvent.ts, src/game/publicLedger.ts, src/ai/particles/contracts.ts,
+and src/ai/rollout/contracts.ts. No field outside these definitions is accepted.
+
+~~~ts
+type D2fBenchmarkCardFixture =
+  | Readonly<{
+      id: string;
+      kind: "suited";
+      rank: "A" | "K" | "Q" | "J" | "10" | "9" | "8" | "7" | "6" | "5" | "4" | "3" | "2";
+      suit: "spades" | "clubs" | "hearts" | "diamonds";
+      copy: 1 | 2;
+    }>
+  | Readonly<{
+      id: string;
+      kind: "joker";
+      rank: "SJ" | "BJ";
+      copy: 1 | 2;
+    }>;
+
+type D2fBenchmarkGroupFixture = Readonly<{
+  id: string;
+  type: "single" | "pair" | "triple" | "full-house" | "straight" | "consecutive-pairs" | "plate" | "bomb" | "straight-flush" | "joker-bomb";
+  label: string;
+  purpose: "attack" | "engine" | "recovery" | "tail-control" | "risk" | "filler";
+  cards: readonly D2fBenchmarkCardFixture[];
+  wildcards: readonly D2fBenchmarkCardFixture[];
+  strength: number;
+}>;
+
+type D2fBenchmarkActionFixture =
+  | Readonly<{ type: "pass" }>
+  | Readonly<{ type: "play"; group: D2fBenchmarkGroupFixture }>;
+
+type D2fBenchmarkEventCommon = Readonly<{
+  schemaVersion: "d2-public-event-v2";
+  gameId: string;
+  roundIdentity: string;
+  handIdentity: string;
+  eventIndex: number;
+  seat: 0 | 1 | 2 | 3;
+  trickIndex: number;
+  leadSeat?: 0 | 1 | 2 | 3;
+  lastPlaySeat?: 0 | 1 | 2 | 3;
+  publicPayloadHash: string;
+}>;
+
+type D2fBenchmarkPublicEventFixture =
+  | (D2fBenchmarkEventCommon & Readonly<{
+      kind: "play";
+      publicStableKey: string;
+      publicCardIds: readonly string[];
+      patternType: string;
+      groupType: string;
+      handCountBefore: number;
+      handCountAfter: number;
+      usedWildcardCount?: number;
+      usedBomb?: boolean;
+    }>)
+  | (D2fBenchmarkEventCommon & Readonly<{
+      kind: "pass";
+      publicStableKey: "pass:v2";
+      handCountBefore: number;
+      handCountAfter: number;
+    }>)
+  | (D2fBenchmarkEventCommon & Readonly<{
+      kind: "trick-clear";
+      publicStableKey: string;
+      leadSeat: 0 | 1 | 2 | 3;
+    }>)
+  | (D2fBenchmarkEventCommon & Readonly<{
+      kind: "finish";
+      publicStableKey: string;
+      finishPosition: number;
+      remainingHandCount: number;
+      finishReason: "hand-empty" | "round-settlement";
+    }>)
+  | (D2fBenchmarkEventCommon & Readonly<{
+      kind: "tribute" | "return";
+      publicStableKey: string;
+      publicCardIds: readonly [string] | readonly [];
+      fromSeat: 0 | 1 | 2 | 3;
+      toSeat: 0 | 1 | 2 | 3;
+      handCountChanges: Readonly<Record<"0" | "1" | "2" | "3", number>>;
+    }>)
+  | (D2fBenchmarkEventCommon & Readonly<{
+      kind: "anti-tribute";
+      publicStableKey: string;
+      reasonCode: "anti-tribute";
+    }>);
+
+type D2fBenchmarkLedgerFixture = Readonly<{
+  schemaVersion: "d2-public-ledger-v1";
+  gameId: string;
+  roundIdentity: string;
+  handIdentity: string;
+  nextEventIndex: number;
+  lastAppliedEventIndex: number;
+  seenEventHashes: Readonly<Record<string, string>>;
+  playedCardIds: readonly string[];
+  revealedTransferEvents: readonly Readonly<{
+    eventIndex: number;
+    kind: "tribute" | "return";
+    cardId?: string;
+    fromSeat: 0 | 1 | 2 | 3;
+    toSeat: 0 | 1 | 2 | 3;
+  }>[];
+  handCounts: Readonly<Record<"0" | "1" | "2" | "3", number>>;
+  currentTrick: Readonly<{
+    trickIndex: number;
+    leadSeat: 0 | 1 | 2 | 3;
+    lastPlaySeat?: 0 | 1 | 2 | 3;
+    lastPlayStableKey?: string;
+    passSeats: readonly (0 | 1 | 2 | 3)[];
+  }>;
+  finishOrder: readonly (0 | 1 | 2 | 3)[];
+  publicTributeEvents: readonly string[];
+  recentActionSummaries: readonly Readonly<Record<string, string | number | boolean>>[];
+}>;
+
+type D2fBenchmarkPublicStateFixture = Readonly<{
+  gameRank: "A" | "K" | "Q" | "J" | "10" | "9" | "8" | "7" | "6" | "5" | "4" | "3" | "2";
+  actingSeat: 0 | 1 | 2 | 3;
+  perspectiveSeat: 0 | 1 | 2 | 3;
+  partnerSeat: 0 | 1 | 2 | 3;
+  handCounts: Readonly<Record<"0" | "1" | "2" | "3", number>>;
+  finishOrder: readonly (0 | 1 | 2 | 3)[];
+  publicPlayedCardIds: readonly string[];
+  currentLastPlay: D2fBenchmarkGroupFixture | null;
+  currentLastPlaySeat: 0 | 1 | 2 | 3 | null;
+}>;
+
+type D2fBenchmarkFixture = Readonly<{
+  schemaVersion: "d2f-rollout-benchmark-fixture-v1";
+  fixtureId: "d2f-public-rollout-calibration-v1";
+  replay: Readonly<{
+    publicIdentity: Readonly<{
+      schemaVersion: "d2-public-game-identity-v1";
+      gameId: string;
+      roundIdentity: string;
+      handIdentity: string;
+      roundSequence: number;
+      handSequence: number;
+      source: "benchmark-scenario";
+    }>;
+    initialLedger: D2fBenchmarkLedgerFixture;
+    baseLedger: D2fBenchmarkLedgerFixture;
+    finalLedger: D2fBenchmarkLedgerFixture;
+    publicHistoryEvents: readonly D2fBenchmarkPublicEventFixture[];
+    pendingPublicEvents: readonly D2fBenchmarkPublicEventFixture[];
+    expectedFinalEventIndex: number;
+    expectedFinalPublicLedgerHash: string;
+    gameRank: "A" | "K" | "Q" | "J" | "10" | "9" | "8" | "7" | "6" | "5" | "4" | "3" | "2";
+    perspectiveSeat: 0 | 1 | 2 | 3;
+    ownCurrentHand: readonly D2fBenchmarkCardFixture[];
+    publicState: D2fBenchmarkPublicStateFixture;
+  }>;
+  particleBank: Readonly<{
+    schemaVersion: "d2-particle-bank-build-input-v1";
+    particleCount: number;
+    maxSamplingAttempts: number;
+    maxIndexDraws: number;
+    samplerConfigVersion: string;
+    likelihoodConfig: Readonly<{
+      schemaVersion: "d2-particle-likelihood-v1";
+      forcedPassLogFactor: number;
+      couldBeatButPassedLogFactor: number;
+      observedLeadPlayLogFactor: number;
+      observedFollowPlayLogFactor: number;
+      degradedEssThreshold: number;
+      normalizationTolerance: number;
+      essTolerance: number;
+    }>;
+  }>;
+  request: Readonly<{
+    policyId: "d2f-lightweight-v1";
+    candidates: readonly Readonly<{
+      candidateId: string;
+      action: D2fBenchmarkActionFixture;
+      baselineEvaluatorScore: number;
+    }>[];
+    budget: Readonly<{
+      replicateCountPerScenario: number;
+      maxPliesPerReplicate: number;
+      maxPolicyActionEvaluationsPerPly: number;
+      maxWorkUnits: number;
+    }>;
+    evidenceRequirements: Readonly<{
+      schemaVersion: "d2f-rollout-evidence-requirements-v1";
+      minimumEffectiveSampleSize: number;
+      minimumAcceptedScenarioCount: number;
+      minimumCompletedReplicateCount: number;
+      requireCompleteCoverage: true;
+    }>;
+    aggregationPolicy: Readonly<{
+      schemaVersion: "d2f-rollout-risk-policy-v1";
+      variancePenalty: number;
+      downsideRiskPenalty: number;
+    }>;
+  }>;
+  expected: Readonly<{
+    ranking: readonly string[];
+    candidateIds: readonly string[];
+    scenarioCount: number;
+    replicateCountPerScenario: number;
+    policyId: "d2f-lightweight-v1";
+    formalExecutionAllowed: false;
+    coverage: "complete";
+    result: Readonly<{
+      schemaVersion: "d2f-rollout-result-v2";
+      mode: "detached";
+      formalExecutionAllowed: false;
+      policyId: "d2f-lightweight-v1";
+      rootDigest: string;
+      candidateSummaries: readonly Readonly<{
+        candidateId: string;
+        riskAdjustedUtility: number;
+        expectedUtility: number;
+        variance: number;
+        risk: number;
+        baselineEvaluatorScore: number;
+        acceptedScenarioCount: number;
+        replicateCountPerScenario: number;
+        expectedReplicateCount: number;
+        completedReplicateCount: number;
+        workUnitCount: number;
+      }>[];
+      ranking: readonly string[];
+      aggregateDiagnostics: Readonly<{
+        effectiveSampleSize: number;
+        acceptedScenarioCount: number;
+        replicateCountPerScenario: number;
+        completedReplicateCount: number;
+        expectedCompletedReplicateCount: number;
+        candidateCount: number;
+        workUnitCount: number;
+        coverage: "complete";
+      }>;
+    }>;
+  }>;
+}>;
+~~~
+
+The fixture has only tracked, deterministic replay/context data. publicHistoryEvents,
+pendingPublicEvents, all three ledgers, ownCurrentHand, and publicState are serialized
+inputs validated by the existing contracts. ownCurrentHand is the perspective-visible hand
+required by the real builder; hidden scenario hands are not fixture data. particleBank is builder
+configuration, not a serialized ParticleBank. request.aggregationPolicy maps to the real
+request.riskPolicy field. The runner derives request.limits by copying request.budget.
+expected.result is a literal golden oracle authored with the fixture; no field is generated
+from the measured output at runtime.
+
+The runner must additionally enforce these schema relationships:
+
+~~~text
+publicIdentity roundIdentity = gameId + ":round:" + roundSequence
+publicIdentity handIdentity = roundIdentity + ":hand:" + handSequence
+all public event and ledger identities equal publicIdentity
+pendingPublicEvents are the builder input events and publicHistoryEvents are the source history
+expectedFinalEventIndex = finalLedger.lastAppliedEventIndex
+expectedFinalPublicLedgerHash = canonicalPublicLedgerHash(finalLedger)
+publicState fields match finalLedger and the real replay rules
+candidateId = canonicalActionIdentity(action)
+candidate IDs are unique and equal expected.candidateIds as a set
+expected.ranking is a permutation of expected.candidateIds
+expected.result.ranking = expected.ranking
+expected.result.policyId = expected.policyId
+expected.result.formalExecutionAllowed = false
+expected.result.aggregateDiagnostics.coverage = "complete"
+expected.scenarioCount = expected.result.aggregateDiagnostics.acceptedScenarioCount
+expected.replicateCountPerScenario = expected.result.aggregateDiagnostics.replicateCountPerScenario
+~~~
+
+No raw private hands, assignments, individual weights, seed, tape, cursor, wall-clock value,
+or runtime-generated expected oracle is accepted.
+
+### Correctness oracle
+
+Before timing, the runner executes one untimed correctness run. Every warm-up and measured
+run is also checked after runDetachedRollout returns. A run is correct only when all of the
+following hold:
+
+~~~text
+result.ok === true
+result.result.schemaVersion === "d2f-rollout-result-v2"
+result.result.mode === "detached"
+result.result.policyId === "d2f-lightweight-v1"
+result.result.formalExecutionAllowed === false
+result.result.aggregateDiagnostics.coverage === "complete"
+result.result.ranking equals fixture.expected.ranking in order
+result.result candidate ID set equals fixture.expected.candidateIds
+result.result.aggregateDiagnostics.acceptedScenarioCount === fixture.expected.scenarioCount
+result.result.aggregateDiagnostics.replicateCountPerScenario === fixture.expected.replicateCountPerScenario
+result.result.candidateSummaries.length === fixture.expected.candidateIds.length
+result.result.rootDigest and all result provenance fields equal fixture.expected.result
+result.result.candidateSummaries deep-equal fixture.expected.result.candidateSummaries
+result.result.ranking deep-equal fixture.expected.result.ranking
+result.result.aggregateDiagnostics deep-equal fixture.expected.result.aggregateDiagnostics
+fixture and constructed request remain deeply unchanged
+~~~
+
+Any rollout failure, oracle mismatch, mutation, missing candidate, incomplete coverage,
+non-finite result field, or unexpected result shape is a correctness failure. The runner emits
+no performance PASS, returns exit code 2, and does not add that run to measured samples.
+The correctness oracle is a literal fixture value and is never created from the current run.
+
+### Timing boundary and iteration order
+
+Before the first measured iteration, the runner completes:
+
+~~~text
+read fixture
+→ validate fixture schema and relationships
+→ derive internal seed
+→ build and register ParticleBank
+→ construct immutable benchmark request
+→ untimed correctness run
+→ warm-up 3
+~~~
+
+The timed object is exactly one complete runDetachedRollout(benchmarkRequestInput).
+The timed interval includes request validation, scenario source, canonical schedule, kernel,
+evidence validation, aggregation, ranking, and result assembly.
+
+The timed interval excludes Node/module startup, fixture file reading, JSON parsing, fixture
+schema validation, ParticleBank build and registration, correctness comparison, console/JSON
+output, and warm-up.
+
+The runner uses a monotonic high-resolution clock such as performance.now(). A timing API is
+present only in the benchmark script and never enters production rollout code. Warm-up samples
+are not measured samples. Each measured iteration must complete one full run and one correctness
+comparison before the next iteration begins.
+
+### Metrics and statistics
+
+Each measured iteration records one unrounded durationMs. Every duration must be finite and
+greater than or equal to zero. Exactly these values are emitted:
+
+~~~text
+sampleCount
+minMs
+maxMs
+meanMs
+medianMs
+p95Ms
+throughputPerSecond
+~~~
+
+The samples are sorted numerically in ascending order. No localeCompare is used for numbers.
+The exact formulas are:
+
+~~~text
+meanMs = sum(samples) / sampleCount
+medianMs for ten samples = (samples[4] + samples[5]) / 2
+p95 index = ceil(0.95 * sampleCount) - 1
+p95Ms = sortedSamples[p95 index]
+throughputPerSecond = 1000 / meanMs
+~~~
+
+The runner does not remove the slowest sample, trim outliers, or use warm-up samples. It does
+not round before a threshold decision. JSON display may preserve sufficient precision, but all
+threshold decisions use the original unrounded values. A zero mean that makes throughput
+non-finite is a benchmark failure.
+
+### Threshold strategy and evidence levels
+
+The functional benchmark Gate applies in every environment:
+
+~~~text
+correctness oracle passes for the initial run, all warm-ups, and all measured runs
+warm-up count is exactly 3
+measured count is exactly 10
+sampleCount is exactly 10
+all durations and statistics are finite and non-negative
+no crash and no unhandled rejection
+no single run exceeds 60000 ms
+runner exit code is 0
+~~~
+
+60000 ms is only a hang ceiling and is not a product performance target.
+
+The release performance Gate accepts only Node 22.22.2 CI evidence from the fixed fixture,
+fixed runner, and fixed 3/10 rule. Before that evidence exists, the release state remains:
+
+~~~text
+AWAITING_NODE22_CI
+~~~
+
+Node 24 local output is always marked:
+
+~~~text
+SUPPLEMENTAL_LOCAL_EVIDENCE
+~~~
+
+Node 24 median or p95 cannot close the Node 22 release Gate. The
+AWAITING_FIXED_BENCHMARK_RUNNER state closes when the runner, fixture, contract test, and
+functional Gate pass; it does not wait for Node 22. The final state must not be described as
+D2F Shadow release ready.
+
+### Stable success report and errors
+
+On success, stdout contains exactly one JSON object with this schema and no other text:
+
+~~~ts
+type D2fBenchmarkReport = Readonly<{
+  schemaVersion: "d2f-rollout-benchmark-report-v1";
+  fixtureId: "d2f-public-rollout-calibration-v1";
+  runner: "d2f-rollout-budget-calibration";
+  nodeVersion: string;
+  platform: string;
+  architecture: string;
+  evidenceLevel: "SUPPLEMENTAL_LOCAL_EVIDENCE" | "NODE22_RELEASE_EVIDENCE";
+  warmupIterations: 3;
+  measuredIterations: 10;
+  correctness: "passed";
+  metrics: Readonly<{
+    sampleCount: 10;
+    minMs: number;
+    maxMs: number;
+    meanMs: number;
+    medianMs: number;
+    p95Ms: number;
+    throughputPerSecond: number;
+  }>;
+  threshold: Readonly<{
+    kind: "hang-ceiling";
+    maximumSingleIterationMs: 60000;
+    passed: true;
+  }>;
+  verdict: "PASS";
+}>;
+~~~
+
+NODE22_RELEASE_EVIDENCE is accepted as formal release evidence only from the authorized
+Node 22.22.2 CI result. All other successful environments, including Node 24 local runs,
+remain supplemental evidence.
+
+Errors use stderr for a short non-private message. A failure never emits a successful report
+on stdout, and stderr never contains private state, hands, assignments, weights, seed, tape,
+cursor, or raw scenario data. The fixed exit codes are:
+
+~~~text
+1 = argument or fixture error
+2 = correctness failure
+3 = runtime or benchmark failure
+4 = hang ceiling exceeded
+~~~
+
+The runner returns exit code 1 for argument/schema/read/parse failures; exit code 2 for
+correctness oracle mismatch or rollout failure; exit code 3 for ParticleBank build failure,
+request construction failure, incomplete measured execution, invalid metrics, crash, or
+unhandled rejection; and exit code 4 when any single run exceeds 60000 ms.
+
+### Focused contract test and RED/GREEN order
+
+The exact focused command is:
+
+~~~bash
+npx vitest run tests/ai/rollout/d2fBenchmarkContract.test.ts \
+  --exclude "**/.worktrees/**" \
+  --reporter=verbose
+~~~
+
+The test must execute the real runner or its CLI entry and cover:
+
+~~~text
+fixture exists and schema is valid
+fixed runner command is executable
+one real success-path runner invocation
+correctness oracle is checked
+warm-up count is exactly 3
+measured count is exactly 10
+warm-up samples are absent from sampleCount
+median and p95 match literal statistical oracles
+success JSON matches D2fBenchmarkReport
+Node evidenceLevel is correct
+invalid CLI argument exits non-zero
+malformed fixture exits non-zero
+correctness mismatch exits non-zero
+hang ceiling exits non-zero
+no skip, only, or test-placeholder modifier
+~~~
+
+The contract test may call a pure statistics helper exported only from the benchmark script
+for median and p95 literal checks. It must still execute the real success path at least once.
+No public production barrel is added.
+
+The next implementation turn must obtain real RED for:
+
+~~~text
+fixture file absent
+runner file absent
+fixed CLI not executable
+success report schema absent
+correctness oracle not executed
+metric and threshold contract absent
+~~~
+
+These RED cases must fail on the named behavior at the real entry. They must not be created
+with a wrong import, wrong filename, temporary mock, wrong fixture, or missing dependency.
+The implementation then performs the minimum changes in the three-path allowlist and reruns
+the same focused command to GREEN. Task 8 remains not started.
+
+### Docs-only validation and deferred gates
+
+This freeze runs only:
+
+~~~text
+git diff --name-status
+git diff --check
+git status --short
+~~~
+
+The validation must prove that changed paths are exactly the three canonical documents,
+Markdown fences are paired, no implementation placeholder token remains in the changed content, no
+production/test/package/config path changed, and all three documents have identical active
+Task 7 contract lines for allowlist, fixture schema, CLI, correctness oracle, timing,
+iterations, metrics, p95/median, 60000 ms ceiling, report, exit codes, evidence levels,
+focused command, and Task 8 status.
+
+This docs-only turn does not run Vitest, the benchmark, tsc, or build. The deferred gates are:
+
+~~~text
+AWAITING_FIXED_BENCHMARK_RUNNER
+AWAITING_NODE22_CI
+Task 9 full permitted regression
+~~~
+
+The frozen status is:
+
+~~~text
+TASK 7 BENCHMARK INTERFACE/THRESHOLD FROZEN
+TASK 7 CODE PENDING
+TASK 8 NOT STARTED
+~~~
+
+No D2F Shadow release-ready claim is permitted.
 状态：
 TASK 4 PRAGMATIC CLOSURE STANDARD FROZEN
 TASK 4 TRANSFER MEMBERSHIP REMEDIATION PENDING
@@ -27,13 +711,20 @@ Task 1–3 的历史状态和已完成契约仍保留在下文；本状态块及
 
 每个 Task 独立执行以下循环：只读检查 -> 列出 allowlist/forbidden -> 写一个最小失败测试 -> 运行并记录正确失败 -> 最小实现 -> focused GREEN -> 相关回归 -> TypeScript/build/diff 检查 -> 隐私/确定性/不可变性/失败原子性审计 -> 单一 commit -> 阶段报告并停止等待人工审查。Task 1–8 的每个实现步骤都必须同时写明 exact file、exact interface/symbol、RED test、预期的缺失行为失败、最小实现、验证命令和 commit 边界；不能用模糊词替代这些字段。Task 9 是无实现的 verification-only 例外，必须写明其 manifest、命令、exit-code 证据和最终 release gate。
 
-Task 1–7 的 production/test 路径只能位于：
+Task 1–6 的 production/test 路径只能位于：
 
 ~~~text
 src/ai/particles/particleBankRolloutAccess.ts       # 仅 Task 1
 src/ai/rollout/**
 tests/ai/rollout/**
-scripts/benchmarks/d2f-rollout-budget-calibration.ts # 仅 Task 7
+~~~
+
+Task 7 的 exact code allowlist is:
+
+~~~text
+scripts/benchmarks/d2f-rollout-budget-calibration.ts
+tests/fixtures/ai/d2f-public-rollout-fixture.json
+tests/ai/rollout/d2fBenchmarkContract.test.ts
 ~~~
 
 Task 8 另有一个冻结的正式旁路例外：允许修改 src/game/room.ts 的 runAiStep 一个调用点；不得修改 src/ai/aiDecisionEngine.ts 或已有 src/ai/tactics/representativeActionShadowObserver.ts。Task 9 不新增行为，只做验证。
@@ -863,7 +1554,7 @@ Leaf failure 映射固定为：
   预期 `result.ok === true`、`result.predictedFinishOrder` 为 `[2, 1, 0, 3]`、`result.utility === 2`。
 - [ ] Leaf 合法状态必须覆盖：`finishOrder=[]` 且四个 hand count 均大于 0；长度为 1、2、3 且前缀内 seat count 为 0；所有未完成 seat count 均大于 0；`actingSeat` 未完成且 count 大于 0；已完成和未完成两种 `perspectiveSeat`；相同 hand count 按相对 `actingSeat` 距离排序；seat rotation 保持 utility 和相对排序。
 - [ ] Leaf 非法状态必须覆盖：已完成 seat count 大于 0、未完成 seat count 等于 0、`actingSeat` 已完成、`actingSeat` count 为 0、长度为 4、duplicate/unknown seat、unknown hand-count key、missing hand-count key，以及 negative/fractional/NaN/Infinity/unsafe integer/`-0`；每项断言上表中的精确 failure reason。
-- [ ] 不得把事件处理过程中的零手牌状态判为 success；旋转只作为成功路径的 metamorphic/property test，不作为 failure 分支。测试必须调用真实 production API，不得使用 mock、skip、only 或 todo。
+- [ ] 不得把事件处理过程中的零手牌状态判为 success；旋转只作为成功路径的 metamorphic/property test，不作为 failure 分支。测试必须调用真实 production API，不得使用 mock、skip、only 或 test-placeholder marker。
 - [ ] 最小实现只包含 parity team helper、finish validation、hand-count validation、relative-distance projection、对 `evaluateTeamUtility` 的一次调用；禁止经验系数和额外搭档奖励。
 - [ ] GREEN focused：两个 Task 2 test 文件全部通过；回归只执行 Task 1 contracts 相关测试，不能提前进入 Task 3。
 - [ ] 本轮文档冻结提交前不运行 Vitest、tsc、build 或 benchmark；production implementation 轮次才执行对应 GREEN/compile/build gates。
@@ -1213,7 +1904,7 @@ Boundary vectors must assert bytes, not hash uniqueness:
 - [ ] Cover paired events, candidate-free pairing, legal `unpaired:<event-kind>`, candidateId structural exclusion, no shared cursor/tape/seed, no throw/no partial/no secret diagnostics, TLV tuple boundaries and branded-key call sites.
 - [ ] Add Compiler API/symbol gate for the real candidate association symbols; text-only scans are insufficient.
 - [ ] Confirm no `Math.random`, wall clock, worker id, object address, Map insertion order, `localeCompare`, candidate order or candidateId enters CRN dependency graph.
-- [ ] Confirm focused command has no `skip`, `only` or `todo`; no production or tests are created in this docs-only freeze.
+- [ ] Confirm focused command has no `skip`, `only` or test-placeholder marker; no production or tests are created in this docs-only freeze.
 - [ ] Task 3 code implementation remains pending; Task 4–9 remain not started.
 
 ### Produces / consumes
@@ -1362,36 +2053,13 @@ Task 6 是 detached orchestration + failure atomicity；它不是 Shadow integra
 
 Produces the detached orchestrator and atomic RolloutResult/RolloutFailure boundary. Consumes only explicit request, immutable ParticleBank source and prior Task contracts. It produces no formal action and no Shadow telemetry.
 
-## 8. Task 7 — measured budget calibration benchmark
+## 8. Task 7 — benchmark interface and threshold freeze
 
-### Scope
-
-允许创建/修改：
-
-~~~text
-scripts/benchmarks/d2f-rollout-budget-calibration.ts
-tests/ai/rollout/d2fBenchmarkContract.test.ts
-~~~
-
-当前只读工具证据：package.json/package-lock.json 声明 tsx ^4.19.2（lockfile 当前解析版本为 4.22.4），但当前 node_modules/tsx 与 node_modules/.bin/tsx.cmd 不存在。不得用 `npx tsx`、plain `npm exec`、全局安装或临时网络下载。`AWAITING_FIXED_BENCHMARK_RUNNER` 是 Task 7 preflight 状态，不是 Task 1 blocker。恢复顺序冻结为：在 source worktree 准备或 Task 7 preflight 的 Node 22.22.2 环境运行 `npm ci`；随后运行 `git diff --exit-code -- package.json package-lock.json` 验证 lockfile/package 未变化；验证 `Test-Path .\node_modules\.bin\tsx.cmd`（Windows，或 Unix 本地 binary）为 true；运行 `& .\node_modules\.bin\tsx.cmd --version`，再用同一 local fixed binary 执行 benchmark。任一步失败都保持 AWAITING 状态，不能跳过 benchmark RED。
-
-### TDD actions
-
-- [ ] 只读确认 benchmark entry 不存在、tsx package/lock declaration 和当前 local module 状态；不安装依赖。
-- [ ] 先写 tests/ai/rollout/d2fBenchmarkContract.test.ts 的非计时契约测试：it("builds a ParticleBank from public tracked fixture data without serializing a handle")。
-- [ ] 命令级 RED 在 fixed local runner preflight 通过后使用 `& .\node_modules\.bin\tsx.cmd scripts/benchmarks/d2f-rollout-budget-calibration.ts --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json`（Unix 使用同一 local binary）；在 entry 尚不存在时预期为 entry/module not found。runner 尚不存在时状态为 AWAITING_FIXED_BENCHMARK_RUNNER，不能跳过这次 RED；这个 RED 只针对 benchmark entry，不改变既有 correctness Gate，也不修改测试断言。
-- [ ] fixture 只承载已跟踪的 public identity、public ledger/history、game rank、acting/perspective seat、己方 hand 和公开配置；不得承载 WeakMap handle、raw hidden scenario、particle weights 或 seed。
-- [ ] 最小脚本在进程内调用已有 public buildParticleBank(input) 创建 handle，再调用 detached orchestrator；seed 由 fixture identity 的 canonical deterministic derivation 在进程内产生，不写入 fixture、stdout 或 report。
-- [ ] 输出只包含预算坐标、work units、elapsed telemetry 和脱敏 aggregate；不把 elapsed time 作为语义结果。
-- [ ] GREEN 只能在 npm ci、package/lockfile unchanged、本地 `tsx.cmd`/`tsx` 存在并通过 `--version` 后用该 local binary 运行；禁止网络下载、禁止 npx 或 plain npm exec 自动解析。
-- [ ] GREEN 只能在上述 local `tsx.cmd`/`tsx` fixed binary preflight 通过后运行；Task 7 只做 budget calibration，不启用 Shadow active mode、feature flag 或正式 action 分支。
-- [ ] correctness command 与 benchmark command 分开运行：先 npx vitest run tests/ai/rollout --exclude "**/.worktrees/**" --reporter=dot，再执行固定 runner benchmark。
-- [ ] 运行 npx tsc --noEmit、build、git diff --check；记录 measured budget，不把它写成 production/active 默认值。
-- [ ] 使用 git commit -m "bench(ai): calibrate D2F rollout budget"；提交后停止并等待人工批准 shadow profile。
-
-### Produces / consumes
-
-Produces independent microbenchmark evidence and a public fixture builder. Consumes the detached orchestrator and public build inputs; does not expose hidden scenario/weight/seed data.
+Task 7 code is pending. The prior calibration-only wording is superseded by the active
+`D2F_TASK7_BENCHMARK_INTERFACE_THRESHOLD_FREEZE_REPORT` block at the end of this document.
+The next implementation turn may change only the three exact allowlisted paths in that block;
+the fixture path is part of the allowlist. The fixed runner, fixture schema, correctness oracle,
+statistics, report, exit codes, focused test, and RED/GREEN order are not configurable alternatives.
 
 ## 9. Task 8 — real Shadow observer and non-interference
 
