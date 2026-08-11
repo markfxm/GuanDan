@@ -1,7 +1,14 @@
 import { createDeck, isHeartRankWild, rankStrength, type Card, type GameRank, type Rank, type Suit } from "../engine/cards";
 import type { CardGroup } from "../engine/groups";
 import { DEFAULT_AI_PERFORMANCE_CONFIG } from "../ai/config";
-import type { AiRuntimeState, HandPlan } from "../ai/contracts";
+import type { AiDecision, AiRuntimeState, HandPlan } from "../ai/contracts";
+import type { D2FShadowEvidence, D2FShadowMode } from "../ai/rollout/contracts";
+import {
+  createD2FShadowCandidates,
+  createD2FShadowFailureEvidence,
+  createD2FShadowPreActionSnapshot,
+  observeD2FShadow,
+} from "../ai/rollout/d2fShadowObserver";
 import { applyExecutedAction, ensurePlans } from "../ai/planning/planManager";
 import { decideAiAction } from "../ai/aiDecisionEngine";
 import type { AiPlanningDiagnostics } from "../ai/diagnostics/aiPlanningDiagnostics";
@@ -44,6 +51,10 @@ export type AiPlanState = {
 };
 
 export type RoomState = {
+  readonly d2fShadowMode: D2FShadowMode;
+  initialPublicLedger: HardPublicLedger | null;
+  d2fShadowEvidence: D2FShadowEvidence | null;
+  d2fShadowRunning: boolean;
   id: string;
   rank: GameRank;
   players: PlayerState[];
@@ -66,7 +77,7 @@ export type RoomState = {
   publicEvents?: ReturnType<typeof finalizePublicActionEvent>[];
 };
 
-export type PublicRoom = Omit<RoomState, "hands" | "initialHands" | "publicIdentity" | "publicLedger" | "publicEvents"> & {
+export type PublicRoom = Omit<RoomState, "hands" | "initialHands" | "publicIdentity" | "publicLedger" | "publicEvents" | "d2fShadowMode" | "initialPublicLedger" | "d2fShadowEvidence" | "d2fShadowRunning"> & {
   humanSeat: Seat;
   humanHand: Card[];
   replayHands: Record<Seat, Card[]>;
@@ -79,6 +90,7 @@ type CommonRoomCreationInput = Readonly<{
   rank: GameRank;
   seed?: number;
   pendingTributeItems?: TributeItem[];
+  d2fShadowMode?: D2FShadowMode;
 }>;
 
 export type CanonicalRoomCreationInput = Readonly<{
@@ -86,6 +98,7 @@ export type CanonicalRoomCreationInput = Readonly<{
   seed: number;
   pendingTributeItems?: TributeItem[];
   publicIdentity: PublicGameIdentity;
+  d2fShadowMode?: D2FShadowMode;
 }>;
 
 export type LegacyBenchmarkRoomCreationInput = CommonRoomCreationInput;
@@ -99,6 +112,7 @@ function createRoomInternal({
   rank,
   seed = Date.now(),
   pendingTributeItems = [],
+  d2fShadowMode = "disabled",
 }: CommonRoomCreationInput & { source: RoomIdentitySource }): RoomState {
   const deck = shuffledDeck(seed);
   const hands = {
@@ -112,6 +126,10 @@ function createRoomInternal({
   const openingLeader = openingTribute?.status === "pending" ? openingTribute.activeSeat ?? 0 : randomOpeningLeader(seed);
 
   const room: RoomState = {
+    d2fShadowMode,
+    initialPublicLedger: null,
+    d2fShadowEvidence: null,
+    d2fShadowRunning: false,
     id: `room-${nextRoomId++}`,
     rank,
     players: [0, 1, 2, 3].map((seat) => ({
@@ -150,6 +168,7 @@ function createRoomInternal({
       initialTrickIndex: 0,
       openingTributePublicState: { status: openingTribute?.status ?? "none" },
     });
+    room.initialPublicLedger = room.publicLedger;
     room.publicEvents = [];
     if (openingTribute?.status === "anti-tribute") {
       const antiTribute = finalizePublicActionEvent({
@@ -190,7 +209,18 @@ export function getPublicRoom(
   if (options.ensurePlans !== false) {
     ensureAiPlans(room);
   }
-  const { hands: _hands, initialHands: _initialHands, publicIdentity: _publicIdentity, publicLedger: _publicLedger, publicEvents: _publicEvents, ...publicState } = room;
+  const {
+    hands: _hands,
+    initialHands: _initialHands,
+    publicIdentity: _publicIdentity,
+    publicLedger: _publicLedger,
+    publicEvents: _publicEvents,
+    d2fShadowMode: _d2fShadowMode,
+    initialPublicLedger: _initialPublicLedger,
+    d2fShadowEvidence: _d2fShadowEvidence,
+    d2fShadowRunning: _d2fShadowRunning,
+    ...publicState
+  } = room;
 
   return {
     ...publicState,
@@ -205,6 +235,10 @@ export function getPublicRoom(
     players: room.players.map((player) => ({ ...player, handCount: room.hands[player.seat].length })),
     announcements: announcements(room, humanSeat),
   };
+}
+
+export function getD2FShadowEvidence(room: RoomState): D2FShadowEvidence | null {
+  return room.d2fShadowEvidence === null ? null : structuredClone(room.d2fShadowEvidence);
 }
 
 function ensureAiPlans(room: RoomState): void {
@@ -424,6 +458,9 @@ function crossCheckTransition(room: RoomState, ledger: HardPublicLedger, events:
 }
 
 export function runAiStep(room: RoomState, diagnostics?: AiPlanningDiagnostics): void {
+  if (room.d2fShadowRunning) {
+    return;
+  }
   if (room.status !== "playing") {
     return;
   }
@@ -465,6 +502,8 @@ export function runAiStep(room: RoomState, diagnostics?: AiPlanningDiagnostics):
   if (selectedPlan === undefined) throw new Error("AI_ENGINE_MISSING_SELECTED_PLAN");
   const action = decision.action;
 
+  runD2FShadow(room, seat, partner, decision);
+
   if (action.type === "pass") {
     if (room.trick.lastPlay === undefined) {
       throw new Error("AI_ENGINE_RETURNED_LEAD_PASS");
@@ -478,6 +517,68 @@ export function runAiStep(room: RoomState, diagnostics?: AiPlanningDiagnostics):
     room.aiRuntime[seat] = runtime;
     const plan = runtime.candidatePlans.find((candidate) => candidate.id === runtime.activePlanId);
     if (runtime.needsReplan || plan === undefined) delete room.aiPlans[seat]; else room.aiPlans[seat] = toLegacyAiPlanState(seat, plan);
+  }
+}
+
+function runD2FShadow(room: RoomState, seat: Seat, partner: Seat, decision: AiDecision): void {
+  if (room.d2fShadowMode !== "enabled" || room.initialPublicLedger === null || room.publicIdentity === undefined || room.publicLedger === undefined || room.publicEvents === undefined) {
+    return;
+  }
+
+  room.d2fShadowRunning = true;
+  try {
+    const candidates = createD2FShadowCandidates({
+      evaluatedCandidates: decision.evaluatedCandidates,
+      selectedAction: decision.action,
+    });
+    if (!candidates.ok) {
+      room.d2fShadowEvidence = createD2FShadowFailureEvidence({ fallbackReason: "candidate-failed" });
+      return;
+    }
+
+    const snapshot = createD2FShadowPreActionSnapshot({
+      publicIdentity: room.publicIdentity,
+      initialLedger: room.initialPublicLedger,
+      finalLedger: room.publicLedger,
+      publicHistoryEvents: room.publicEvents,
+      gameRank: room.rank,
+      perspectiveSeat: seat,
+      actingSeat: seat,
+      ownCurrentHand: room.hands[seat],
+      publicState: {
+        gameRank: room.rank,
+        actingSeat: seat,
+        perspectiveSeat: seat,
+        partnerSeat: partner,
+        handCounts: Object.fromEntries(room.players.map((player) => [player.seat, room.hands[player.seat].length])),
+        finishOrder: room.finishOrder,
+        publicPlayedCardIds: room.publicLedger.playedCardIds,
+        currentLastPlay: room.trick.lastPlay ?? null,
+        currentLastPlaySeat: room.trick.lastPlaySeat ?? null,
+      },
+      currentTrick: {
+        leadSeat: room.trick.leadSeat,
+        lastPlay: room.trick.lastPlay ?? null,
+        lastPlaySeat: room.trick.lastPlaySeat ?? null,
+        passSeats: room.trick.passSeats,
+      },
+      candidates: candidates.value.candidates,
+      selectedCandidateId: candidates.value.selectedCandidateId,
+    });
+    if (!snapshot.ok) {
+      room.d2fShadowEvidence = createD2FShadowFailureEvidence({
+        fallbackReason: snapshot.failure.kind === "invalid-candidate-projection" ? "candidate-failed" : "snapshot-failed",
+        formalCandidateId: candidates.value.selectedCandidateId,
+        baselineActionIdentity: candidates.value.selectedCandidateId,
+        baselineEvaluatorScore: candidates.value.candidates.find((candidate) => candidate.candidateId === candidates.value.selectedCandidateId)?.baselineEvaluatorScore ?? null,
+      });
+      return;
+    }
+    room.d2fShadowEvidence = observeD2FShadow(snapshot.value);
+  } catch {
+    room.d2fShadowEvidence = createD2FShadowFailureEvidence({ fallbackReason: "unexpected-failure" });
+  } finally {
+    room.d2fShadowRunning = false;
   }
 }
 

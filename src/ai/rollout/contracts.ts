@@ -1,7 +1,6 @@
-import type { Card, GameRank } from "../../engine/cards";
-import { isHeartRankWild, RANKS, SUITS } from "../../engine/cards";
+import { isHeartRankWild, RANKS, SUITS, type Card, type GameRank } from "../../engine/cards";
 import type { CardGroup, GroupPurpose, GroupType } from "../../engine/groups";
-import { assertFinalizedPublicActionEvent, playPublicStableKey, type PublicActionEvent, type PublicSeat } from "../../game/publicEvent";
+import { assertFinalizedPublicActionEvent, playPublicStableKey, type PublicActionEvent, type PublicGameIdentity, type PublicSeat } from "../../game/publicEvent";
 import { applyPublicEvent, canonicalPublicLedgerHash, type HardPublicLedger } from "../../game/publicLedger";
 import { sha256Bytes, verifyPublicActionEventHash } from "../../game/publicEventHash";
 import type {
@@ -31,6 +30,8 @@ export type RootDigest = string;
 export type RolloutReplayContextIdentity = string;
 
 export type RolloutMode = "detached" | "offline" | "shadow";
+
+export type D2FShadowMode = "disabled" | "enabled";
 
 export type RolloutPolicyId = "d2f-lightweight-v1";
 
@@ -416,29 +417,146 @@ export type RolloutResultOutcome =
 
 export type RolloutExecutionResult = RolloutResultOutcome;
 
-export type D2FShadowEvidence = Readonly<{
-  schemaVersion: "d2f-shadow-v2";
-  policyId: RolloutPolicyId;
-  baselineActionIdentity: string;
-  d2fRecommendedActionIdentity: string | null;
-  agreement: "agree" | "disagree" | "unavailable";
-  riskAdjustedUtilityDelta: number | null;
-  expectedUtilityDelta: number | null;
-  baselineEvaluatorScore: number;
-  effectiveSampleSize: number | null;
-  acceptedScenarioCount: number | null;
-  replicateCountPerScenario: number | null;
-  completedReplicateCount: number | null;
-  workUnitCount: number | null;
-  fallbackReason: "none" | "rollout-failure" | "low-evidence" | "budget-exhausted" | "telemetry-failure";
-  semanticBudgetUsage: Readonly<{
-    replicateCountPerScenario: number;
-    maxPliesPerReplicate: number;
-    maxPolicyActionEvaluationsPerPly: number;
-    workUnitCount: number;
-  }> | null;
-  elapsedWallClockMs: number | null;
+export type D2FShadowFallbackReason =
+  | "snapshot-failed"
+  | "candidate-failed"
+  | "particle-bank-failed"
+  | "request-failed"
+  | "scenario-source-failed"
+  | "evidence-failed"
+  | "simulation-failed"
+  | "budget-exhausted"
+  | "aggregation-failed"
+  | "ranking-failed"
+  | "result-assembly-failed"
+  | "unexpected-failure";
+
+export type D2FShadowSemanticBudgetUsage = Readonly<{
+  replicateCountPerScenario: number;
+  maxPliesPerReplicate: number;
+  maxPolicyActionEvaluationsPerPly: number;
+  workUnitCount: number;
 }>;
+
+export type D2FShadowParticleBankConfig = Readonly<{
+  schemaVersion: "d2-particle-bank-build-input-v1";
+  particleCount: 1;
+  maxSamplingAttempts: 1;
+  maxIndexDraws: 1;
+  samplerConfigVersion: "d2-particle-sampler-v1";
+  likelihoodConfig: Readonly<{
+    schemaVersion: "d2-particle-likelihood-v1";
+    forcedPassLogFactor: -1;
+    couldBeatButPassedLogFactor: -0.25;
+    observedLeadPlayLogFactor: -0.1;
+    observedFollowPlayLogFactor: -0.2;
+    degradedEssThreshold: 1;
+    normalizationTolerance: 0.000001;
+    essTolerance: 0.000001;
+  }>;
+}>;
+
+export type D2FShadowPreActionSnapshot = Readonly<{
+  schemaVersion: "d2f-shadow-pre-action-snapshot-v1";
+  publicIdentity: PublicGameIdentity;
+  initialLedger: HardPublicLedger;
+  finalLedger: HardPublicLedger;
+  publicHistoryEvents: readonly PublicActionEvent[];
+  gameRank: GameRank;
+  perspectiveSeat: PublicSeat;
+  actingSeat: PublicSeat;
+  ownCurrentHand: readonly Card[];
+  publicState: RolloutPublicState;
+  currentTrick: Readonly<{
+    leadSeat: PublicSeat | null;
+    lastPlay: Readonly<CardGroup> | null;
+    lastPlaySeat: PublicSeat | null;
+    passSeats: readonly PublicSeat[];
+  }>;
+  candidates: readonly RolloutCandidate[];
+  selectedCandidateId: string;
+  particleBankConfig: D2FShadowParticleBankConfig;
+  particleBankBaseLedger: HardPublicLedger;
+  particleBankPendingPublicEvents: readonly PublicActionEvent[];
+  expectedFinalEventIndex: number;
+  expectedFinalPublicLedgerHash: string;
+  budget: RolloutBudget;
+  limits: RolloutBudgetLimits;
+  evidenceRequirements: RolloutEvidenceRequirements;
+  riskPolicy: RolloutRiskPolicy;
+  rootIdentity: RolloutReplayContextIdentity;
+}>;
+
+export type D2FShadowCandidateProjection = Readonly<{
+  candidates: readonly RolloutCandidate[];
+  selectedCandidateId: string;
+}>;
+
+export type D2FShadowSnapshotFailure = Readonly<{
+  kind: "invalid-room-projection" | "invalid-public-replay" | "invalid-candidate-projection" | "invalid-particle-config" | "invalid-budget" | "root-identity-failed";
+}>;
+
+export type D2FShadowCandidateFailure = Readonly<{
+  kind: "empty-candidates" | "invalid-candidate" | "non-finite-score" | "duplicate-candidate-id" | "selected-candidate-missing";
+}>;
+
+export type D2FShadowSnapshotResult =
+  | Readonly<{ ok: true; value: D2FShadowPreActionSnapshot }>
+  | Readonly<{ ok: false; failure: D2FShadowSnapshotFailure }>;
+
+export type D2FShadowCandidateResult =
+  | Readonly<{ ok: true; value: D2FShadowCandidateProjection }>
+  | Readonly<{ ok: false; failure: D2FShadowCandidateFailure }>;
+
+export type D2FShadowEvidence =
+  | Readonly<{
+      schemaVersion: "d2f-shadow-v3";
+      status: "success";
+      decisionIdentity: string;
+      formalCandidateId: string;
+      shadowTopCandidateId: string | null;
+      agreement: boolean;
+      ranking: readonly string[];
+      aggregateDiagnostics: RolloutAggregateDiagnostics;
+      policyId: "d2f-lightweight-v1";
+      baselineActionIdentity: string;
+      d2fRecommendedActionIdentity: string | null;
+      riskAdjustedUtilityDelta: number | null;
+      expectedUtilityDelta: number | null;
+      baselineEvaluatorScore: number;
+      effectiveSampleSize: number;
+      acceptedScenarioCount: number;
+      replicateCountPerScenario: number;
+      completedReplicateCount: number;
+      workUnitCount: number;
+      fallbackReason: "none";
+      semanticBudgetUsage: D2FShadowSemanticBudgetUsage;
+      elapsedWallClockMs: number;
+    }>
+  | Readonly<{
+      schemaVersion: "d2f-shadow-v3";
+      status: "failure";
+      decisionIdentity: string | null;
+      formalCandidateId: string | null;
+      shadowTopCandidateId: null;
+      agreement: "unavailable";
+      ranking: readonly [];
+      aggregateDiagnostics: null;
+      policyId: "d2f-lightweight-v1";
+      baselineActionIdentity: string | null;
+      d2fRecommendedActionIdentity: null;
+      riskAdjustedUtilityDelta: null;
+      expectedUtilityDelta: null;
+      baselineEvaluatorScore: number | null;
+      effectiveSampleSize: null;
+      acceptedScenarioCount: null;
+      replicateCountPerScenario: null;
+      completedReplicateCount: null;
+      workUnitCount: null;
+      fallbackReason: D2FShadowFallbackReason;
+      semanticBudgetUsage: null;
+      elapsedWallClockMs: number | null;
+    }>;
 
 export type RolloutContractResult<T> =
   | Readonly<{ ok: true; value: T }>
