@@ -749,7 +749,20 @@ tests/fixtures/ai/d2f-public-rollout-fixture.json
 tests/ai/rollout/d2fBenchmarkContract.test.ts
 ~~~
 
-Task 8 另有一个冻结的正式旁路例外：允许修改 src/game/room.ts 的 runAiStep 一个调用点；不得修改 src/ai/aiDecisionEngine.ts 或已有 src/ai/tactics/representativeActionShadowObserver.ts。Task 9 不新增行为，只做验证。
+Task 8 exact implementation allowlist is:
+
+~~~text
+src/ai/contracts.ts
+src/ai/aiDecisionEngine.ts
+src/ai/rollout/contracts.ts
+src/ai/rollout/d2fShadowObserver.ts
+src/game/room.ts
+tests/ai/rollout/d2fShadowObserver.test.ts
+tests/ai/rollout/d2fShadowObserverIntegration.test.ts
+tests/ai/rollout/d2fShadowByteLock.test.ts
+~~~
+
+The allowlisted files add only the evaluated-candidate projection, D2F mode/fallback/evidence contracts, detached observer factories, initial-ledger retention, construction-time Room mode, and one runAiStep integration boundary. Formal decideAiAction semantics and all Task 1–7 algorithms remain unchanged. Task 9 is verification only.
 
 任何 Task 都禁止修改 src/ai/planning/**、除 Task 8 指定调用点外的 src/game/room.ts、正式 decideAiAction 语义、package/package-lock/tsconfig/Vite 配置、全局 timeout、已有 D2e observer、无关依赖和其他 worktree。正式 formalExecutionAllowed 必须保持 false。
 
@@ -773,6 +786,7 @@ Task 1–9 使用 Design Spec 中完全相同的以下名字和字段，不另�
 
 ~~~ts
 type RolloutMode = "detached" | "offline" | "shadow";
+type D2FShadowMode = "disabled" | "enabled";
 
 type RolloutPolicyId = "d2f-lightweight-v1";
 
@@ -1010,29 +1024,21 @@ declare function createRolloutResult(
   assemblyInput: unknown,
 ): RolloutContractResult<RolloutResult>;
 
-type D2FShadowEvidence = Readonly<{
-  schemaVersion: "d2f-shadow-v2";
-  policyId: RolloutPolicyId;
-  baselineActionIdentity: string;
-  d2fRecommendedActionIdentity: string | null;
-  agreement: "agree" | "disagree" | "unavailable";
-  riskAdjustedUtilityDelta: number | null;
-  expectedUtilityDelta: number | null;
-  baselineEvaluatorScore: number;
-  effectiveSampleSize: number | null;
-  acceptedScenarioCount: number | null;
-  replicateCountPerScenario: number | null;
-  completedReplicateCount: number | null;
-  workUnitCount: number | null;
-  fallbackReason: "none" | "rollout-failure" | "low-evidence" | "budget-exhausted" | "telemetry-failure";
-  semanticBudgetUsage: Readonly<{
-    replicateCountPerScenario: number;
-    maxPliesPerReplicate: number;
-    maxPolicyActionEvaluationsPerPly: number;
-    workUnitCount: number;
-  }> | null;
-  elapsedWallClockMs: number | null;
-}>;
+export type D2FShadowMode = "disabled" | "enabled";
+
+export type D2FShadowFallbackReason =
+  | "snapshot-failed"
+  | "candidate-failed"
+  | "particle-bank-failed"
+  | "request-failed"
+  | "scenario-source-failed"
+  | "evidence-failed"
+  | "simulation-failed"
+  | "budget-exhausted"
+  | "aggregation-failed"
+  | "ranking-failed"
+  | "result-assembly-failed"
+  | "unexpected-failure";
 
 type TeamUtilityFailure =
   | { kind: "invalid-perspective-seat"; reason: "unknown-seat" | "fractional-seat" | "unsafe-integer-seat" | "negative-zero-seat" }
@@ -2085,51 +2091,284 @@ statistics, report, exit codes, focused test, and RED/GREEN order are not config
 
 ## 9. Task 8 — real Shadow observer and non-interference
 
-### Scope and required read-only audit
+### 9.1 Mode owner and lifecycle
 
-允许创建/修改：
+Task 8 freezes one internal construction-time mode:
+
+~~~ts
+type D2FShadowMode = "disabled" | "enabled";
+~~~
+
+Room owns d2fShadowMode. It is selected only while constructing a new room and defaults to "disabled". CommonRoomCreationInput and CanonicalRoomCreationInput may carry d2fShadowMode?: D2FShadowMode for internal construction; createRoomInternal normalizes an omitted value to "disabled", and createLegacyBenchmarkRoom remains disabled. The HTTP/request body, public room projection, public event stream, replay envelope, and formal AI decision API do not accept or expose it.
+
+The private Room lifecycle fields are:
+
+~~~ts
+readonly d2fShadowMode: D2FShadowMode;
+initialPublicLedger: HardPublicLedger | null;
+d2fShadowEvidence: D2FShadowEvidence | null;
+d2fShadowRunning: boolean;
+~~~
+
+A canonical room retains initialPublicLedger immediately after createInitialPublicLedger and before anti-tribute or any later public event. publicLedger and publicEvents remain the current finalized state. getPublicRoom and all public/replay serializers omit these four fields. A new room starts with evidence null and running false, which is the reset boundary.
+
+Disabled is the byte-lock baseline: it creates no D2F snapshot, particle bank, request, evidence, or timing. Enabled is diagnostic-only and may create one detached snapshot, one public ParticleBank handle, and one synchronous shadow result for one eligible AI decision. It never returns data to formal selection or sets formalExecutionAllowed to true. No callback, external sink, global registry, queue, worker, Promise, timer, retry, or room-wide cache is allowed.
+
+### 9.2 Formal result projection and synchronous order
+
+The formal decision contract adds only this detached projection:
+
+~~~ts
+type AiEvaluatedCandidate = Readonly<{
+  candidate: ActionCandidate;
+  score: ActionScore;
+}>;
+~~~
+
+AiDecision adds evaluatedCandidates: readonly AiEvaluatedCandidate[]. aiDecisionEngine.ts exposes already-computed candidate/score pairs only; action generation, evaluator arithmetic, sorting, tie-breaks, selected action, runtime, plan selection, and formal diagnostics semantics are unchanged.
+
+For an enabled eligible turn, runAiStep uses this exact synchronous order:
 
 ~~~text
-src/ai/rollout/d2fShadowObserver.ts
-src/game/room.ts                         # 仅 runAiStep 一个调用点
+decideAiAction
+  -> save formal action, selected candidate, runtime and plan result
+  -> create one detached pre-action snapshot
+  -> build one ParticleBank from that snapshot
+  -> call runDetachedRollout exactly once
+  -> convert the result to frozen D2FShadowEvidence
+  -> apply the saved formal pass/play action
+  -> publish the saved runtime/plan update and return
+~~~
+
+No asynchronous scheduling or second Room read is allowed. elapsedWallClockMs is telemetry only and cannot affect identity, CRN, budget stop conditions, ranking, action selection, replay bytes, or formal results. Any shadow failure still applies the saved formal action exactly once.
+
+### 9.3 Eligible decision and exactly-once boundary
+
+D2F is eligible only at runAiStep when d2fShadowMode is "enabled", the room is playing, opening tribute is not pending, the current seat is an AI seat, formal decision completed normally, canonical public identity/initial ledger/current ledger/finalized event prefix exist, evaluatedCandidates is non-empty and valid, the selected action matches exactly one candidate, and the acting seat has valid own hand and public-state data.
+
+Human turns, finished rooms, opening-tribute steps, missing or inconsistent public state, replay/spectator rooms without canonical source fields, decision exceptions, empty or malformed candidates, and re-entrant calls are ineligible and invoke no shadow factory or rollout.
+
+For one eligible call, runDetachedRollout is called exactly once and every other D2F stage is at most once. d2fShadowRunning is set before capture and restored in finally; a re-entrant call observes the guard and does not recurse. Exactly-once is local to the current Room call, never a global counter or registry.
+
+### 9.4 Exact snapshot and detached factories
+
+Production uses this fixed Task 7 configuration:
+
+~~~ts
+type D2FShadowParticleBankConfig = Readonly<{
+  schemaVersion: "d2-particle-bank-build-input-v1";
+  particleCount: 1;
+  maxSamplingAttempts: 1;
+  maxIndexDraws: 1;
+  samplerConfigVersion: "d2-particle-sampler-v1";
+  likelihoodConfig: Readonly<{
+    schemaVersion: "d2-particle-likelihood-v1";
+    forcedPassLogFactor: -1;
+    couldBeatButPassedLogFactor: -0.25;
+    observedLeadPlayLogFactor: -0.1;
+    observedFollowPlayLogFactor: -0.2;
+    degradedEssThreshold: 1;
+    normalizationTolerance: 0.000001;
+    essTolerance: 0.000001;
+  }>;
+}>;
+~~~
+
+The detached snapshot has exactly these semantic fields:
+
+~~~ts
+type D2FShadowPreActionSnapshot = Readonly<{
+  schemaVersion: "d2f-shadow-pre-action-snapshot-v1";
+  publicIdentity: PublicGameIdentity;
+  initialLedger: HardPublicLedger;
+  finalLedger: HardPublicLedger;
+  publicHistoryEvents: readonly PublicActionEvent[];
+  gameRank: GameRank;
+  perspectiveSeat: PublicSeat;
+  actingSeat: PublicSeat;
+  ownCurrentHand: readonly Card[];
+  publicState: RolloutPublicState;
+  currentTrick: {
+    leadSeat: PublicSeat | null;
+    lastPlay: Readonly<CardGroup> | null;
+    lastPlaySeat: PublicSeat | null;
+    passSeats: readonly PublicSeat[];
+  };
+  candidates: readonly RolloutCandidate[];
+  selectedCandidateId: string;
+  particleBankConfig: D2FShadowParticleBankConfig;
+  particleBankBaseLedger: HardPublicLedger;
+  particleBankPendingPublicEvents: readonly PublicActionEvent[];
+  expectedFinalEventIndex: number;
+  expectedFinalPublicLedgerHash: string;
+  budget: RolloutBudget;
+  limits: RolloutBudgetLimits;
+  evidenceRequirements: RolloutEvidenceRequirements;
+  riskPolicy: RolloutRiskPolicy;
+  rootIdentity: RolloutReplayContextIdentity;
+}>;
+~~~
+
+createD2FShadowPreActionSnapshot(input: unknown) returns a frozen snapshot or exactly one of invalid-room-projection, invalid-public-replay, invalid-candidate-projection, invalid-particle-config, invalid-budget, or root-identity-failed. It accepts no Room reference, callback, four private hands, ParticleBank handle, private scenario, assignment, weight, seed, tape, or cursor.
+
+createD2FShadowCandidates(input: unknown) consumes all real AiEvaluatedCandidate entries and the saved AiAction. It returns candidates plus selectedCandidateId, or exactly one of empty-candidates, invalid-candidate, non-finite-score, duplicate-candidate-id, or selected-candidate-missing. It maps actions to RolloutAction, uses canonicalActionIdentity(action), uses score.total without re-evaluation, requires the selected action to match exactly, and is detached/deeply frozen. Candidate IDs use UTF-16 code-unit order. observeD2FShadow(snapshot) returns frozen evidence, not void-only telemetry and not a RolloutResult returned to formal code.
+
+### 9.5 Production mapping and identity
+
+The source is one pre-action Room root:
+
+| Shadow field | Frozen source |
+|---|---|
+| publicIdentity | room.publicIdentity; canonical rooms only |
+| initialLedger | room.initialPublicLedger retained before anti-tribute |
+| finalLedger | room.publicLedger at capture |
+| publicHistoryEvents | room.publicEvents finalized prefix |
+| gameRank | room.rank |
+| perspectiveSeat, actingSeat | room.currentTurn |
+| ownCurrentHand | room.hands[room.currentTurn] only |
+| publicState.handCounts | lengths of all four hands, counts only |
+| publicState.finishOrder | room.finishOrder |
+| publicState.playedCardIds | room.publicLedger.playedCardIds |
+| currentTrick | room.trick projected to lead/last play/seat/pass seats |
+| candidates, selectedCandidateId | saved AiDecision projection and formal action |
+| particleBankBaseLedger | captured finalLedger; pending public events are [] |
+| expectedFinalEventIndex, expectedFinalPublicLedgerHash | current ledger index and hash |
+| rootIdentity | canonical identity from the same public identity, ledgers, history, seat, and rank |
+
+The real RolloutScenarioSourceInput contains the public particle bank, public history, initial ledger, final ledger, rank, perspective seat, own current hand, and public state. ParticleBankBuildInput receives its complete contract input and registers one public handle only inside the detached call; no Room cache or private internals are exposed.
+
+ParticleSnapshotIdentity contains game/round/hand identity, initial ledger hash, final ledger last event index, final ledger hash, perspective seat, and rank, and must match the root identity. The production seed is derived and never stored:
+
+~~~text
+SHA-256 UTF-8 "d2f-shadow-particle-seed-v1\0"
++ publicIdentity.handIdentity + "\0"
++ expectedFinalPublicLedgerHash + "\0" + String(actingSeat)
+take the first four bytes as unsigned big-endian uint32
+~~~
+
+The seed is not a snapshot, bank, request, evidence, replay, or Room field. The request uses schemaVersion d2f-rollout-request-v2, mode shadow, formalExecutionAllowed literal false, root identity, projected candidates, fixed budget/limits/evidence/risk policy, and policyId d2f-lightweight-v1. runDetachedRollout receives this request; no kernel, policy, CRN, particle, aggregation, ranking, or formal-action semantics change.
+
+### 9.6 Evidence lifecycle and exact failure mapping
+
+The only fallback reasons are:
+
+~~~ts
+type D2FShadowFallbackReason =
+  | "snapshot-failed"
+  | "candidate-failed"
+  | "particle-bank-failed"
+  | "request-failed"
+  | "scenario-source-failed"
+  | "evidence-failed"
+  | "simulation-failed"
+  | "budget-exhausted"
+  | "aggregation-failed"
+  | "ranking-failed"
+  | "result-assembly-failed"
+  | "unexpected-failure";
+~~~
+
+~~~ts
+type D2FShadowSemanticBudgetUsage = Readonly<{
+  replicateCountPerScenario: number;
+  maxPliesPerReplicate: number;
+  maxPolicyActionEvaluationsPerPly: number;
+  workUnitCount: number;
+}>;
+~~~
+
+The shared D2FShadowEvidence is this discriminated union:
+
+~~~ts
+type D2FShadowEvidence =
+  | Readonly<{
+      schemaVersion: "d2f-shadow-v3";
+      status: "success";
+      decisionIdentity: string;
+      formalCandidateId: string;
+      shadowTopCandidateId: string | null;
+      agreement: boolean;
+      ranking: readonly string[];
+      aggregateDiagnostics: RolloutAggregateDiagnostics;
+      policyId: "d2f-lightweight-v1";
+      baselineActionIdentity: string;
+      d2fRecommendedActionIdentity: string | null;
+      riskAdjustedUtilityDelta: number | null;
+      expectedUtilityDelta: number | null;
+      baselineEvaluatorScore: number;
+      effectiveSampleSize: number;
+      acceptedScenarioCount: number;
+      replicateCountPerScenario: number;
+      completedReplicateCount: number;
+      workUnitCount: number;
+      fallbackReason: "none";
+      semanticBudgetUsage: D2FShadowSemanticBudgetUsage;
+      elapsedWallClockMs: number;
+    }>
+  | Readonly<{
+      schemaVersion: "d2f-shadow-v3";
+      status: "failure";
+      decisionIdentity: string | null;
+      formalCandidateId: string | null;
+      shadowTopCandidateId: null;
+      agreement: "unavailable";
+      ranking: readonly [];
+      aggregateDiagnostics: null;
+      policyId: "d2f-lightweight-v1";
+      baselineActionIdentity: string | null;
+      d2fRecommendedActionIdentity: null;
+      riskAdjustedUtilityDelta: null;
+      expectedUtilityDelta: null;
+      baselineEvaluatorScore: number | null;
+      effectiveSampleSize: null;
+      acceptedScenarioCount: null;
+      replicateCountPerScenario: null;
+      completedReplicateCount: null;
+      workUnitCount: null;
+      fallbackReason: D2FShadowFallbackReason;
+      semanticBudgetUsage: null;
+      elapsedWallClockMs: number | null;
+    }>;
+~~~
+
+Success ranking is exact RolloutResult.ranking. Utility deltas are shadow top-candidate summary minus the formal summary. Evidence is deeply frozen before writing the private room slot; the slot is replaced once per eligible decision and omitted from PublicRoom, events, replay bytes, and formal equality.
+
+Failure mapping is exact: snapshot factory to snapshot-failed; candidate factory to candidate-failed; ParticleBank build or unknown result to particle-bank-failed; invalid request/budget/risk-policy/evidence-requirements to request-failed; scenario source to scenario-source-failed; low ESS/insufficient scenarios/replicates/incomplete coverage to evidence-failed; kernel except budget to simulation-failed; top-level budget exhaustion to budget-exhausted; aggregation to aggregation-failed; ranking-specific invalid request to ranking-failed; invalid assembly input/candidate summaries/aggregate diagnostics to result-assembly-failed; observer throw, malformed result, or evidence-freeze failure to unexpected-failure. All failures are caught, redacted, frozen, never rerun formal action, never change gameplay state, and never feed ranking to evaluator.
+
+### 9.7 Exact Task 8 allowlist and forbidden scope
+
+~~~text
+src/ai/contracts.ts                         # AiEvaluatedCandidate projection
+src/ai/aiDecisionEngine.ts                   # projection only; formal semantics unchanged
+src/ai/rollout/contracts.ts                  # mode/fallback/budget/evidence contracts
+src/ai/rollout/d2fShadowObserver.ts          # detached snapshot/factories/observer
+src/game/room.ts                             # construction fields, initial ledger, runAiStep, public omission
 tests/ai/rollout/d2fShadowObserver.test.ts
 tests/ai/rollout/d2fShadowObserverIntegration.test.ts
 tests/ai/rollout/d2fShadowByteLock.test.ts
 ~~~
 
-先只读审计：
+Task 8 forbids changes to Task 1–7 algorithms, particle-bank internals, scenario source, kernel, policy, CRN, aggregation, ranking, benchmark fixture/runner, package/lock/config files, UI/network/server protocol, the existing D2e observer, and any other Room path. No callback, global registry, queue, worker, timer, retry, feature flag, external sink, or formalExecutionAllowed true path. Task 9 is verification only and has not started.
 
-~~~text
-src/ai/tactics/representativeActionShadowObserver.ts
-src/ai/aiDecisionEngine.ts
-src/game/room.ts:runAiStep
-~~~
+### TDD actions and focused evidence
 
-当前 representative observer 是 D2e 且位于正式 action 选择之前，不能被用作 D2F 接入证明。正式选择点的最小旁路冻结为 `src/game/room.ts:runAiStep` 的以下 pre-action/post-commit 数据流：原决策链生成并冻结 formal action、baseline score 和 canonical candidate projection；在 `passTurn`/`playCards` 执行前，从同一 Room root 捕获 immutable、脱敏的 `D2FShadowPreActionSnapshot`（包含 root identity/digest、ParticleBank handle、public ledger/history、current trick、game rank、己方 hand、public counts、candidate projection 和预算）；snapshot 构造置于独立 try/catch，失败只能产生 unavailable/fallback，不能阻止、替换或延迟 formal action；然后提交 `passTurn`/`playCards`、完成 runtime/plan 更新；最后把已捕获 snapshot 传给 `void observeD2FShadow(snapshot)`，observer 不得再读取已变化的 Room 来构造原 root。此调用点是 `room.ts` 唯一 Task 8 改动；不修改 `aiDecisionEngine.ts`，不修改已有 representative observer。
+Task 8 implementation must begin with focused tests, but this docs-only freeze does not create or run them.
 
-正式 action 一旦由原 evaluator 选定，D2F 不能修改 action、evaluator、candidate filter、plan selector、Room transition 或 transaction result。`formalExecutionAllowed` 固定为 literal `false`，不得添加 active branch、feature flag 或以后设为 true 的 production path。所有 snapshot/reference 必须 clone/freeze 或转为不可变 projection；candidate、ParticleBank、public ledger、current trick 和 root identity 必须来自同一个 pre-action root。snapshot capture failure、observer throw、D2F success/failure、low ESS、bad utility、budget failure 和 telemetry failure 都只能进入 diagnostics。
-
-### TDD actions
-
-- [ ] 先建立审计记录：observer 现有输入/diagnostics、decideAiAction 的选择顺序、Room action mutation 和返回点。
-- [ ] 写 it("returns void and cannot change the committed formal action")；RED 命令 npx vitest run tests/ai/rollout/d2fShadowObserver.test.ts --exclude "**/.worktrees/**" --reporter=verbose，预期 D2F observer/export 不存在。
-- [ ] 写 it("captures the pre-action root before formal commit and observes only the captured snapshot after commit")，使用 call-order spy，并断言提交后修改 Room 不会改变 shadow root。
-- [ ] 写 it("swallows rollout, low-evidence, budget, and telemetry failures")。
-- [ ] 写 it("swallows snapshot capture throw and still commits the formal action")。
-- [ ] 写 it("emits only redacted shadow evidence")，禁止 raw scenario、full opponent hands、weight detail、seed。
-- [ ] 写 it("does not return data to evaluator, candidate filter, plan selector, or Room transition")。
-- [ ] 写 byte-lock test it("keeps formal action and public state byte-identical with Shadow enabled")；比较 action、Room transition、ledger、runtime、plan、replay bytes，排除 elapsedWallClockMs。
-- [ ] 写 negative-control characterization：强制 fake D2F result 推荐与原 evaluator action 相反，formal action、public ledger、current trick、runtime、plan 和 replay bytes 仍 byte-identical。
-- [ ] 写 AST/symbol test：`room.ts` 只有 Task 8 的一个调用点，formal flag 无 true literal/active branch，D2F observer 不导出 RolloutResult 给正式决策路径。
-- [ ] 最小实现 `observeD2FShadow(snapshot): void`，内部 try/catch，使用 Task 7 approved explicit budget，失败写 D2FShadowEvidence fallback；sink 是 best-effort void sink，observer 只消费 snapshot，不接收 Room。
-- [ ] 在 `runAiStep` 只加入一个旁路调用：调用前捕获 pre-action snapshot，调用后只传该 snapshot；不传完整 Room/对手 private hands，不在提交后重建 root。
-- [ ] GREEN：observer/unit/integration/byte-lock tests 全通过；回归已有 D2e observer tests、Task 1–7 和 particle focused command。
-- [ ] 运行 npx tsc --noEmit、build、git diff --check；确认正式决策路径语义未变，D2F result 不回流。
-- [ ] 使用 git commit -m "feat(ai): add non-interfering D2F shadow observer"；提交后停止。
+- [ ] Extend AiDecision with the detached evaluated-candidate projection and add the disabled byte-lock test first.
+- [ ] Add enabled success coverage using the real Room, runAiStep, buildParticleBank, and runDetachedRollout; assert snapshot-before-apply, one builder, one rollout, frozen evidence, and exactly-once formal application.
+- [ ] Add disagreement and every failure mapping: snapshot, candidate, bank, request, source, evidence, simulation, budget, aggregation, ranking, assembly, and unexpected failures.
+- [ ] Add human-turn, finished-room, opening-tribute, missing-public-source, empty-candidate, decision-failure, and re-entrant guards.
+- [ ] Assert detached snapshot immutability, own-hand-only privacy, exact Task 7 literal configuration, derived seed non-storage, and no Room/private-handle/callback/global-state capture.
+- [ ] Add the byte-lock negative control: force the shadow top candidate to disagree and compare formal action, score, runtime, plan, ledger, trick, finish order, public events, and replay bytes.
+- [ ] Add AST/import checks for no Room import in d2fShadowObserver.ts, no ParticleBank internals, no executable callback, no global registry, no formalExecutionAllowed: true, and no Task 8 code outside the allowlist.
+- [ ] Future focused command:
+  npx vitest run tests/ai/rollout/d2fShadowObserver.test.ts tests/ai/rollout/d2fShadowObserverIntegration.test.ts tests/ai/rollout/d2fShadowByteLock.test.ts --exclude "**/.worktrees/**" --reporter=verbose
+- [ ] This round runs no Vitest, benchmark, tsc, or build. Task 8 code is pending and Task 9 is not started.
 
 ### Produces / consumes
 
-Produces real detached Shadow observation and redacted D2FShadowEvidence. Consumes frozen action/public projection only after formal commit; all failures are swallowed and cannot affect formal state.
+Produces one synchronous, detached, redacted D2FShadowEvidence object in the private Room slot. Consumes only the saved formal decision projection and pre-action public/seat-local inputs listed in the snapshot contract; it does not consume or return RoomState, formal evaluator state, or private ParticleBank internals.
+
 
 ## 10. Task 9 — final verification and handoff
 
@@ -2145,7 +2384,7 @@ Task 9 不添加功能。允许修改仅限于实现后必要的 verification re
 - [ ] 将历史 `23 files / 222 tests` 明确记录为 historical handoff only；当前 checkout 没有可独立核验的 exact 23-path manifest，不得把它作为当前 Gate，也不得用未命名的 19-file list 代替。
 - [ ] 冻结并验证 `D2_CURRENT_REGRESSION_MANIFEST`：按 Test Gate Matrix 列出的 19 个 exact tracked paths（D2a/D2b public ledger/replay、D2c plan policy、D2d reducer、D2e representative Shadow）；验证每条路径存在、tracked、唯一且无 `.worktrees/**`，Task 9 以该 manifest 实际 collection/test count 为准。
 - [ ] 使用 Test Gate Matrix 的 `git ls-files` + PowerShell 显式过滤规则生成 `FULL_PERMITTED_REGRESSION_MANIFEST`；规则必须验证 inclusion/exclusion、唯一性、路径存在/tracked、无遗漏、每个文件恰好进入一个按实测耗时分片，并按 shard 分别运行，不能依赖多次 `--exclude` 累加语义。
-- [ ] benchmark timing 与 correctness 分离；Task 7 仅在 `npm ci`、package/lockfile unchanged、`npm ls tsx --depth=0` 与 `npm exec --offline -- tsx --version` preflight 后运行。benchmark runner 缺失保持 `AWAITING_FIXED_BENCHMARK_RUNNER`，不是 Task 1 blocker。
+- [ ] benchmark timing 与 correctness 分离；Task 7 runner gate is closed for this freeze. Any later benchmark evidence still follows the frozen Task 7 contract and is not run in this docs-only round.
 - [ ] 在 Node 22.22.2 已存在环境或经授权 CI workflow 运行 `tsc --noEmit`、build、D2F focused、`D2_CURRENT_REGRESSION_MANIFEST`、full permitted shards 和 benchmark；Node 24.15.0 只能 supplemental。未取得 Node 22 证据时最终状态必须为 `AWAITING_NODE22_CI`，不得称为 D2F SHADOW RELEASE READY。
 - [ ] 运行 privacy AST/import scan、candidateId random scan、ESS/risk/sort scan、shadow call-site scan、failure atomicity and immutability checks。
 - [ ] 生成最终阶段报告：start/end HEAD、branch/worktree、changed paths、全部命令/结果/耗时、test counts、privacy/determinism/immutability/fallback/performance、正式决策路径是否修改、遗留风险和下一步精确前置条件。
