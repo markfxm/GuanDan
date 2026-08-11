@@ -3341,3 +3341,477 @@ RED/GREEN 必须使用真实 policy 入口和真实 public-event finalization/ha
 Phase 0 只修改本三份文档；检查 `git diff --check`、clean production/tests diff、三文档规则一致、无实现占位词、Markdown fences 成对且新 marker 唯一。文档 commit message 为 `docs(ai): adopt pragmatic D2F review standard`。代码通过全部必需验证后，代码 commit message 为 `fix(ai): validate D2F transfer card identities`。deferred gates 保留 `AWAITING_FIXED_BENCHMARK_RUNNER`、`AWAITING_NODE22_CI` 和 `Task 9 full permitted regression`；不得宣称 D2F Shadow release ready。
 
 D2F_TASK4_PRAGMATIC_CLOSURE_BLOCK_END
+
+D2F_TASK9_FULL_REGRESSION_GATE_ACTIVE_BEGIN
+# D2F_TASK9_FULL_REGRESSION_GATE_FREEZE
+
+This is the current active Task 9 source of truth. If retained historical text conflicts with this block, this block wins. The historical statements "Task 4 remediation pending", "Task 7 pending", and "Task 8 not started" are not the current implementation status.
+
+## Current status
+
+Task 1: complete
+Task 2: complete
+Task 3: complete
+Task 4: complete
+Task 5: complete
+Task 6: complete
+Task 7: complete
+Task 8: complete
+Task 9: full permitted regression pending
+
+Task 9 is verification-only. This freeze changes no production, test, fixture, script, package, lockfile, Room, benchmark, or configuration path.
+
+## Planner runtime diagnosis
+
+The exact current-HEAD command was:
+
+~~~text
+npx vitest run tests/engine/planner.test.ts --exclude "**/.worktrees/**" --reporter=verbose
+~~~
+
+Environment: Node v24.15.0, Vitest 2.1.9.
+Start: 2026-08-12T06:56:45.3872368+08:00
+End: 2026-08-12T07:00:14.2209669+08:00
+Wall duration: approximately 211.7 seconds.
+Vitest duration: 197.72 seconds.
+Exit code: 0.
+Result: 1 file, 19 passed, 0 failed, 0 skipped.
+
+The slowest observed test was "returns deterministic plan and group ordering for repeated calls" at 72845 ms. Other observed long tests were 35314 ms, 34736 ms, 22605 ms, and 18635 ms. No assertion failure, worker crash, unhandled rejection, collection deadlock, or non-exiting process was observed. The test file has no skip, only, or todo modifier. The test and src/engine production dependencies were not changed in the Task 1 base..Task 8 HEAD range. This is:
+
+CLASS A — NORMAL SLOW TEST
+
+tests/engine/planner.test.ts remains included. It is assigned to its own slow shard. The next gate may use an outer process wait ceiling of 300000 ms for this command, based on the fresh approximately 211.7 second wall result and a bounded margin. This does not modify any Vitest test timeout. No baseline verification worktree is required for CLASS A; no baseline worktree was created.
+
+## Full permitted manifest accounting
+
+The fresh tracked test manifest is:
+
+tracked=142
+included=100
+excluded=42
+union=142
+missing=0
+duplicate=0
+overlap=0
+untracked=0
+
+
+### Included files
+
+~~~text
+tests/ai/actionEvaluator.test.ts
+tests/ai/actionGenerationDiagnostics.test.ts
+tests/ai/actionGenerator.test.ts
+tests/ai/aiDecisionEngine.test.ts
+tests/ai/aiDecisionMigration.test.ts
+tests/ai/aiDecisionShadow.test.ts
+tests/ai/aiPlanningDiagnostics.test.ts
+tests/ai/beliefGuidedPlanPolicy.test.ts
+tests/ai/d1DiagnosticsAggregation.test.ts
+tests/ai/d1DiagnosticsPrivacy.test.ts
+tests/ai/dynamicPlanEvaluator.test.ts
+tests/ai/dynamicPlanEvaluatorBoundaries.test.ts
+tests/ai/handAnalyzer.test.ts
+tests/ai/handPlannerMigration.test.ts
+tests/ai/keepCurrentByteLock.test.ts
+tests/ai/keepCurrentCharacterization.test.ts
+tests/ai/keepCurrentRuntimeShape.test.ts
+tests/ai/lightweightPublicEvidence.test.ts
+tests/ai/particles/actionSupportLikelihood.test.ts
+tests/ai/particles/constrainedParticleSampler.test.ts
+tests/ai/particles/effectiveSampleSize.test.ts
+tests/ai/particles/logWeightNormalization.test.ts
+tests/ai/particles/particleBankBuilder.test.ts
+tests/ai/particles/particleConservation.test.ts
+tests/ai/particles/particleContracts.test.ts
+tests/ai/particles/particleDetachedCharacterization.test.ts
+tests/ai/particles/particlePrivacyAst.test.ts
+tests/ai/particles/publicEventDealReplay.test.ts
+tests/ai/planIdentity.test.ts
+tests/ai/planManager.test.ts
+tests/ai/planManagerD1.test.ts
+tests/ai/planSelectionContracts.test.ts
+tests/ai/planSelectionMode.test.ts
+tests/ai/planSelector.test.ts
+tests/ai/powerGroupPolicyCache.test.ts
+tests/ai/publicEvent.test.ts
+tests/ai/publicEventHash.test.ts
+tests/ai/publicLedger.test.ts
+tests/ai/publicLedgerDependency.test.ts
+tests/ai/publicLedgerKeepCurrent.test.ts
+tests/ai/publicLedgerPrivacy.test.ts
+tests/ai/publicLedgerReplay.test.ts
+tests/ai/publicLedgerTributeReset.test.ts
+tests/ai/publicLedgerTrickFinish.test.ts
+tests/ai/representativeActionReducer.test.ts
+tests/ai/representativeActionReducerDetached.test.ts
+tests/ai/representativeActionShadowAst.test.ts
+tests/ai/representativeActionShadowByteLock.test.ts
+tests/ai/representativeActionShadowIntegration.test.ts
+tests/ai/representativeActionShadowRoom.test.ts
+tests/ai/roleEvaluator.test.ts
+tests/ai/rollout/aggregation.test.ts
+tests/ai/rollout/crnIdentity.test.ts
+tests/ai/rollout/crnInvariance.test.ts
+tests/ai/rollout/d2fShadowByteLock.test.ts
+tests/ai/rollout/d2fShadowObserver.test.ts
+tests/ai/rollout/d2fShadowObserverIntegration.test.ts
+tests/ai/rollout/evidenceGate.test.ts
+tests/ai/rollout/failureAtomicity.test.ts
+tests/ai/rollout/kernel.test.ts
+tests/ai/rollout/leafEvaluation.test.ts
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+tests/ai/rollout/particleScenarioSource.test.ts
+tests/ai/rollout/policy.test.ts
+tests/ai/rollout/ranking.test.ts
+tests/ai/rollout/rolloutOrchestrator.test.ts
+tests/ai/rollout/rolloutPrivacyAst.test.ts
+tests/ai/rollout/teamUtility.test.ts
+tests/ai/strategicHistory.test.ts
+tests/engine/cards.test.ts
+tests/engine/groups.test.ts
+tests/engine/planQuality.test.ts
+tests/engine/planner.test.ts
+tests/engine/scorer.test.ts
+tests/engine/validation.test.ts
+tests/game/ai.test.ts
+tests/game/aiBaseline.test.ts
+tests/game/aiCompatibilityAdapter.test.ts
+tests/game/legacyRoomCallerIsolation.test.ts
+tests/game/legacyRoomIsolation.test.ts
+tests/game/playRules.test.ts
+tests/game/protectedGroups.test.ts
+tests/game/publicEventIdentity.test.ts
+tests/game/publicEventReplayIdentity.test.ts
+tests/game/publicEventRoomAdapter.test.ts
+tests/game/room.test.ts
+tests/game/roomPlanningArchitecture.test.ts
+tests/game/roomUnifiedAdapter.test.ts
+tests/game/settlement.test.ts
+tests/server/api.test.ts
+tests/server/apiCanonicalIdentity.test.ts
+tests/server/apiIdempotency.test.ts
+tests/server/apiShutdown.test.ts
+tests/server/publicIdentityConcurrency.test.ts
+tests/server/publicIdentityDescriptor.test.ts
+tests/server/publicIdentityProvider.test.ts
+tests/server/publicRoomLegacyResponse.test.ts
+tests/tooling/npmTestCollectionContract.test.ts
+tests/ui/handStackStyles.test.ts
+tests/ui/manualGrouping.test.ts
+~~~
+
+### Excluded files and reasons
+
+The following two files are excluded from ordinary full-permitted correctness regression because they are separate focused workload gates:
+~~~text
+tests/ai/d1PlannerExpansionBudgetStudy.test.ts
+tests/ai/rollout/d2fBenchmarkContract.test.ts
+~~~
+Reason for both: study/benchmark-specific contract or timing workload; they remain independently auditable focused gates.
+
+The following files are excluded because they are benchmark workload, benchmark contract, calibration, reporting, reproducibility, or worker-cleanup gates:
+~~~text
+tests/benchmark/artifactConsistency.test.ts
+tests/benchmark/candidates.test.ts
+tests/benchmark/cli.test.ts
+tests/benchmark/contracts.test.ts
+tests/benchmark/d1AtomicWriter.test.ts
+tests/benchmark/d1Calibration.test.ts
+tests/benchmark/d1CalibrationReadiness.test.ts
+tests/benchmark/d1CalibrationReview.test.ts
+tests/benchmark/d1CliArgs.test.ts
+tests/benchmark/d1ConfigHash.test.ts
+tests/benchmark/d1Diagnostics.test.ts
+tests/benchmark/d1DiagnosticsPersistence.test.ts
+tests/benchmark/d1DryRun.test.ts
+tests/benchmark/d1ExecutionProvenance.test.ts
+tests/benchmark/d1FormalBatchLoop.test.ts
+tests/benchmark/d1FormalGate.test.ts
+tests/benchmark/d1Manifest.test.ts
+tests/benchmark/d1Matrix.test.ts
+tests/benchmark/d1ProvenancePersistence.test.ts
+tests/benchmark/d1ReplayValidation.test.ts
+tests/benchmark/d1ReplayWriterCompatibility.test.ts
+tests/benchmark/d1Resume.test.ts
+tests/benchmark/d1Runner.test.ts
+tests/benchmark/d1Statistics.test.ts
+tests/benchmark/d1StrategyRegistry.test.ts
+tests/benchmark/d2aPublicLedgerAdapter.test.ts
+tests/benchmark/keepCurrentLock.test.ts
+tests/benchmark/legacyD1Compatibility.test.ts
+tests/benchmark/observation.test.ts
+tests/benchmark/reporting.test.ts
+tests/benchmark/reportModel.test.ts
+tests/benchmark/reproducibility.test.ts
+tests/benchmark/rotations.test.ts
+tests/benchmark/simulator.test.ts
+tests/benchmark/statistics.test.ts
+tests/benchmark/strategies.test.ts
+tests/benchmark/workerCleanup.test.ts
+~~~
+
+The following files are excluded because they are independent performance or simulation workload gates:
+~~~text
+tests/performance/aiHotPath.test.ts
+tests/simulation/unifiedAiRoomSimulation.test.ts
+tests/simulation/unifiedAiSimulationMetrics.test.ts
+~~~
+
+
+## Explicit full-permitted shards
+
+Every included file belongs to exactly one shard below. Every command uses the fixed local Vitest binary equivalent and includes --exclude "**/.worktrees/**".
+
+### full-01
+~~~text
+tests/ai/actionEvaluator.test.ts
+tests/ai/actionGenerationDiagnostics.test.ts
+tests/ai/actionGenerator.test.ts
+tests/ai/aiDecisionEngine.test.ts
+tests/ai/aiDecisionMigration.test.ts
+tests/ai/aiDecisionShadow.test.ts
+tests/ai/aiPlanningDiagnostics.test.ts
+tests/ai/beliefGuidedPlanPolicy.test.ts
+tests/ai/d1DiagnosticsAggregation.test.ts
+tests/ai/d1DiagnosticsPrivacy.test.ts
+tests/ai/dynamicPlanEvaluator.test.ts
+tests/ai/dynamicPlanEvaluatorBoundaries.test.ts
+tests/ai/handAnalyzer.test.ts
+tests/ai/handPlannerMigration.test.ts
+tests/ai/keepCurrentByteLock.test.ts
+tests/ai/keepCurrentCharacterization.test.ts
+tests/ai/keepCurrentRuntimeShape.test.ts
+tests/ai/lightweightPublicEvidence.test.ts
+tests/ai/particles/actionSupportLikelihood.test.ts
+tests/ai/particles/constrainedParticleSampler.test.ts
+~~~
+
+### full-02
+~~~text
+tests/ai/particles/effectiveSampleSize.test.ts
+tests/ai/particles/logWeightNormalization.test.ts
+tests/ai/particles/particleBankBuilder.test.ts
+tests/ai/particles/particleConservation.test.ts
+tests/ai/particles/particleContracts.test.ts
+tests/ai/particles/particleDetachedCharacterization.test.ts
+tests/ai/particles/particlePrivacyAst.test.ts
+tests/ai/particles/publicEventDealReplay.test.ts
+tests/ai/planIdentity.test.ts
+tests/ai/planManager.test.ts
+tests/ai/planManagerD1.test.ts
+tests/ai/planSelectionContracts.test.ts
+tests/ai/planSelectionMode.test.ts
+tests/ai/planSelector.test.ts
+tests/ai/powerGroupPolicyCache.test.ts
+tests/ai/publicEvent.test.ts
+tests/ai/publicEventHash.test.ts
+tests/ai/publicLedger.test.ts
+tests/ai/publicLedgerDependency.test.ts
+tests/ai/publicLedgerKeepCurrent.test.ts
+~~~
+
+### full-03
+~~~text
+tests/ai/publicLedgerPrivacy.test.ts
+tests/ai/publicLedgerReplay.test.ts
+tests/ai/publicLedgerTributeReset.test.ts
+tests/ai/publicLedgerTrickFinish.test.ts
+tests/ai/representativeActionReducer.test.ts
+tests/ai/representativeActionReducerDetached.test.ts
+tests/ai/representativeActionShadowByteLock.test.ts
+tests/ai/representativeActionShadowIntegration.test.ts
+tests/ai/roleEvaluator.test.ts
+tests/ai/rollout/aggregation.test.ts
+tests/ai/rollout/crnIdentity.test.ts
+tests/ai/rollout/crnInvariance.test.ts
+tests/ai/rollout/d2fShadowByteLock.test.ts
+tests/ai/rollout/d2fShadowObserver.test.ts
+tests/ai/rollout/d2fShadowObserverIntegration.test.ts
+tests/ai/rollout/evidenceGate.test.ts
+tests/ai/rollout/failureAtomicity.test.ts
+tests/ai/rollout/kernel.test.ts
+~~~
+
+### full-04-ast
+~~~text
+tests/ai/representativeActionShadowAst.test.ts
+~~~
+
+### full-05-room
+~~~text
+tests/ai/representativeActionShadowRoom.test.ts
+~~~
+
+### full-06
+~~~text
+tests/ai/rollout/leafEvaluation.test.ts
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+tests/ai/rollout/particleScenarioSource.test.ts
+tests/ai/rollout/policy.test.ts
+tests/ai/rollout/ranking.test.ts
+tests/ai/rollout/rolloutOrchestrator.test.ts
+tests/ai/rollout/rolloutPrivacyAst.test.ts
+tests/ai/rollout/teamUtility.test.ts
+tests/ai/strategicHistory.test.ts
+tests/engine/cards.test.ts
+~~~
+
+### full-07-planner-slow
+~~~text
+tests/engine/planner.test.ts
+~~~
+Command:
+~~~text
+npx vitest run tests/engine/planner.test.ts --exclude "**/.worktrees/**" --reporter=verbose
+~~~
+Suggested outer process wait ceiling: 300000 ms. Do not change the internal Vitest test timeout.
+
+### full-08
+~~~text
+tests/engine/groups.test.ts
+~~~
+
+### full-09
+~~~text
+tests/engine/planQuality.test.ts
+~~~
+
+### full-10
+~~~text
+tests/engine/scorer.test.ts
+~~~
+
+### full-11
+~~~text
+tests/engine/validation.test.ts
+~~~
+
+### full-12
+~~~text
+tests/game/ai.test.ts
+tests/game/aiBaseline.test.ts
+tests/game/aiCompatibilityAdapter.test.ts
+tests/game/legacyRoomCallerIsolation.test.ts
+tests/game/legacyRoomIsolation.test.ts
+~~~
+
+### full-13
+~~~text
+tests/game/playRules.test.ts
+tests/game/protectedGroups.test.ts
+tests/game/publicEventIdentity.test.ts
+tests/game/publicEventReplayIdentity.test.ts
+tests/game/publicEventRoomAdapter.test.ts
+tests/game/room.test.ts
+tests/game/roomPlanningArchitecture.test.ts
+tests/game/roomUnifiedAdapter.test.ts
+tests/game/settlement.test.ts
+~~~
+
+### full-14
+~~~text
+tests/server/api.test.ts
+tests/server/apiCanonicalIdentity.test.ts
+tests/server/apiIdempotency.test.ts
+tests/server/apiShutdown.test.ts
+tests/server/publicIdentityConcurrency.test.ts
+tests/server/publicIdentityDescriptor.test.ts
+tests/server/publicIdentityProvider.test.ts
+tests/server/publicRoomLegacyResponse.test.ts
+~~~
+
+### full-15
+~~~text
+tests/tooling/npmTestCollectionContract.test.ts
+tests/ui/handStackStyles.test.ts
+tests/ui/manualGrouping.test.ts
+~~~
+
+The next run must execute full-01 through full-15, prove assigned=100, unique=100, missing=0, duplicate=0, overlap=0, extra=0, and record each shard exit code. The previous partial evidence of 69 unique files / 842 passed tests is historical evidence only; it is not a Task 9 pass.
+
+
+
+## D2 19-file manifest and focused suites
+
+The D2 manifest is:
+~~~text
+tests/ai/lightweightPublicEvidence.test.ts
+tests/ai/publicEvent.test.ts
+tests/ai/publicEventHash.test.ts
+tests/ai/publicLedger.test.ts
+tests/ai/publicLedgerDependency.test.ts
+tests/ai/publicLedgerPrivacy.test.ts
+tests/ai/publicLedgerReplay.test.ts
+tests/ai/publicLedgerTributeReset.test.ts
+tests/ai/publicLedgerTrickFinish.test.ts
+tests/game/publicEventIdentity.test.ts
+tests/game/publicEventReplayIdentity.test.ts
+tests/game/publicEventRoomAdapter.test.ts
+tests/ai/beliefGuidedPlanPolicy.test.ts
+tests/ai/representativeActionReducer.test.ts
+tests/ai/representativeActionReducerDetached.test.ts
+tests/ai/representativeActionShadowByteLock.test.ts
+tests/ai/representativeActionShadowIntegration.test.ts
+tests/ai/representativeActionShadowAst.test.ts
+tests/ai/representativeActionShadowRoom.test.ts
+~~~
+It must run as the four existing explicit D2 shards: 12 public-ledger files, 5 policy/reducer files, 1 AST file, and 1 Room file, for 19 files / 212 source-audited tests.
+
+Task 1–8 focused/core suites remain independently required:
+~~~text
+tests/ai/particles/particleBankBuilder.test.ts
+tests/ai/rollout/particleBankRolloutBoundary.test.ts
+tests/ai/rollout/particleScenarioSource.test.ts
+tests/ai/rollout/teamUtility.test.ts
+tests/ai/rollout/leafEvaluation.test.ts
+tests/ai/rollout/crnIdentity.test.ts
+tests/ai/rollout/crnInvariance.test.ts
+tests/ai/rollout/policy.test.ts
+tests/ai/rollout/kernel.test.ts
+tests/ai/rollout/rolloutPrivacyAst.test.ts
+tests/ai/rollout/evidenceGate.test.ts
+tests/ai/rollout/aggregation.test.ts
+tests/ai/rollout/ranking.test.ts
+tests/ai/rollout/rolloutOrchestrator.test.ts
+tests/ai/rollout/failureAtomicity.test.ts
+tests/ai/rollout/d2fBenchmarkContract.test.ts
+tests/ai/rollout/d2fShadowObserver.test.ts
+tests/ai/rollout/d2fShadowObserverIntegration.test.ts
+tests/ai/rollout/d2fShadowByteLock.test.ts
+~~~
+
+The fixed benchmark command remains:
+~~~text
+npm exec --offline -- tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json --warmup 3 --iterations 10 --json
+~~~
+
+Task 8 Shadow focused coverage must include default disabled, disabled zero-call behavior, enabled success, formal action/public-state byte isolation, exactly-once eligible decisions, failure isolation, privacy, and no recursion.
+
+## Next-gate requirements
+
+The next Task 9 execution must run, in order:
+1. complete manifest audit;
+2. full-01 through full-15;
+3. Task 1–8 focused/core suites;
+4. Particle regression;
+5. D2 19 files / 212 tests;
+6. the fixed benchmark command;
+7. npx tsc --noEmit;
+8. npm run build;
+9. git diff --check;
+10. final clean status.
+
+A single slow planner shard over the old 124-second outer ceiling is not a D2F defect when it exits 0 with all 19 tests passing. Assertion failure, worker crash, unhandled rejection, or current-only regression remains blocking. Node 24 is supplemental evidence only. Node 22.22.2 CI remains the release gate.
+
+## Verdict and deferred gate
+
+TASK 9 PLANNER RUNTIME CLASSIFIED
+TASK 9 FULL REGRESSION GATE FROZEN
+TASK 9 EXECUTION PENDING
+D2F PRODUCTION UNCHANGED
+AWAITING_NODE22_CI
+D2F SHADOW RELEASE READY: NO
+
+D2F_TASK9_FULL_REGRESSION_GATE_ACTIVE_END
