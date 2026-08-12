@@ -38,17 +38,37 @@ jobs:
           $nodeVersion = node --version
           $npmVersion = npm --version
           $head = git rev-parse HEAD
-          $parent = git rev-parse HEAD^
+          $initialNode22WorkflowHead = '2c78fb3040714b3547a2cd18ca30ca7a40ed7260'
+          $prerequisiteHead = '7e0d9ea133e4c4dd41402f652b52a881d880d829'
           Write-Host "head=$head"
-          Write-Host "parent=$parent"
           Write-Host "node=$nodeVersion"
           Write-Host "npm=$npmVersion"
           if ($nodeVersion -ne 'v22.22.2') { throw "Expected Node v22.22.2, got $nodeVersion" }
-          if ($parent -ne $env:D2F_PRODUCTION_HEAD) { throw "Expected workflow parent $env:D2F_PRODUCTION_HEAD, got $parent" }
-          $changed = @(git diff --name-only "$env:D2F_PRODUCTION_HEAD..HEAD")
-          if ($changed.Count -ne 1 -or $changed[0] -ne '.github/workflows/d2f-node22-release-gate.yml') {
-            throw "Unexpected paths after D2F production HEAD: $($changed -join ', ')"
+          $requiredAncestors = [ordered]@{
+            production = $env:D2F_PRODUCTION_HEAD
+            initialNode22Workflow = $initialNode22WorkflowHead
+            prerequisite = $prerequisiteHead
           }
+          foreach ($entry in $requiredAncestors.GetEnumerator()) {
+            git merge-base --is-ancestor $entry.Value HEAD
+            if ($LASTEXITCODE -ne 0) { throw "Expected $($entry.Key) commit $($entry.Value) to be an ancestor of HEAD" }
+            Write-Host "$($entry.Key)Ancestor=$($entry.Value)"
+          }
+          $allowedChangedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+          @(
+            '.github/workflows/ci.yml',
+            '.github/workflows/d2f-node22-release-gate.yml',
+            'tests/benchmark/cli.test.ts',
+            'tests/benchmark/d0FixtureSourceWorktree.ts',
+            'tests/benchmark/d1CalibrationReview.test.ts',
+            'tests/benchmark/keepCurrentLock.test.ts',
+            'tests/benchmark/legacyD1Compatibility.test.ts',
+            'tests/benchmark/reproducibility.test.ts'
+          ) | ForEach-Object { [void]$allowedChangedPaths.Add($_) }
+          $changed = @(git diff --name-only "$env:D2F_PRODUCTION_HEAD..HEAD")
+          $unexpected = @($changed | Where-Object { -not $allowedChangedPaths.Contains($_) })
+          Write-Host "changedPaths=$($changed -join ', ')"
+          if ($unexpected.Count) { throw "Unexpected paths after D2F production HEAD: $($unexpected -join ', ')" }
 
       - name: Install dependencies
         run: npm ci
