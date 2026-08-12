@@ -3518,10 +3518,10 @@ tests/engine/planner.test.ts remains included. It is assigned to its own slow sh
 
 The fresh tracked test manifest is:
 
-tracked=142
-included=100
+tracked=145
+included=103
 excluded=42
-union=142
+union=145
 missing=0
 duplicate=0
 overlap=0
@@ -3629,8 +3629,11 @@ tests/server/publicIdentityDescriptor.test.ts
 tests/server/publicIdentityProvider.test.ts
 tests/server/publicRoomLegacyResponse.test.ts
 tests/tooling/npmTestCollectionContract.test.ts
+tests/ui/app.test.tsx
+tests/ui/handLayout.test.tsx
 tests/ui/handStackStyles.test.ts
 tests/ui/manualGrouping.test.ts
+tests/ui/productionIdentityLifecycle.test.tsx
 ~~~
 
 ### Excluded files and reasons
@@ -3693,6 +3696,7 @@ tests/simulation/unifiedAiSimulationMetrics.test.ts
 
 ## Explicit full-permitted shards
 
+The current active manifest has 16 explicit full-permitted shards.
 Every included file belongs to exactly one shard below. Every command uses the fixed local Vitest binary equivalent and includes --exclude "**/.worktrees/**".
 
 ### full-01
@@ -3860,7 +3864,18 @@ tests/ui/handStackStyles.test.ts
 tests/ui/manualGrouping.test.ts
 ~~~
 
-The next run must execute full-01 through full-15, prove assigned=100, unique=100, missing=0, duplicate=0, overlap=0, extra=0, and record each shard exit code. The previous partial evidence of 69 unique files / 842 passed tests is historical evidence only; it is not a Task 9 pass.
+### full-16-ui
+~~~text
+tests/ui/app.test.tsx
+tests/ui/handLayout.test.tsx
+tests/ui/productionIdentityLifecycle.test.tsx
+~~~
+Command:
+~~~text
+npx vitest run tests/ui/app.test.tsx tests/ui/handLayout.test.tsx tests/ui/productionIdentityLifecycle.test.tsx --exclude "**/.worktrees/**" --reporter=dot
+~~~
+
+The next run must execute full-01 through full-16, prove assigned=103, unique=103, missing=0, duplicate=0, overlap=0, extra=0, and record each shard exit code. The previous partial evidence of 69 unique files / 842 passed tests is historical evidence only; it is not a Task 9 pass.
 
 
 
@@ -3924,7 +3939,7 @@ Task 8 Shadow focused coverage must include default disabled, disabled zero-call
 
 The next Task 9 execution must run, in order:
 1. complete manifest audit;
-2. full-01 through full-15;
+2. full-01 through full-16;
 3. Task 1–8 focused/core suites;
 4. Particle regression;
 5. D2 19 files / 212 tests;
