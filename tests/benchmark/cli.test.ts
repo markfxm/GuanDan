@@ -9,7 +9,6 @@ import { simulateGame } from "./simulator";
 import { writeReplay, ENGINE_VERSION, ROOM_RULES_VERSION } from "./reporting";
 import { strategyDescriptors } from "./strategies";
 import type { BenchmarkConfig } from "./contracts";
-import type { SimulationSummary } from "./simulator";
 
 const resolvedDescriptors = strategyDescriptors.map((descriptor) => ({ ...descriptor, sourceCommit: descriptor.sourceCommit.toLowerCase() === "unknown" ? ENGINE_VERSION.split("@").slice(1).join("@") : descriptor.sourceCommit }));
 
@@ -46,10 +45,12 @@ describe("AI benchmark CLI", () => {
     expect(two.games.map((game) => game.matchId)).toEqual([...two.games].map((game) => game.matchId).sort());
   }, 120_000);
 
-  it("rejects unknown strategy as a recorded failure", async () => {
-    const result = await runBenchmark({ strategyA: "does-not-exist", strategyB: "legal-random", seeds: [1], paired: true, replayMode: "none", concurrency: 1 });
-    expect(result.games.some((game) => { const simulation = game as SimulationSummary; return simulation.failed && simulation.errors.some((error) => error.error.includes("UNKNOWN_STRATEGY")); })).toBe(true);
-  }, 120_000);
+  it("rejects unknown strategy as a recorded failure", () => {
+    const config: BenchmarkConfig = { benchmarkVersion: "d0-v1", rank: "2", seeds: [1], strategyA: "does-not-exist", strategyB: "legal-random", replayMode: "none" };
+    const result = simulateGame(buildGamesForSeed(config, 1)[0]!);
+    expect(result.failed).toBe(true);
+    expect(result.errors.some((error) => error.error.includes("UNKNOWN_STRATEGY"))).toBe(true);
+  });
 
   it("keeps action hashes invariant when diagnostics are enabled and reports independent diagnostics", async () => {
     const base = { strategyA: "unknown-a", strategyB: "unknown-b", seeds: [1], paired: true, replayMode: "none" as const };

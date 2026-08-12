@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildPublicGameIdentity } from "../../src/game/publicEvent";
 import { createLegacyBenchmarkRoom } from "../../src/game/room";
 import { replayMatch } from "../../scripts/replayAiBenchmark";
@@ -12,13 +12,22 @@ import { buildGamesForSeed } from "./rotations";
 import { ENGINE_VERSION, ROOM_RULES_VERSION } from "./reporting";
 import { getStrategy } from "./strategies";
 import { simulateGame } from "./simulator";
+import { createD0FixtureSourceWorktree, type D0FixtureSourceWorktree } from "./d0FixtureSourceWorktree";
 
 const root = process.cwd();
 const d0FixturePath = path.resolve(root, "tests/ai/fixtures/d0KeepCurrentCases.json");
 const d0GeneratorPath = path.resolve(root, "scripts/generateD0KeepCurrentFixtures.ts");
-const d0SourceWorktree = path.resolve(root, "..", "d0-fixture-ai-benchmark");
 const d0SourceCommit = "e2a20e18f8e5c0871db38ad69426262e43766ce1";
 const tsxCli = path.resolve(root, "node_modules/tsx/dist/cli.mjs");
+let d0Source: D0FixtureSourceWorktree;
+
+beforeAll(() => {
+  d0Source = createD0FixtureSourceWorktree(d0SourceCommit);
+});
+
+afterAll(() => {
+  d0Source.remove();
+});
 
 const d1Config = {
   benchmarkVersion: "d1-topk-v1" as const,
@@ -128,7 +137,7 @@ describe("legacy D1 compatibility boundaries", () => {
   });
 
   it("keeps the committed D0 fixture byte-identical under check-only generation", () => {
-    expect(existsSync(d0SourceWorktree)).toBe(true);
+    expect(existsSync(d0Source.root)).toBe(true);
     expect(existsSync(d0FixturePath)).toBe(true);
 
     const before = readFileSync(d0FixturePath);
@@ -136,7 +145,7 @@ describe("legacy D1 compatibility boundaries", () => {
       tsxCli,
       d0GeneratorPath,
       "--source-worktree",
-      d0SourceWorktree,
+      d0Source.root,
       "--source-commit",
       d0SourceCommit,
       "--output",

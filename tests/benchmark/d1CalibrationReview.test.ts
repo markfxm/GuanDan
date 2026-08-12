@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   buildCalibrationReviewModel,
   classifyBehaviorExposure,
@@ -69,8 +72,17 @@ describe("D1 calibration review", () => {
   });
 
   it("inventory ordering is stable", async () => {
-    const first = await inventoryDirectory("artifacts/ai-benchmark-d1-calibration-v2");
-    const second = await inventoryDirectory("artifacts/ai-benchmark-d1-calibration-v2");
-    expect(second).toEqual(first);
-  }, 120_000);
+    const root = mkdtempSync(path.join(os.tmpdir(), "d1-calibration-inventory-"));
+    try {
+      mkdirSync(path.join(root, "nested"));
+      writeFileSync(path.join(root, "z.json"), "z");
+      writeFileSync(path.join(root, "nested", "a.json"), "a");
+      const first = await inventoryDirectory(root);
+      const second = await inventoryDirectory(root);
+      expect(first.files.map((file) => file.path)).toEqual(["nested/a.json", "z.json"]);
+      expect(second).toEqual(first);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
