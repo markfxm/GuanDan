@@ -2,21 +2,30 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { actionStableKey, canonicalJson, decisionPublicTraceHash, fixtureInputHash, fixtureOutputHash, inputPayload, runtimeCanonicalJson, sha256 } from "../ai/d0FixtureCanonicalizer";
 import type { D0KeepCurrentFixture } from "../ai/d0FixtureTypes";
 import { getStrategy } from "./strategies";
 import type { BenchmarkObservation } from "./contracts";
+import { createD0FixtureSourceWorktree, type D0FixtureSourceWorktree } from "./d0FixtureSourceWorktree";
 
 const fixturePath = path.resolve(process.cwd(), "tests/ai/fixtures/d0KeepCurrentCases.json");
 const generatorPath = path.resolve(process.cwd(), "scripts/generateD0KeepCurrentFixtures.ts");
 const tsxCli = path.resolve(process.cwd(), "node_modules/tsx/dist/cli.mjs");
-const sourceWorktree = path.resolve(process.cwd(), "..", "d0-fixture-ai-benchmark");
 const sourceCommit = "e2a20e18f8e5c0871db38ad69426262e43766ce1";
+let source: D0FixtureSourceWorktree;
+
+beforeAll(() => {
+  source = createD0FixtureSourceWorktree(sourceCommit);
+});
+
+afterAll(() => {
+  source.remove();
+});
 
 function runGenerator(output: string, extra: string[] = []): void {
   execFileSync(process.execPath, [tsxCli, generatorPath,
-    "--source-worktree", sourceWorktree,
+    "--source-worktree", source.root,
     "--source-commit", sourceCommit,
     "--output", output,
     "--generator-version", "d0-fixture-v1",
@@ -34,6 +43,11 @@ function expectGeneratorFailureAt(worktree: string, args: string[], message: str
 }
 
 describe("D0 fixture and unified adapter lock", () => {
+  it("removes only a clean test-created source worktree without force", () => {
+    const helperSource = readFileSync(path.resolve(process.cwd(), "tests/benchmark/d0FixtureSourceWorktree.ts"), "utf8");
+    expect(helperSource).not.toMatch(/worktree", "remove", "--force"/);
+  });
+
   it("has complete provenance and stable fixture hashes", () => {
     const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as D0KeepCurrentFixture;
     expect(fixture.sourceCommit).toBe(sourceCommit);
@@ -88,7 +102,7 @@ describe("D0 fixture and unified adapter lock", () => {
     const drifted = before.replace(sourceCommit, "0".repeat(40));
     writeFileSync(driftPath, drifted);
     expectGeneratorFailure([
-      "--source-worktree", sourceWorktree,
+      "--source-worktree", source.root,
       "--source-commit", sourceCommit,
       "--output", driftPath,
       "--generator-version", "d0-fixture-v1",
@@ -114,7 +128,7 @@ describe("D0 fixture and unified adapter lock", () => {
       mutate(copy);
       writeFileSync(tamperedPath, JSON.stringify(copy, null, 2));
       expectGeneratorFailure([
-        "--source-worktree", sourceWorktree,
+        "--source-worktree", source.root,
         "--source-commit", sourceCommit,
         "--output", tamperedPath,
         "--generator-version", "d0-fixture-v1",
@@ -142,7 +156,7 @@ describe("D0 fixture and unified adapter lock", () => {
         const serialized = JSON.stringify(copy, null, 2);
         writeFileSync(output, serialized);
         expectGeneratorFailure([
-          "--source-worktree", sourceWorktree,
+          "--source-worktree", source.root,
           "--source-commit", sourceCommit,
           "--output", output,
           "--generator-version", "d0-fixture-v1",
@@ -173,7 +187,7 @@ describe("D0 fixture and unified adapter lock", () => {
         writeFileSync(absolutePath, `${readFileSync(absolutePath, "utf8")}\n// provenance mutation\n`);
         try {
           expectGeneratorFailureAt(dirtyWorktree, [
-            "--source-worktree", sourceWorktree,
+            "--source-worktree", source.root,
             "--source-commit", sourceCommit,
             "--output", fixtureCopy,
             "--generator-version", "d0-fixture-v1",
@@ -192,7 +206,7 @@ describe("D0 fixture and unified adapter lock", () => {
 
   it("rejects an unexpected source commit before loading the engine", () => {
     expectGeneratorFailure([
-      "--source-worktree", sourceWorktree,
+      "--source-worktree", source.root,
       "--source-commit", "0000000000000000000000000000000000000000",
       "--output", fixturePath,
       "--generator-version", "d0-fixture-v1",

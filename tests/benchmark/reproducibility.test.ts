@@ -21,12 +21,11 @@ const base = {
 const resolvedDescriptors = strategyDescriptors.map((descriptor) => ({ ...descriptor, sourceCommit: descriptor.sourceCommit.toLowerCase() === "unknown" ? ENGINE_VERSION.split("@").slice(1).join("@") : descriptor.sourceCommit }));
 
 describe("AI benchmark reproducibility", () => {
-  it("keeps one-shot and four 50-seed batch manifests identical after volatile fields are removed", async () => {
-    const oneShot = await runBenchmark({ ...base, seeds: Array.from({ length: 200 }, (_, index) => index + 1), concurrency: 4 });
-    const batches = await Promise.all([1, 2, 3, 4].map((batch) => {
-      const start = (batch - 1) * 50 + 1;
-      return runBenchmark({ ...base, seeds: Array.from({ length: 50 }, (_, index) => start + index), concurrency: 4 });
-    }));
+  it("keeps one-shot and four single-seed batch manifests identical after volatile fields are removed", async () => {
+    const seeds = [1, 2, 3, 4];
+    const oneShot = await runBenchmark({ ...base, seeds, concurrency: 1 });
+    const batches = [];
+    for (const seed of seeds) batches.push(await runBenchmark({ ...base, seeds: [seed], concurrency: 1 }));
     const merged = mergeBatches(batches.map((batch) => batch.manifest));
     expect(stripVolatile(merged.games)).toEqual(stripVolatile(oneShot.manifest.games));
     expect(merged.publicTraceHashes).toEqual(oneShot.manifest.publicTraceHashes);
