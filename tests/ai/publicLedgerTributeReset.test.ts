@@ -39,11 +39,13 @@ describe("D2a tribute and reset events", () => {
     };
     const initialLedger = room.publicLedger;
     const initialCounts = { ...initialLedger.handCounts };
+    const initialHash = canonicalPublicLedgerHash(room.publicLedger);
 
     advanceOpeningTribute(room);
 
     expect(room.publicEvents).toEqual([]);
     expect(Object.fromEntries([0, 1, 2, 3].map((seat) => [seat, room.hands[seat as 0 | 1 | 2 | 3].length]))).toEqual(initialCounts);
+    expect(canonicalPublicLedgerHash(room.publicLedger)).toBe(initialHash);
 
     advanceOpeningTribute(room);
 
