@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { deepStrictEqual } from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { posix, resolve, win32 } from "node:path";
 import { buildParticleBank } from "../../src/ai/particles/particleBankBuilder";
 import { canonicalPublicLedgerHash } from "../../src/game/publicLedger";
 import { runDetachedRollout } from "../../src/ai/rollout/rolloutOrchestrator";
@@ -16,6 +16,26 @@ import {
 import type { ParticleBankBuildInput } from "../../src/ai/particles/contracts";
 
 export const HANG_CEILING_MS = 60_000;
+export const EXPECTED_NODE_VERSION = "v22.22.2";
+
+function canonicalEntryPath(path: string, platform: NodeJS.Platform): string {
+  const pathApi = platform === "win32" ? win32 : posix;
+  let canonical = pathApi.normalize(pathApi.resolve(path));
+  try {
+    canonical = realpathSync.native(canonical);
+  } catch {
+    // The entry path may not exist in unit tests; normalized comparison remains safe.
+  }
+  return platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+
+export function isBenchmarkEntryPoint(
+  modulePath: string,
+  entryPath: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return entryPath !== undefined && canonicalEntryPath(modulePath, platform) === canonicalEntryPath(entryPath, platform);
+}
 
 export type BenchmarkMetrics = Readonly<{
   sampleCount: number;
@@ -37,7 +57,7 @@ export type BenchmarkRunRecord = Readonly<{
 
 export type BenchmarkExecution = Readonly<{
   runs: readonly BenchmarkRunRecord[];
-  correctnessComparisons: number;
+  comparisonCount: number;
   warmupIterations: number;
   measuredIterations: number;
   samples: readonly number[];
@@ -83,7 +103,7 @@ export function calculateBenchmarkMetrics(samples: readonly number[]): Benchmark
     throw new RangeError("INVALID_METRICS");
   }
   const sorted = [...samples].sort((left, right) => left - right);
-  const sum = samples.reduce((total, sample) => total + sample, 0);
+  const sum = sorted.reduce((total, sample) => total + sample, 0);
   const meanMs = sum / samples.length;
   const medianIndex = Math.floor(samples.length / 2);
   const medianMs = samples.length % 2 === 0
@@ -109,7 +129,7 @@ export function evaluateCompletedRunDuration(durationMs: number): void {
 export function executeBenchmarkRuns<T>(options: BenchmarkExecutionOptions<T>): BenchmarkExecution {
   const runs: BenchmarkRunRecord[] = [];
   const samples: number[] = [];
-  let correctnessComparisons = 0;
+  let comparisonCount = 0;
 
   const executeOne = (phase: BenchmarkRunPhase, includedInSamples: boolean): void => {
     const start = options.now();
@@ -117,7 +137,7 @@ export function executeBenchmarkRuns<T>(options: BenchmarkExecutionOptions<T>): 
     const durationMs = options.now() - start;
     evaluateCompletedRunDuration(durationMs);
     options.compare(result);
-    correctnessComparisons += 1;
+    comparisonCount += 1;
     runs.push({ phase, durationMs, includedInSamples });
     if (includedInSamples) samples.push(durationMs);
   };
@@ -128,7 +148,7 @@ export function executeBenchmarkRuns<T>(options: BenchmarkExecutionOptions<T>): 
 
   return {
     runs,
-    correctnessComparisons,
+    comparisonCount,
     warmupIterations: runs.filter((run) => run.phase === "warmup").length,
     measuredIterations: runs.filter((run) => run.phase === "measured").length,
     samples,
@@ -199,7 +219,7 @@ function main(argv: readonly string[]): void {
     throw new BenchmarkFailure(3, "benchmark execution failed");
   }
 
-  if (execution.correctnessComparisons !== execution.runs.length
+  if (execution.comparisonCount !== execution.runs.length
     || execution.warmupIterations !== options.warmup
     || execution.measuredIterations !== options.iterations
     || execution.samples.length !== options.iterations) {
@@ -222,7 +242,7 @@ function main(argv: readonly string[]): void {
     nodeVersion: process.version,
     platform: process.platform,
     architecture: process.arch,
-    evidenceLevel: process.version === "v22.22.2" ? "NODE22_RELEASE_EVIDENCE" : "SUPPLEMENTAL_LOCAL_EVIDENCE",
+    evidenceLevel: process.version === EXPECTED_NODE_VERSION ? "NODE22_RELEASE_EVIDENCE" : "SUPPLEMENTAL_LOCAL_EVIDENCE",
     warmupIterations: execution.warmupIterations as 3,
     measuredIterations: execution.measuredIterations as 10,
     correctness: "passed",
@@ -419,8 +439,9 @@ function checkResult(result: RolloutExecutionResult, expected: JsonRecord): void
     if (actual.schemaVersion !== "d2f-rollout-result-v2" || actual.mode !== "detached" || actual.policyId !== expected.policyId || actual.formalExecutionAllowed !== false || actual.aggregateDiagnostics.coverage !== expected.coverage) throw new Error("provenance");
     assertFiniteResult(actual);
     deepStrictEqual(actual, expected.result);
-  } catch {
-    throw new BenchmarkFailure(2, "correctness oracle mismatch");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new BenchmarkFailure(2, `correctness oracle mismatch: ${detail}`);
   }
 }
 
@@ -606,7 +627,7 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
   return Object.freeze(value);
 }
 
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+if (isBenchmarkEntryPoint(fileURLToPath(import.meta.url), process.argv[1])) {
   try {
     main(process.argv.slice(2));
   } catch (error) {

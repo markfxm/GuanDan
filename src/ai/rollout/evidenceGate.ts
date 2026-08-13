@@ -4,8 +4,10 @@ import type {
   RolloutFailure,
   RolloutReplicateResult,
   RolloutRequestField,
+  RolloutScenarioProjectionMismatchField,
 } from "./contracts";
 import { validateRolloutEvidenceRequirements } from "./contracts";
+import { getOwnDataProperty as getOwnData, isPlainDataArray, isPlainDataRecord } from "./plainData";
 
 export type RolloutEvidenceScenario = Readonly<{
   scenarioIdentity: string;
@@ -102,7 +104,7 @@ export function validateRolloutEvidence(input: RolloutEvidenceInput): RolloutCon
       if (!isRolloutReplicateResult(result)) return invalid("request");
       if (!result.ok) return { ok: false, failure: { kind: "kernel-failed", failure: result.failure } };
       if (!candidateIds.includes(result.candidateId) || !scenarios.some((scenario) => scenario.scenarioIdentity === result.scenarioIdentity)) {
-        return coverageFailure(expectedCoverage, results.length + 1);
+        return coverageFailure(expectedCoverage, resultsInput.length);
       }
       results.push(result);
     }
@@ -219,7 +221,80 @@ function isKernelFailure(value: unknown): boolean {
       && isPositiveSafeInteger(getOwnData(value, "maximumWorkUnits"));
   }
   if (kind === "policy-failed") return hasExactKeys(value, ["kind", "failure"]);
-  return kind === "simulation-failed" && hasExactKeys(value, ["kind", "stage"]);
+  if (kind !== "simulation-failed") return false;
+
+  const stage = getOwnData(value, "stage");
+  if (stage === "input") return matchesSimulationFailure(value, stage, [
+    "malformed-envelope", "invalid-budget", "invalid-root-identity", "invalid-public-state", "invalid-candidate",
+  ]);
+  if (stage === "replay") {
+    if (matchesSimulationFailure(value, stage, ["invalid-scenario", "invalid-replay-context"])) return true;
+    if (!hasExactKeys(value, ["kind", "stage", "reason", "field"])) return false;
+    return getOwnData(value, "reason") === "scenario-projection-mismatch"
+      && isProjectionMismatchField(getOwnData(value, "field"));
+  }
+  if (stage === "root-action") return matchesSimulationFailure(value, stage, ["illegal-action"]);
+  if (stage === "policy-action") return matchesSimulationFailure(value, stage, ["illegal-action"]);
+  if (stage === "crn") return matchesSimulationFailure(value, stage, ["coordinate", "random-domain", "view"]);
+  if (stage === "transition") return matchesSimulationFailure(value, stage, [
+    "invalid-action-transition", "invalid-pass-quorum", "public-history-not-append-only",
+  ]);
+  if (stage === "state-conservation") return matchesSimulationFailure(value, stage, [
+    "invalid-shape", "duplicate-card", "public-card-overlap", "unexpected-card", "missing-card",
+    "hand-count-mismatch", "finished-hand-count-mismatch", "unfinished-hand-count-mismatch",
+    "invalid-finish-order", "invalid-trick", "invalid-turn",
+  ]);
+  if (stage === "terminal-projection") return matchesSimulationFailure(value, stage, ["invalid-finish-order", "utility-failed"]);
+  return false;
+}
+
+function matchesSimulationFailure(value: Record<string, unknown>, stage: string, reasons: readonly string[]): boolean {
+  if (!hasExactKeys(value, ["kind", "stage", "reason"])) return false;
+  const reason = getOwnData(value, "reason");
+  return getOwnData(value, "stage") === stage && typeof reason === "string" && reasons.includes(reason);
+}
+
+const PROJECTION_MISMATCH_FIELDS: readonly RolloutScenarioProjectionMismatchField[] = [
+  "publicReplayContext.initialLedger.gameId",
+  "publicReplayContext.initialLedger.roundIdentity",
+  "publicReplayContext.initialLedger.handIdentity",
+  "publicReplayContext.initialLedger.currentTrick.leadSeat",
+  "publicReplayContext.initialLedger.publicTributeEvents",
+  "publicReplayContext.finalLedger.gameId",
+  "publicReplayContext.finalLedger.roundIdentity",
+  "publicReplayContext.finalLedger.handIdentity",
+  "publicReplayContext.finalLedger.lastAppliedEventIndex",
+  "publicReplayContext.finalLedger.nextEventIndex",
+  "publicReplayContext.finalLedger.handCounts",
+  "publicReplayContext.finalLedger.finishOrder",
+  "publicReplayContext.finalLedger.currentTrick.trickIndex",
+  "publicReplayContext.finalLedger.currentTrick.leadSeat",
+  "publicReplayContext.finalLedger.currentTrick.lastPlaySeat",
+  "publicReplayContext.finalLedger.currentTrick.lastPlayStableKey",
+  "publicReplayContext.finalLedger.currentTrick.passSeats",
+  "publicReplayContext.finalLedger.playedCardIds",
+  "publicReplayContext.finalLedger.revealedTransferEvents",
+  "publicReplayContext.publicHistoryEvents",
+  "canonicalPublicLedgerHash(publicReplayContext.finalLedger)",
+  "scenario.privateState.ledger",
+  "scenario.privateState.handCounts",
+  "scenario.privateState.finishOrder",
+  "scenario.privateState.currentTrick",
+  "scenario.privateState.currentLastPlay",
+  "scenario.privateState.revealedTransferEvents",
+  "scenario.privateState.publicPlayedCardIds",
+  "scenario.privateState.hands",
+  "publicState.gameRank",
+  "publicState.actingSeat",
+  "publicState.handCounts",
+  "publicState.finishOrder",
+  "publicState.publicPlayedCardIds",
+  "publicState.currentLastPlay",
+  "publicState.currentLastPlaySeat",
+];
+
+function isProjectionMismatchField(value: unknown): value is RolloutScenarioProjectionMismatchField {
+  return typeof value === "string" && PROJECTION_MISMATCH_FIELDS.includes(value as RolloutScenarioProjectionMismatchField);
 }
 
 function isTeamUtility(value: unknown): value is -3 | -2 | -1 | 1 | 2 | 3 {
@@ -277,49 +352,8 @@ function invalidBudget(field: "replicateCountPerScenario"): RolloutContractResul
   return { ok: false, failure: { kind: "invalid-budget", field } };
 }
 
-function isPlainDataRecord(value: unknown, allowedKeys?: readonly string[], exact = false): value is Record<string, unknown> {
-  try {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) return false;
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.some((key) => typeof key !== "string" || (allowedKeys !== undefined && !allowedKeys.includes(key)))) return false;
-    if (exact && allowedKeys !== undefined && (ownKeys.length !== allowedKeys.length || allowedKeys.some((key) => !ownKeys.includes(key)))) return false;
-    return ownKeys.every((key) => isDataDescriptor(Object.getOwnPropertyDescriptor(value, key)));
-  } catch {
-    return false;
-  }
-}
-
-function isPlainDataArray(value: unknown): value is readonly unknown[] {
-  try {
-    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return false;
-    const length = Object.getOwnPropertyDescriptor(value, "length");
-    if (!isDataDescriptor(length) || !isNonNegativeSafeInteger(length.value)) return false;
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.length !== length.value + 1 || !ownKeys.includes("length")) return false;
-    for (let index = 0; index < length.value; index += 1) {
-      if (!ownKeys.includes(String(index)) || !isDataDescriptor(Object.getOwnPropertyDescriptor(value, String(index)))) return false;
-    }
-    return ownKeys.every((key) => key === "length" || (typeof key === "string" && /^(?:0|[1-9]\d*)$/.test(key) && Number(key) < length.value));
-  } catch {
-    return false;
-  }
-}
-
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   return isPlainDataRecord(value, keys, true);
-}
-
-function isDataDescriptor(descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor & { value: unknown } {
-  return descriptor !== undefined && Object.prototype.hasOwnProperty.call(descriptor, "value") && descriptor.get === undefined && descriptor.set === undefined;
-}
-
-function getOwnData(value: unknown, key: string): unknown {
-  if (value === null || typeof value !== "object") throw new TypeError("DATA_PROPERTY_INVALID");
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  if (!isDataDescriptor(descriptor)) throw new TypeError("DATA_PROPERTY_INVALID");
-  return descriptor.value;
 }
 
 function compareCodeUnits(left: string, right: string): number {

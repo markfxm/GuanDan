@@ -132,7 +132,7 @@ export function aggregateCandidateRollout(input: RolloutCandidateAggregationInpu
       for (const replicate of [...replicates].sort((left, right) => compareCodeUnits(left.replicateIdentity, right.replicateIdentity))) {
         weightedUtilityTotal += scenario.normalizedWeight * replicate.utility;
         const nextWork = checkedSum([workUnitCount, replicate.workUnits]);
-        if (nextWork === undefined) return { ok: false, failure: { kind: "coverage-mismatch", expected: Number.MAX_SAFE_INTEGER, actual: Number.MAX_SAFE_INTEGER } };
+        if (nextWork === undefined) return { ok: false, failure: { kind: "work-unit-overflow" } };
         workUnitCount = nextWork;
       }
     }
