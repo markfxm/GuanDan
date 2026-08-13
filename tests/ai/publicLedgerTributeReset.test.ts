@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildPublicGameIdentity } from "../../src/game/publicEvent";
-import { createInitialPublicLedger, resetPublicLedger } from "../../src/game/publicLedger";
+import { canonicalPublicLedgerHash, createInitialPublicLedger, resetPublicLedger } from "../../src/game/publicLedger";
+import { rebuildPublicLedger } from "../../src/game/publicEventReplay";
 import { advanceOpeningTribute, createRoom, type RoomState } from "../../src/game/room";
 
 const identity = buildPublicGameIdentity("d2a:tribute", 0, 0, "benchmark-scenario");
@@ -23,6 +24,62 @@ describe("D2a tribute and reset events", () => {
     const actualReturnCardId = room.openingTribute?.exchanges?.[0]?.returnCard?.id;
     expect(room.publicLedger?.revealedTransferEvents.map((event) => event.cardId)).toEqual([tributeCard.id, actualReturnCardId]);
     expect(room.publicLedger?.playedCardIds).not.toContain(tributeCard.id);
+  });
+
+  it("commits every double-tribute transfer atomically and replays the resulting ledger", () => {
+    const doubleIdentity = buildPublicGameIdentity("d2a:double-tribute", 0, 0, "benchmark-scenario");
+    const room = createRoom({
+      publicIdentity: doubleIdentity,
+      rank: "K",
+      seed: 1,
+      pendingTributeItems: [{ payer: 1, receiver: 0 }, { payer: 3, receiver: 2 }],
+    }) as RoomState & {
+      publicLedger: NonNullable<RoomState["publicLedger"]>;
+      publicEvents: NonNullable<RoomState["publicEvents"]>;
+    };
+    const initialLedger = room.publicLedger;
+    const initialCounts = { ...initialLedger.handCounts };
+
+    advanceOpeningTribute(room);
+
+    expect(room.publicEvents).toEqual([]);
+    expect(Object.fromEntries([0, 1, 2, 3].map((seat) => [seat, room.hands[seat as 0 | 1 | 2 | 3].length]))).toEqual(initialCounts);
+
+    advanceOpeningTribute(room);
+
+    expect(room.publicEvents.map((event) => event.kind)).toEqual(["tribute", "tribute"]);
+    expect(room.publicEvents.map((event) => event.publicCardIds)).toEqual(room.openingTribute?.exchanges?.map((exchange) => [exchange.tributeCard.id]));
+    expect(room.publicLedger.handCounts).toEqual(Object.fromEntries([0, 1, 2, 3].map((seat) => [seat, room.hands[seat as 0 | 1 | 2 | 3].length])));
+    const rebuilt = rebuildPublicLedger({
+      schemaVersion: "d2-public-ledger-replay-v1",
+      initialState: {
+        identity: doubleIdentity,
+        initialHandCounts: initialCounts,
+        openingLeader: initialLedger.currentTrick.leadSeat,
+        initialTrickIndex: initialLedger.currentTrick.trickIndex,
+        openingTributePublicState: { status: "pending" },
+      },
+      events: room.publicEvents,
+    });
+    expect(rebuilt.hash).toBe(canonicalPublicLedgerHash(room.publicLedger));
+  });
+
+  it("reserves distinct tribute cards when one payer has multiple pending items", () => {
+    const repeatedPayerIdentity = buildPublicGameIdentity("d2a:repeated-payer", 0, 0, "benchmark-scenario");
+    const room = createRoom({
+      publicIdentity: repeatedPayerIdentity,
+      rank: "K",
+      seed: 1,
+      pendingTributeItems: [{ payer: 1, receiver: 0 }, { payer: 1, receiver: 2 }],
+    });
+
+    advanceOpeningTribute(room);
+    advanceOpeningTribute(room);
+
+    const tributeCardIds = room.openingTribute?.exchanges?.map((exchange) => exchange.tributeCard.id) ?? [];
+    expect(new Set(tributeCardIds).size).toBe(2);
+    expect(room.publicEvents?.map((event) => event.kind)).toEqual(["tribute", "tribute"]);
+    expect(room.publicLedger?.handCounts).toEqual(Object.fromEntries([0, 1, 2, 3].map((seat) => [seat, room.hands[seat as 0 | 1 | 2 | 3].length])));
   });
 
   it("resets the ledger from a new hand identity without carrying events", () => {

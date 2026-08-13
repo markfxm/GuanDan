@@ -549,39 +549,36 @@ function advanceOpeningTributeWithPublicLedger(room: RoomState, seat?: Seat, car
 
 function buildTransferEventDrafts(room: RoomState, draft: RoomState, phase: TributeState["phase"]): PublicActionEventDraft[] {
   if (room.publicIdentity === undefined || room.publicLedger === undefined) return [];
-  const changes = { 0: 0, 1: 0, 2: 0, 3: 0 } as Record<Seat, number>;
-  let fromSeat: Seat | undefined;
-  let toSeat: Seat | undefined;
-  let cardId: string | undefined;
+  const identity = room.publicIdentity;
+  const ledger = room.publicLedger;
+  const transfers: Array<{ fromSeat: Seat; toSeat: Seat; cardId: string }> = [];
   for (const candidate of [0, 1, 2, 3] as const) {
     const before = new Set(room.hands[candidate].map((card) => card.id));
     const after = new Set(draft.hands[candidate].map((card) => card.id));
     const removed = [...before].filter((id) => !after.has(id));
-    const added = [...after].filter((id) => !before.has(id));
-    changes[candidate] = draft.hands[candidate].length - room.hands[candidate].length;
-    if (removed.length === 1) {
-      fromSeat = candidate;
-      cardId = removed[0];
+    for (const cardId of removed) {
+      const toSeat = ([0, 1, 2, 3] as const).find((seat) => !room.hands[seat].some((card) => card.id === cardId) && draft.hands[seat].some((card) => card.id === cardId));
+      if (toSeat !== undefined && toSeat !== candidate) transfers.push({ fromSeat: candidate, toSeat, cardId });
     }
-    if (added.length === 1) toSeat = candidate;
   }
-  if (fromSeat === undefined || toSeat === undefined || cardId === undefined || fromSeat === toSeat) return [];
   const kind = phase === "return" ? "return" : "tribute";
-  return [{
+  const exchangeOrder = new Map(draft.openingTribute?.exchanges?.map((exchange, index) => [kind === "return" ? exchange.returnCard?.id : exchange.tributeCard.id, index]));
+  transfers.sort((left, right) => (exchangeOrder.get(left.cardId) ?? Number.MAX_SAFE_INTEGER) - (exchangeOrder.get(right.cardId) ?? Number.MAX_SAFE_INTEGER));
+  return transfers.map(({ fromSeat, toSeat, cardId }, index) => ({
     schemaVersion: "d2-public-event-v2",
-    gameId: room.publicIdentity.gameId,
-    roundIdentity: room.publicIdentity.roundIdentity,
-    handIdentity: room.publicIdentity.handIdentity,
-    eventIndex: room.publicLedger.nextEventIndex,
+    gameId: identity.gameId,
+    roundIdentity: identity.roundIdentity,
+    handIdentity: identity.handIdentity,
+    eventIndex: ledger.nextEventIndex + index,
     kind,
     seat: fromSeat,
     publicCardIds: [cardId],
     fromSeat,
     toSeat,
-    handCountChanges: changes,
+    handCountChanges: { 0: fromSeat === 0 ? -1 : toSeat === 0 ? 1 : 0, 1: fromSeat === 1 ? -1 : toSeat === 1 ? 1 : 0, 2: fromSeat === 2 ? -1 : toSeat === 2 ? 1 : 0, 3: fromSeat === 3 ? -1 : toSeat === 3 ? 1 : 0 },
     publicStableKey: `${kind}:${fromSeat}:${toSeat}:${cardId}`,
-    trickIndex: room.publicLedger.currentTrick.trickIndex,
-  } as PublicActionEventDraft];
+    trickIndex: ledger.currentTrick.trickIndex,
+  } as PublicActionEventDraft));
 }
 
 function advanceOpeningTributeLegacy(room: RoomState, seat?: Seat, cardIds: string[] = []): void {
@@ -628,7 +625,6 @@ function advanceOpeningTributeLegacy(room: RoomState, seat?: Seat, cardIds: stri
   const item = activeItem;
   const payerSeat = item.payer;
   const tributeCard = selectOpeningTributeCard(room, payerSeat, seat, cardIds);
-  removeCard(room.hands, payerSeat, tributeCard);
 
   const exchanges = [...(tribute.exchanges ?? [])];
   exchanges[itemIndex] = {
@@ -801,6 +797,7 @@ function assignTributeReceivers(room: RoomState, items: TributeItem[], exchanges
 
   return assigned.map((exchange, index) => {
     const receiver = receivers[index] ?? exchange.receiver;
+    removeCard(room.hands, exchange.payer, exchange.tributeCard);
     room.hands[receiver] = [...room.hands[receiver], exchange.tributeCard];
     return {
       ...exchange,
@@ -810,15 +807,17 @@ function assignTributeReceivers(room: RoomState, items: TributeItem[], exchanges
 }
 
 function selectOpeningTributeCard(room: RoomState, payerSeat: Seat, actingSeat: Seat | undefined, cardIds: string[]): Card {
+  const reservedCardIds = new Set(room.openingTribute?.exchanges?.map((exchange) => exchange.tributeCard.id) ?? []);
+  const availableCards = room.hands[payerSeat].filter((card) => !reservedCardIds.has(card.id));
   if (room.players.find((player) => player.seat === payerSeat)?.isAI === true) {
-    return strongestTributeCard(room.hands[payerSeat], room.rank);
+    return strongestTributeCard(availableCards, room.rank);
   }
 
   if (actingSeat !== payerSeat) {
     throw new Error("请由进贡方选择进贡牌。");
   }
 
-  const selected = selectCards(room.hands[payerSeat], cardIds);
+  const selected = selectCards(availableCards, cardIds);
   if (selected.length !== 1 || isHeartRankWild(selected[0], room.rank)) {
     throw new Error("进贡牌必须是一张非红心级牌。");
   }

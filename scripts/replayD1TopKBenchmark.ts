@@ -23,4 +23,4 @@ export function replayD1Match(document: Record<string, any>): { verified: true; 
   return { verified: true, matchId: String(document.matchId) };
 }
 
-if (process.argv[1]?.endsWith("replayD1TopKBenchmark.ts")) replayD1Directory(process.argv[2] ?? "artifacts/d1-topk/replays", []).then((result) => console.log(JSON.stringify(result))).catch((error) => { console.error(error instanceof Error ? error.message : String(error)); });
+if (process.argv[1]?.endsWith("replayD1TopKBenchmark.ts")) replayD1Directory(process.argv[2] ?? "artifacts/d1-topk/replays", process.argv.slice(3)).then((result) => console.log(JSON.stringify(result))).catch((error) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });

@@ -134,13 +134,35 @@ async function executeTasks(tasks: BenchmarkGameTask[], concurrency: number, tim
   return executeWithWorkers(tasks, Math.min(Math.max(1, concurrency), tasks.length), timeoutMs, diagnostics);
 }
 
-function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs: number, diagnostics: boolean): Promise<SimulationSummary[]> {
+export interface BenchmarkWorker {
+  on(event: "message", listener: (message: BenchmarkWorkerResult) => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(event: "online", listener: () => void): this;
+  postMessage(message: { task: BenchmarkGameTask; diagnostics: boolean }): void;
+  terminate(): Promise<number>;
+  removeAllListeners(): this;
+}
+export type BenchmarkWorkerFactory = () => BenchmarkWorker;
+
+const createBenchmarkWorker: BenchmarkWorkerFactory = () => new Worker(
+  pathToFileURL(path.resolve(process.cwd(), "tests/benchmark/worker.ts")),
+  { execArgv: ["--import", "tsx/esm"] },
+);
+
+export function executeWithWorkers(
+  tasks: BenchmarkGameTask[],
+  count: number,
+  timeoutMs: number,
+  diagnostics: boolean,
+  workerFactory: BenchmarkWorkerFactory = createBenchmarkWorker,
+): Promise<SimulationSummary[]> {
   return new Promise((resolve, reject) => {
     const results: SimulationSummary[] = [];
     let cursor = 0;
     let finished = 0;
     let settled = false;
-    type Slot = { worker: Worker; task?: BenchmarkGameTask; timer?: ReturnType<typeof setTimeout>; startedAt?: number; retired: boolean; termination?: Promise<void> };
+    let startupFailures = 0;
+    type Slot = { worker: BenchmarkWorker; task?: BenchmarkGameTask; timer?: ReturnType<typeof setTimeout>; startedAt?: number; retired: boolean; termination?: Promise<void> };
     const slots: Slot[] = [];
     const terminateSlot = (slot: Slot): Promise<void> => {
       if (slot.termination) return slot.termination;
@@ -195,13 +217,26 @@ function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs
       complete();
     };
     const addWorker = () => {
-      const slot: Slot = { worker: new Worker(pathToFileURL(path.resolve(process.cwd(), "tests/benchmark/worker.ts")), { execArgv: ["--import", "tsx/esm"] }), retired: false };
+      if (settled) return;
+      const slot: Slot = { worker: workerFactory(), retired: false };
       slots.push(slot);
       slot.worker.on("message", (message: BenchmarkWorkerResult) => handleResult(slot, message));
       slot.worker.on("error", (error) => {
         if (settled || slot.retired) return;
         const task = slot.task;
-        if (task === undefined) { retire(slot); return; }
+        if (task === undefined) {
+          retire(slot);
+          if (cursor < tasks.length && startupFailures < count) {
+            startupFailures += 1;
+            addWorker();
+            return;
+          }
+          if (cursor < tasks.length || slots.every((candidate) => candidate.retired)) {
+            settled = true;
+            void Promise.all(slots.map((candidate) => terminateSlot(candidate))).then(() => reject(error));
+          }
+          return;
+        }
         if (slot.timer) clearTimeout(slot.timer);
         slot.timer = undefined;
         slot.task = undefined;
@@ -211,7 +246,7 @@ function executeWithWorkers(tasks: BenchmarkGameTask[], count: number, timeoutMs
         if (cursor < tasks.length) addWorker();
         complete();
       });
-      dispatch(slot);
+      slot.worker.on("online", () => dispatch(slot));
     };
     for (let index = 0; index < count; index += 1) addWorker();
   });
