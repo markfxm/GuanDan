@@ -1,3 +1,4 @@
+# One-time D2F Shadow release gate for codex/d2f-crn-rollout-source; its locks are intentionally not a permanent main regression gate.
 name: D2F Node 22.22.2 Release Gate
 
 on:
@@ -23,6 +24,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Node.js 22.22.2
@@ -63,9 +65,27 @@ jobs:
             'docs/superpowers/specs/2026-08-02-d2f-design-spec.md',
             'scripts/replayD1TopKBenchmark.ts',
             'scripts/runAiBenchmark.ts',
+            'scripts/benchmarks/d2f-rollout-budget-calibration.ts',
             'src/ai/particles/constrainedParticleSampler.ts',
+            'src/ai/rollout/aggregation.ts',
+            'src/ai/rollout/contracts.ts',
+            'src/ai/rollout/evidenceGate.ts',
+            'src/ai/rollout/kernel.ts',
+            'src/ai/rollout/leafEvaluation.ts',
+            'src/ai/rollout/particleScenarioSource.ts',
+            'src/ai/rollout/plainData.ts',
+            'src/ai/rollout/stateConservation.ts',
+            'src/ai/rollout/teamUtility.ts',
             'src/game/room.ts',
             'tests/ai/publicLedgerTributeReset.test.ts',
+            'tests/ai/rollout/aggregation.test.ts',
+            'tests/ai/rollout/crnIdentity.test.ts',
+            'tests/ai/rollout/crnInvariance.test.ts',
+            'tests/ai/rollout/d2fBenchmarkContract.test.ts',
+            'tests/ai/rollout/d2fShadowObserverIntegration.test.ts',
+            'tests/ai/rollout/evidenceGate.test.ts',
+            'tests/ai/rollout/particleScenarioSource.test.ts',
+            'tests/ai/rollout/teamUtility.test.ts',
             'tests/benchmark/cli.test.ts',
             'tests/benchmark/d0FixtureSourceWorktree.ts',
             'tests/benchmark/d1CalibrationReview.test.ts',
