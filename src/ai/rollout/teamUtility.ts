@@ -4,6 +4,7 @@ import type {
   TeamUtilityInput,
   TeamUtilityResult,
 } from "./contracts";
+import { getOwnDataProperty, isPlainDataArray, isPlainDataRecord } from "./plainData";
 import type { PublicSeat } from "../../game/publicEvent";
 
 const SEATS: readonly PublicSeat[] = [0, 1, 2, 3];
@@ -14,24 +15,28 @@ export function evaluateTeamUtility(input: TeamUtilityInput): TeamUtilityResult 
       return failure({ kind: "invalid-finish-order", reason: "unknown-seat" });
     }
 
-    const perspectiveSeat = getDataProperty(input, "perspectiveSeat");
-    const finishOrder = getDataProperty(input, "finishOrder");
+    const perspectiveSeat = getOwnDataProperty(input, "perspectiveSeat");
+    const finishOrder = getOwnDataProperty(input, "finishOrder");
     const perspectiveFailure = invalidPerspectiveSeatFailure(perspectiveSeat);
     if (perspectiveFailure) return failure(perspectiveFailure);
     if (!isPlainDataArray(finishOrder)) return failure({ kind: "invalid-finish-order", reason: "missing-seat" });
-    if (finishOrder.length !== SEATS.length) return failure({ kind: "invalid-finish-order", reason: "missing-seat" });
+    const finishOrderLength = getOwnDataProperty(finishOrder, "length") as number;
+    if (finishOrderLength !== SEATS.length) return failure({ kind: "invalid-finish-order", reason: "missing-seat" });
 
     const seen = new Set<number>();
-    for (const value of finishOrder) {
+    const canonicalFinishOrder: PublicSeat[] = [];
+    for (let index = 0; index < finishOrderLength; index += 1) {
+      const value = getOwnDataProperty(finishOrder, String(index));
       if (!isCanonicalSeat(value)) return failure({ kind: "invalid-finish-order", reason: "unknown-seat" });
       if (seen.has(value)) return failure({ kind: "invalid-finish-order", reason: "duplicate-seat" });
       seen.add(value);
+      canonicalFinishOrder.push(value);
     }
     if (seen.size !== SEATS.length) return failure({ kind: "invalid-finish-order", reason: "missing-seat" });
 
     const canonicalPerspectiveSeat = perspectiveSeat as PublicSeat;
     const teamSeats = [canonicalPerspectiveSeat, partnerSeat(canonicalPerspectiveSeat)] as const;
-    const places = teamSeats.map((seat) => finishOrder.indexOf(seat) + 1).sort((left, right) => left - right);
+    const places = teamSeats.map((seat) => canonicalFinishOrder.indexOf(seat) + 1).sort((left, right) => left - right);
     const utility = utilityForPlaces(places[0]!, places[1]!);
     if (utility === undefined) return failure({ kind: "unsupported-team-pair", teamSeats });
     return freezeResult({ ok: true, utility });
@@ -76,45 +81,6 @@ function invalidPerspectiveSeatFailure(value: unknown): Extract<TeamUtilityFailu
           ? "unsafe-integer-seat"
           : "unknown-seat";
   return { kind: "invalid-perspective-seat", reason };
-}
-
-function isPlainDataRecord(value: unknown, keys: readonly string[], exact: boolean): value is Record<string, unknown> {
-  try {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) return false;
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.some((key) => typeof key !== "string" || !keys.includes(key))) return false;
-    if (exact && (ownKeys.length !== keys.length || keys.some((key) => !ownKeys.includes(key)))) return false;
-    return ownKeys.every((key) => isDataDescriptor(Object.getOwnPropertyDescriptor(value, key)));
-  } catch {
-    return false;
-  }
-}
-
-function isPlainDataArray(value: unknown): value is readonly unknown[] {
-  try {
-    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return false;
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
-    if (!isDataDescriptor(lengthDescriptor) || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0) return false;
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.length !== value.length + 1 || !ownKeys.includes("length")) return false;
-    for (let index = 0; index < value.length; index += 1) {
-      const key = String(index);
-      if (!ownKeys.includes(key) || !isDataDescriptor(Object.getOwnPropertyDescriptor(value, key))) return false;
-    }
-    return ownKeys.every((key) => key === "length" || (typeof key === "string" && /^0$|^[1-9]\d*$/.test(key) && Number(key) < value.length));
-  } catch {
-    return false;
-  }
-}
-
-function isDataDescriptor(descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor & { value: unknown } {
-  return descriptor !== undefined && Object.prototype.hasOwnProperty.call(descriptor, "value") && descriptor.get === undefined && descriptor.set === undefined;
-}
-
-function getDataProperty(value: Record<string, unknown>, key: string): unknown {
-  return (Object.getOwnPropertyDescriptor(value, key) as PropertyDescriptor & { value: unknown }).value;
 }
 
 function failure(failure: TeamUtilityFailure): TeamUtilityResult {

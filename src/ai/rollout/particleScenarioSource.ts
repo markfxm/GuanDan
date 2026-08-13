@@ -23,6 +23,7 @@ import type {
 } from "./contracts";
 import type { ParticleScenario, ParticleSnapshotIdentity, ReplayedParticleState } from "../particles/contracts";
 import type { HardPublicLedger } from "../../game/publicLedger";
+import { isDataDescriptor, isPlainDataArray, isPlainDataRecord } from "./plainData";
 
 const SOURCE_INPUT_KEYS = [
   "bank", "publicHistoryEvents", "initialLedger", "finalLedger", "gameRank", "perspectiveSeat", "ownCurrentHand", "publicState",
@@ -343,50 +344,6 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
   }
   if (!Object.isFrozen(value)) Object.freeze(value);
   return value;
-}
-
-function getOwnDataProperty(value: unknown, key: string): unknown {
-  if (value === null || typeof value !== "object") throw new TypeError("DATA_PROPERTY_INVALID");
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  if (!isDataDescriptor(descriptor)) throw new TypeError("DATA_PROPERTY_INVALID");
-  return descriptor.value;
-}
-
-function isDataDescriptor(descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor & { value: unknown } {
-  return descriptor !== undefined && Object.prototype.hasOwnProperty.call(descriptor, "value") && descriptor.get === undefined && descriptor.set === undefined;
-}
-
-function isPlainDataRecord(value: unknown, allowedKeys?: readonly string[], exact = false): value is Record<string, unknown> {
-  try {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) return false;
-    const ownKeys = Reflect.ownKeys(value);
-    const allowed = allowedKeys === undefined ? undefined : new Set(allowedKeys);
-    if (ownKeys.some((key) => typeof key !== "string" || (allowed !== undefined && !allowed.has(key)))) return false;
-    if (exact && allowed !== undefined && (ownKeys.length !== allowed.size || allowedKeys !== undefined && allowedKeys.some((key) => !ownKeys.includes(key)))) return false;
-    return ownKeys.every((key) => isDataDescriptor(Object.getOwnPropertyDescriptor(value, key)));
-  } catch {
-    return false;
-  }
-}
-
-function isPlainDataArray(value: unknown): value is readonly unknown[] {
-  try {
-    if (value === null || typeof value !== "object" || Object.getPrototypeOf(value) !== Array.prototype || !Array.isArray(value)) return false;
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
-    if (!isDataDescriptor(lengthDescriptor) || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0) return false;
-    const length = lengthDescriptor.value;
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.length !== length + 1 || !ownKeys.includes("length")) return false;
-    for (let index = 0; index < length; index += 1) {
-      const key = String(index);
-      if (!ownKeys.includes(key) || !isDataDescriptor(Object.getOwnPropertyDescriptor(value, key))) return false;
-    }
-    return ownKeys.every((key) => key === "length" || (typeof key === "string" && /^0$|^[1-9]\d*$/.test(key) && Number(key) < length));
-  } catch {
-    return false;
-  }
 }
 
 function isPlainDataGraph(value: unknown, ancestors = new WeakSet<object>()): boolean {

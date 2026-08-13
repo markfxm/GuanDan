@@ -40,6 +40,7 @@ import {
   type RolloutScenarioProjectionMismatchField,
 } from "./contracts";
 import type { RootIdentity } from "./contracts";
+import { getOwnDataProperty as getOwnData, isDataDescriptor, isPlainDataArray, isPlainDataRecord } from "./plainData";
 
 const SEATS: readonly PublicSeat[] = [0, 1, 2, 3];
 const RANDOM_DOMAIN_LABEL = "policy-action-v1";
@@ -555,47 +556,6 @@ function isPlainDataGraph(value: unknown, ancestors = new WeakSet<object>()): bo
     && Reflect.ownKeys(value).every((key) => typeof key === "string" && isDataDescriptor(Object.getOwnPropertyDescriptor(value, key)) && isPlainDataGraph((Object.getOwnPropertyDescriptor(value, key) as PropertyDescriptor & { value: unknown }).value, ancestors));
   ancestors.delete(value);
   return valid;
-}
-
-function isPlainDataRecord(value: unknown, allowedKeys?: readonly string[], exact = false): value is Record<string, unknown> {
-  try {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) return false;
-    const ownKeys = Reflect.ownKeys(value);
-    const allowed = allowedKeys === undefined ? undefined : new Set(allowedKeys);
-    if (ownKeys.some((key) => typeof key !== "string" || (allowed !== undefined && !allowed.has(key)))) return false;
-    if (exact && allowed !== undefined && (ownKeys.length !== allowed.size || allowedKeys!.some((key) => !ownKeys.includes(key)))) return false;
-    return ownKeys.every((key) => isDataDescriptor(Object.getOwnPropertyDescriptor(value, key)));
-  } catch {
-    return false;
-  }
-}
-
-function isPlainDataArray(value: unknown): value is readonly unknown[] {
-  try {
-    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return false;
-    const length = Object.getOwnPropertyDescriptor(value, "length");
-    if (!isDataDescriptor(length) || !isNonNegativeSafeInteger(length.value)) return false;
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.length !== length.value + 1 || !ownKeys.includes("length")) return false;
-    for (let index = 0; index < length.value; index += 1) {
-      if (!ownKeys.includes(String(index)) || !isDataDescriptor(Object.getOwnPropertyDescriptor(value, String(index)))) return false;
-    }
-    return ownKeys.every((key) => key === "length" || (typeof key === "string" && /^(?:0|[1-9]\d*)$/.test(key) && Number(key) < length.value));
-  } catch {
-    return false;
-  }
-}
-
-function isDataDescriptor(descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor & { value: unknown } {
-  return descriptor !== undefined && Object.prototype.hasOwnProperty.call(descriptor, "value") && descriptor.get === undefined && descriptor.set === undefined;
-}
-
-function getOwnData(value: unknown, key: string): unknown {
-  const descriptor = Object.getOwnPropertyDescriptor(value as object, key);
-  if (!isDataDescriptor(descriptor)) throw new TypeError("DATA_PROPERTY_INVALID");
-  return descriptor.value;
 }
 
 function hasOwnDataKey(value: Record<string, unknown>, key: string): boolean {

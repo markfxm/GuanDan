@@ -6,6 +6,7 @@ import type { PublicActionEvent, PublicSeat } from "../../game/publicEvent";
 import { applyPublicEvent, canonicalPublicLedgerHash, type HardPublicLedger } from "../../game/publicLedger";
 import { verifyPublicActionEventHash } from "../../game/publicEventHash";
 import type { RolloutAction } from "./contracts";
+import { isDataDescriptor, isPlainDataArray, isPlainDataRecord } from "./plainData";
 
 export type IsolatedRolloutState = Readonly<{
   hands: Readonly<Record<PublicSeat, readonly Card[]>>;
@@ -216,22 +217,28 @@ function validatePassTransition(before: IsolatedRolloutState, after: IsolatedRol
 }
 
 function isStateShape(value: unknown): value is IsolatedRolloutState {
-  return isPlainDataRecord(value, ["hands", "publicPlayedCardIds", "currentLastPlay", "currentLastPlaySeat", "currentTrick", "handCounts", "finishOrder", "actingSeat", "expectedCardIds", "gameRank"], true)
-    && isPlainDataRecord(value.hands, SEAT_KEYS, true)
-    && SEATS.every((seat) => isPlainDataArray(value.hands[String(seat)]))
-    && isPlainDataArray(value.publicPlayedCardIds)
-    && value.publicPlayedCardIds.every(isCardId)
-    && (value.currentLastPlay === null || isCardGroup(value.currentLastPlay))
-    && (value.currentLastPlaySeat === null || isSeat(value.currentLastPlaySeat))
-    && isPlainDataRecord(value.currentTrick, ["trickIndex", "leadSeat", "lastPlaySeat", "lastPlayStableKey", "passSeats"], false)
-    && isPlainDataRecord(value.handCounts, SEAT_KEYS, true)
-    && SEATS.every((seat) => isNonNegativeSafeInteger(value.handCounts[String(seat)]))
-    && isPlainDataArray(value.finishOrder)
-    && isPlainDataArray(value.expectedCardIds)
-    && value.expectedCardIds.every(isCardId)
-    && isSeat(value.actingSeat)
-    && isGameRank(value.gameRank)
-    && SEATS.every((seat) => value.hands[String(seat)].every(isCard));
+  if (!isPlainDataRecord(value, ["hands", "publicPlayedCardIds", "currentLastPlay", "currentLastPlaySeat", "currentTrick", "handCounts", "finishOrder", "actingSeat", "expectedCardIds", "gameRank"], true)) return false;
+  const record = value as Record<string, unknown>;
+  const hands = record.hands as Record<string, unknown>;
+  const handCounts = record.handCounts as Record<string, unknown>;
+  const currentTrick = record.currentTrick as Record<string, unknown>;
+  const publicPlayedCardIds = record.publicPlayedCardIds as readonly unknown[];
+  const expectedCardIds = record.expectedCardIds as readonly unknown[];
+  return isPlainDataRecord(hands, SEAT_KEYS, true)
+    && SEATS.every((seat) => isPlainDataArray(hands[String(seat)]))
+    && isPlainDataArray(publicPlayedCardIds)
+    && publicPlayedCardIds.every(isCardId)
+    && (record.currentLastPlay === null || isCardGroup(record.currentLastPlay))
+    && (record.currentLastPlaySeat === null || isSeat(record.currentLastPlaySeat))
+    && isPlainDataRecord(currentTrick, ["trickIndex", "leadSeat", "lastPlaySeat", "lastPlayStableKey", "passSeats"], false)
+    && isPlainDataRecord(handCounts, SEAT_KEYS, true)
+    && SEATS.every((seat) => isNonNegativeSafeInteger(handCounts[String(seat)]))
+    && isPlainDataArray(record.finishOrder)
+    && isPlainDataArray(expectedCardIds)
+    && expectedCardIds.every(isCardId)
+    && isSeat(record.actingSeat)
+    && isGameRank(record.gameRank)
+    && SEATS.every((seat) => (hands[String(seat)] as readonly unknown[]).every(isCard));
 }
 
 function isActionShape(value: unknown): value is RolloutAction {
@@ -240,20 +247,18 @@ function isActionShape(value: unknown): value is RolloutAction {
 }
 
 function isCardGroup(value: unknown): value is CardGroup {
-  return isPlainDataRecord(value, ["id", "type", "label", "purpose", "cards", "wildcards", "strength"], true)
-    && typeof value.id === "string"
-    && typeof value.type === "string"
-    && typeof value.label === "string"
-    && typeof value.purpose === "string"
-    && isNonNegativeSafeInteger(value.strength)
-    && isPlainDataArray(value.cards)
-    && value.cards.length > 0
-    && value.cards.every(isCard)
-    && new Set(value.cards.map((card: Card) => card.id)).size === value.cards.length
-    && isPlainDataArray(value.wildcards)
-    && value.wildcards.every(isCard)
-    && new Set(value.wildcards.map((card: Card) => card.id)).size === value.wildcards.length
-    && value.wildcards.every((card) => value.cards.some((candidate: Card) => candidate.id === card.id));
+  if (!isPlainDataRecord(value, ["id", "type", "label", "purpose", "cards", "wildcards", "strength"], true)) return false;
+  const record = value as Record<string, unknown>;
+  const cards = record.cards;
+  const wildcards = record.wildcards;
+  if (typeof record.id !== "string" || typeof record.type !== "string" || typeof record.label !== "string" || typeof record.purpose !== "string" || !isNonNegativeSafeInteger(record.strength)) return false;
+  if (!isPlainDataArray(cards) || cards.length === 0 || !cards.every(isCard)) return false;
+  if (!isPlainDataArray(wildcards) || !wildcards.every(isCard)) return false;
+  const canonicalCards = cards as readonly Card[];
+  const canonicalWildcards = wildcards as readonly Card[];
+  return new Set(canonicalCards.map((card) => card.id)).size === canonicalCards.length
+    && new Set(canonicalWildcards.map((card) => card.id)).size === canonicalWildcards.length
+    && canonicalWildcards.every((card) => canonicalCards.some((candidate) => candidate.id === card.id));
 }
 
 function isCard(value: unknown): value is Card {
@@ -276,42 +281,6 @@ function isSeat(value: unknown): value is PublicSeat {
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && !Object.is(value, -0) && value >= 0;
-}
-
-function isPlainDataRecord(value: unknown, allowedKeys?: readonly string[], exact = false): value is Record<string, any> {
-  try {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) return false;
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.some((key) => typeof key !== "string" || (allowedKeys !== undefined && !allowedKeys.includes(key)))) return false;
-    if (exact && allowedKeys !== undefined && (ownKeys.length !== allowedKeys.length || allowedKeys.some((key) => !ownKeys.includes(key)))) return false;
-    return ownKeys.every((key) => isDataDescriptor(Object.getOwnPropertyDescriptor(value, key)));
-  } catch {
-    return false;
-  }
-}
-
-function isPlainDataArray(value: unknown): value is readonly unknown[] {
-  try {
-    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return false;
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
-    if (!isDataDescriptor(lengthDescriptor) || !isNonNegativeSafeInteger(lengthDescriptor.value)) return false;
-    const length = lengthDescriptor.value;
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.length !== length + 1 || !ownKeys.includes("length")) return false;
-    for (let index = 0; index < length; index += 1) {
-      const key = String(index);
-      if (!ownKeys.includes(key) || !isDataDescriptor(Object.getOwnPropertyDescriptor(value, key))) return false;
-    }
-    return ownKeys.every((key) => key === "length" || (typeof key === "string" && /^0$|^[1-9]\d*$/.test(key) && Number(key) < length));
-  } catch {
-    return false;
-  }
-}
-
-function isDataDescriptor(descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor & { value: unknown } {
-  return descriptor !== undefined && Object.prototype.hasOwnProperty.call(descriptor, "value") && descriptor.get === undefined && descriptor.set === undefined;
 }
 
 function findCardFailure(state: IsolatedRolloutState): StateConservationFailure["reason"] {
@@ -397,7 +366,8 @@ function deepDataEqual(left: unknown, right: unknown): boolean {
   return leftKeys.every((key) => {
     const leftDescriptor = Object.getOwnPropertyDescriptor(left, key);
     const rightDescriptor = Object.getOwnPropertyDescriptor(right, key);
-    return isDataDescriptor(leftDescriptor) && isDataDescriptor(rightDescriptor) && deepDataEqual(leftDescriptor.value, rightDescriptor.value);
+    if (!isDataDescriptor(leftDescriptor) || !isDataDescriptor(rightDescriptor)) return false;
+    return deepDataEqual(leftDescriptor.value, rightDescriptor.value);
   });
 }
 

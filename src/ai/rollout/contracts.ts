@@ -11,6 +11,7 @@ import type {
 import { particleScenarioIdentity } from "../particles/canonicalDeal";
 import { validateParticleBankPublic } from "../particles/particleBankPublicValidation";
 import type { StateConservationFailure } from "./stateConservation";
+import { getOwnDataProperty, isDataDescriptor, isPlainDataArray, isPlainDataRecord } from "./plainData";
 
 export type CanonicalCandidateIdentity = string;
 export type CanonicalScenarioIdentity = string;
@@ -300,7 +301,8 @@ export type RolloutKernelFailure =
 export type RolloutAggregationFailure =
   | { kind: "non-finite-aggregate"; field: "expectedUtility" | "variance" | "risk" }
   | { kind: "coverage-mismatch"; expected: number; actual: number }
-  | { kind: "empty-replicate-set"; candidateId: string };
+  | { kind: "empty-replicate-set"; candidateId: string }
+  | { kind: "work-unit-overflow" };
 
 export type RolloutRequestField =
   | "request"
@@ -1627,52 +1629,8 @@ function isSeat(value: unknown): value is PublicSeat {
   return isCanonicalSafeInteger(value) && (value === 0 || value === 1 || value === 2 || value === 3);
 }
 
-function getOwnDataProperty(value: unknown, key: string): unknown {
-  if (value === null || typeof value !== "object") throw new TypeError("DATA_PROPERTY_INVALID");
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  if (!isDataDescriptor(descriptor)) throw new TypeError("DATA_PROPERTY_INVALID");
-  return descriptor.value;
-}
-
-function isDataDescriptor(descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor & { value: unknown } {
-  return descriptor !== undefined && Object.prototype.hasOwnProperty.call(descriptor, "value") && descriptor.get === undefined && descriptor.set === undefined;
-}
-
-function isPlainDataRecord(value: unknown, allowedKeys?: readonly string[], exact = false): value is Record<string, unknown> {
-  try {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) return false;
-    const ownKeys = Reflect.ownKeys(value);
-    const allowed = allowedKeys === undefined ? undefined : new Set(allowedKeys);
-    if (ownKeys.some((key) => typeof key !== "string" || (allowed !== undefined && !allowed.has(key)))) return false;
-    if (exact && allowed !== undefined && (ownKeys.length !== allowed.size || allowedKeys !== undefined && allowedKeys.some((key) => !ownKeys.includes(key)))) return false;
-    return ownKeys.every((key) => isDataDescriptor(Object.getOwnPropertyDescriptor(value, key)));
-  } catch {
-    return false;
-  }
-}
-
 function hasExactOwnDataKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   return isPlainDataRecord(value, keys, true);
-}
-
-function isPlainDataArray(value: unknown): value is readonly unknown[] {
-  try {
-    if (value === null || typeof value !== "object" || Object.getPrototypeOf(value) !== Array.prototype || !Array.isArray(value)) return false;
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
-    if (!isDataDescriptor(lengthDescriptor) || !isNonNegativeSafeInteger(lengthDescriptor.value)) return false;
-    const length = lengthDescriptor.value;
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.length !== length + 1 || !ownKeys.includes("length")) return false;
-    for (let index = 0; index < length; index += 1) {
-      const key = String(index);
-      if (!ownKeys.includes(key) || !isDataDescriptor(Object.getOwnPropertyDescriptor(value, key))) return false;
-    }
-    return ownKeys.every((key) => key === "length" || (typeof key === "string" && /^0$|^[1-9]\d*$/.test(key) && Number(key) < length));
-  } catch {
-    return false;
-  }
 }
 
 function isPlainDataGraph(value: unknown, ancestors = new WeakSet<object>()): boolean {
@@ -1788,12 +1746,13 @@ function isDeeplyFrozen(value: unknown, seen = new WeakSet<object>()): boolean {
 
 class CanonicalWriter {
   private readonly bytes: number[] = [];
+  private readonly textEncoder = new TextEncoder();
 
   writeString(value: string): void {
     if (typeof value !== "string") throw new TypeError("CANONICAL_STRING_INVALID");
-    const encoded = new TextEncoder().encode(value);
+    const encoded = this.textEncoder.encode(value);
     this.writeUint32(encoded.length);
-    this.bytes.push(...encoded);
+    for (const byte of encoded) this.bytes.push(byte);
   }
 
   writeInteger(value: number): void {

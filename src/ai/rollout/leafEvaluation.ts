@@ -4,6 +4,7 @@ import type {
   LeafEvaluationInput,
   LeafEvaluationResult,
 } from "./contracts";
+import { getOwnDataProperty, isDataDescriptor, isPlainDataArray, isPlainDataRecord } from "./plainData";
 import type { PublicSeat } from "../../game/publicEvent";
 
 const SEATS: readonly PublicSeat[] = [0, 1, 2, 3];
@@ -16,21 +17,23 @@ export function evaluateNonTerminalLeaf(input: LeafEvaluationInput): LeafEvaluat
       return failure({ kind: "invalid-leaf-state", reason: "unknown-seat" });
     }
 
-    const perspectiveSeat = getDataProperty(input, "perspectiveSeat");
-    const actingSeat = getDataProperty(input, "actingSeat");
-    const finishOrder = getDataProperty(input, "finishOrder");
-    const handCounts = getDataProperty(input, "handCounts");
+    const perspectiveSeat = getOwnDataProperty(input, "perspectiveSeat");
+    const actingSeat = getOwnDataProperty(input, "actingSeat");
+    const finishOrder = getOwnDataProperty(input, "finishOrder");
+    const handCounts = getOwnDataProperty(input, "handCounts");
 
     const perspectiveFailure = invalidSeatFailure(perspectiveSeat, "invalid-perspective-seat");
     if (perspectiveFailure) return failure(perspectiveFailure);
     const actingFailure = invalidSeatFailure(actingSeat, "invalid-acting-seat");
     if (actingFailure) return failure(actingFailure);
     if (!isPlainDataArray(finishOrder)) return failure({ kind: "invalid-leaf-state", reason: "duplicate-finish" });
-    if (finishOrder.length === 4) return failure({ kind: "invalid-leaf-state", reason: "terminal-state" });
-    if (finishOrder.length > 4) return failure({ kind: "invalid-leaf-state", reason: "duplicate-finish" });
+    const finishOrderLength = getOwnDataProperty(finishOrder, "length") as number;
+    if (finishOrderLength === 4) return failure({ kind: "invalid-leaf-state", reason: "terminal-state" });
+    if (finishOrderLength > 4) return failure({ kind: "invalid-leaf-state", reason: "duplicate-finish" });
 
     const seen = new Set<PublicSeat>();
-    for (const value of finishOrder) {
+    for (let index = 0; index < finishOrderLength; index += 1) {
+      const value = getOwnDataProperty(finishOrder, String(index));
       if (!isCanonicalSeat(value)) return failure({ kind: "invalid-leaf-state", reason: "unknown-seat" });
       if (seen.has(value)) return failure({ kind: "invalid-leaf-state", reason: "duplicate-finish" });
       seen.add(value);
@@ -43,7 +46,7 @@ export function evaluateNonTerminalLeaf(input: LeafEvaluationInput): LeafEvaluat
 
     const counts = {} as Record<PublicSeat, number>;
     for (const seat of SEATS) {
-      const count = getDataProperty(handCounts as Record<string, unknown>, String(seat));
+      const count = getOwnDataProperty(handCounts as Record<string, unknown>, String(seat));
       const countFailure = validateHandCount(count, seen.has(seat));
       if (countFailure) return failure(countFailure);
       counts[seat] = count as number;
@@ -130,46 +133,6 @@ function isCanonicalSeat(value: unknown): value is PublicSeat {
     && Number.isSafeInteger(value)
     && !Object.is(value, -0)
     && (value === 0 || value === 1 || value === 2 || value === 3);
-}
-
-function isPlainDataRecord(value: unknown, keys: readonly string[], exact: boolean): value is Record<string, unknown> {
-  try {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) return false;
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.some((key) => typeof key !== "string" || !keys.includes(key))) return false;
-    if (exact && (ownKeys.length !== keys.length || keys.some((key) => !ownKeys.includes(key)))) return false;
-    return ownKeys.every((key) => isDataDescriptor(Object.getOwnPropertyDescriptor(value, key)));
-  } catch {
-    return false;
-  }
-}
-
-function isPlainDataArray(value: unknown): value is readonly unknown[] {
-  try {
-    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return false;
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
-    if (!isDataDescriptor(lengthDescriptor) || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0) return false;
-    const length = lengthDescriptor.value;
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.length !== length + 1 || !ownKeys.includes("length")) return false;
-    for (let index = 0; index < length; index += 1) {
-      const key = String(index);
-      if (!ownKeys.includes(key) || !isDataDescriptor(Object.getOwnPropertyDescriptor(value, key))) return false;
-    }
-    return ownKeys.every((key) => key === "length" || (typeof key === "string" && /^0$|^[1-9]\d*$/.test(key) && Number(key) < length));
-  } catch {
-    return false;
-  }
-}
-
-function isDataDescriptor(descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor & { value: unknown } {
-  return descriptor !== undefined && Object.prototype.hasOwnProperty.call(descriptor, "value") && descriptor.get === undefined && descriptor.set === undefined;
-}
-
-function getDataProperty(value: Record<string, unknown>, key: string): unknown {
-  return (Object.getOwnPropertyDescriptor(value, key) as PropertyDescriptor & { value: unknown }).value;
 }
 
 function failure(failure: LeafEvaluationFailure): LeafEvaluationResult {
