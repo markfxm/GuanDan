@@ -58,6 +58,9 @@ jobs:
           @(
             '.github/workflows/ci.yml',
             '.github/workflows/d2f-node22-release-gate.yml',
+            'docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md',
+            'docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md',
+            'docs/superpowers/specs/2026-08-02-d2f-design-spec.md',
             'scripts/replayD1TopKBenchmark.ts',
             'scripts/runAiBenchmark.ts',
             'src/ai/particles/constrainedParticleSampler.ts',
@@ -137,9 +140,9 @@ jobs:
           Write-Host "executionMissing=$($executionMissing.Count)"
           Write-Host "executionDuplicate=$($assigned.Count - $assignedUnique.Count)"
           Write-Host "executionExtra=$($executionExtra.Count)"
-          if ($tracked.Count -ne 145 -or $included.Count -ne 103 -or $excluded.Count -ne 42 -or $union.Count -ne 145) { throw 'Manifest count mismatch' }
+          if ($tracked.Count -ne 147 -or $included.Count -ne 105 -or $excluded.Count -ne 42 -or $union.Count -ne 147) { throw 'Manifest count mismatch' }
           if ($manifestMissing.Count -or $manifestUntracked.Count -or $manifestOverlap.Count) { throw 'Manifest set mismatch' }
-          if ($shardHeadings.Count -ne 16 -or $assigned.Count -ne 103 -or $assignedUnique.Count -ne 103 -or $executionMissing.Count -or $executionExtra.Count) { throw 'Shard assignment mismatch' }
+          if ($shardHeadings.Count -ne 16 -or $assigned.Count -ne 105 -or $assignedUnique.Count -ne 105 -or $executionMissing.Count -or $executionExtra.Count) { throw 'Shard assignment mismatch' }
           foreach ($uiPath in $requiredUi) {
             if ($uiPath -notin $includedUnique -or $uiPath -notin $assignedUnique) { throw "Missing required UI test: $uiPath" }
           }
@@ -279,7 +282,7 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          npx vitest run tests/server/api.test.ts tests/server/apiCanonicalIdentity.test.ts tests/server/apiIdempotency.test.ts tests/server/apiShutdown.test.ts tests/server/publicIdentityConcurrency.test.ts tests/server/publicIdentityDescriptor.test.ts tests/server/publicIdentityProvider.test.ts tests/server/publicRoomLegacyResponse.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          npx vitest run tests/server/api.test.ts tests/server/apiCanonicalIdentity.test.ts tests/server/apiIdempotency.test.ts tests/server/apiShutdown.test.ts tests/server/publicIdentityConcurrency.test.ts tests/server/publicIdentityDescriptor.test.ts tests/server/publicIdentityProvider.test.ts tests/server/publicRoomLegacyResponse.test.ts tests/benchmark/workerStartupFailure.test.ts --exclude "**/.worktrees/**" --reporter=dot
           $exitCode = $LASTEXITCODE
           "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
           exit $exitCode
@@ -289,7 +292,7 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          npx vitest run tests/tooling/npmTestCollectionContract.test.ts tests/ui/handStackStyles.test.ts tests/ui/manualGrouping.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          npx vitest run tests/tooling/npmTestCollectionContract.test.ts tests/benchmark/d1ReplayCli.test.ts tests/ui/handStackStyles.test.ts tests/ui/manualGrouping.test.ts --exclude "**/.worktrees/**" --reporter=dot
           $exitCode = $LASTEXITCODE
           "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
           exit $exitCode
