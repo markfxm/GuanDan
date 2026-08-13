@@ -19,14 +19,14 @@ const d0FixturePath = path.resolve(root, "tests/ai/fixtures/d0KeepCurrentCases.j
 const d0GeneratorPath = path.resolve(root, "scripts/generateD0KeepCurrentFixtures.ts");
 const d0SourceCommit = "e2a20e18f8e5c0871db38ad69426262e43766ce1";
 const tsxCli = path.resolve(root, "node_modules/tsx/dist/cli.mjs");
-let d0Source: D0FixtureSourceWorktree;
+let d0Source: D0FixtureSourceWorktree | undefined;
 
 beforeAll(() => {
   d0Source = createD0FixtureSourceWorktree(d0SourceCommit);
 });
 
 afterAll(() => {
-  d0Source.remove();
+  d0Source?.remove();
 });
 
 const d1Config = {
@@ -137,7 +137,8 @@ describe("legacy D1 compatibility boundaries", () => {
   });
 
   it("keeps the committed D0 fixture byte-identical under check-only generation", () => {
-    expect(existsSync(d0Source.root)).toBe(true);
+    expect(d0Source).toBeDefined();
+    expect(existsSync(d0Source!.root)).toBe(true);
     expect(existsSync(d0FixturePath)).toBe(true);
 
     const before = readFileSync(d0FixturePath);
@@ -145,7 +146,7 @@ describe("legacy D1 compatibility boundaries", () => {
       tsxCli,
       d0GeneratorPath,
       "--source-worktree",
-      d0Source.root,
+      d0Source!.root,
       "--source-commit",
       d0SourceCommit,
       "--output",

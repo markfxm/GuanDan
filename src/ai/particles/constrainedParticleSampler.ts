@@ -183,6 +183,7 @@ function buildCandidate(input: ConstrainedParticleSamplerInput, rng: Readonly<{ 
   for (const event of input.publicHistoryEvents) {
     if ((event.kind === "tribute" || event.kind === "return") && event.publicCardIds.length === 1) fixedIds.get(event.fromSeat)!.add(event.publicCardIds[0]!);
   }
+  const chosenOther = new Map<number, string>();
   for (const event of hiddenEvents) {
     const id = event.fromSeat === input.perspectiveSeat
       ? chosenOutgoing.get(event.eventIndex)
@@ -190,6 +191,9 @@ function buildCandidate(input: ConstrainedParticleSamplerInput, rng: Readonly<{ 
         ? chosenIncoming.get(event.eventIndex)
         : chooseOtherTransferCard(deck, fixedIds, event.fromSeat, publicPlayed, ownInitialIds, draw + event.eventIndex);
     if (!id) throw new Error("HIDDEN_TRANSFER_CARD_UNSELECTED");
+    if (event.fromSeat !== input.perspectiveSeat && event.toSeat !== input.perspectiveSeat) {
+      chosenOther.set(event.eventIndex, id);
+    }
     fixedIds.get(event.fromSeat)!.add(id);
   }
 
@@ -225,7 +229,7 @@ function buildCandidate(input: ConstrainedParticleSamplerInput, rng: Readonly<{ 
       ? chosenOutgoing.get(event.eventIndex)!
       : event.toSeat === input.perspectiveSeat
         ? chosenIncoming.get(event.eventIndex)!
-        : [...fixedIds.get(event.fromSeat)!][0]!,
+        : chosenOther.get(event.eventIndex)!,
   }));
   const deal: CanonicalInitialDeal = {
     schemaVersion: "d2-particle-initial-deal-v1",
