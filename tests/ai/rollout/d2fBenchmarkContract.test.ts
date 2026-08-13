@@ -19,7 +19,7 @@ type BenchmarkRunRecord = Readonly<{
 }>;
 type BenchmarkExecution = Readonly<{
   runs: readonly BenchmarkRunRecord[];
-  correctnessComparisons: number;
+  comparisonCount: number;
   warmupIterations: number;
   measuredIterations: number;
   samples: readonly number[];
@@ -77,6 +77,30 @@ afterEach(() => {
 });
 
 describe("fixed D2F benchmark runner contract", () => {
+  test("exports the exact Node release version used by the gate", () => {
+    const expectedNodeVersion = (benchmark as typeof benchmark & { EXPECTED_NODE_VERSION?: string }).EXPECTED_NODE_VERSION;
+    expect(expectedNodeVersion).toBe("v22.22.2");
+  });
+
+  test("recognizes the benchmark entry point across Windows path normalization", () => {
+    const isBenchmarkEntryPoint = (benchmark as typeof benchmark & {
+      isBenchmarkEntryPoint?: (modulePath: string, entryPath: string | undefined, platform: NodeJS.Platform) => boolean;
+    }).isBenchmarkEntryPoint;
+    expect(isBenchmarkEntryPoint).toBeTypeOf("function");
+    if (isBenchmarkEntryPoint === undefined) throw new Error("isBenchmarkEntryPoint is not available");
+
+    expect(isBenchmarkEntryPoint(
+      "C:\\Workspace\\GuanDan\\scripts\\benchmarks\\d2f-rollout-budget-calibration.ts",
+      "c:\\workspace\\guandan\\scripts\\benchmarks\\d2f-rollout-budget-calibration.ts",
+      "win32",
+    )).toBe(true);
+    expect(isBenchmarkEntryPoint(
+      "C:\\Workspace\\GuanDan\\scripts\\benchmarks\\d2f-rollout-budget-calibration.ts",
+      "C:\\Workspace\\GuanDan\\scripts\\benchmarks\\other.ts",
+      "win32",
+    )).toBe(false);
+  });
+
   test("fixture is the frozen public schema without private particle state", () => {
     const fixture = readFixture();
     expect(Object.keys(fixture)).toEqual(["schemaVersion", "fixtureId", "replay", "particleBank", "request", "expected"]);
@@ -117,7 +141,7 @@ describe("fixed D2F benchmark runner contract", () => {
       threshold: { kind: "completed-run-duration-ceiling", maximumSingleIterationMs: 60000, passed: true },
       verdict: "PASS",
     });
-    expect(report.evidenceLevel).toBe(process.version === "v22.22.2" ? "NODE22_RELEASE_EVIDENCE" : "SUPPLEMENTAL_LOCAL_EVIDENCE");
+    expect(report.evidenceLevel).toBe(process.version === (benchmark as typeof benchmark & { EXPECTED_NODE_VERSION: string }).EXPECTED_NODE_VERSION ? "NODE22_RELEASE_EVIDENCE" : "SUPPLEMENTAL_LOCAL_EVIDENCE");
     expect(report.metrics.sampleCount).toBe(10);
     for (const value of Object.values(report.metrics)) expect(Number.isFinite(value)).toBe(true);
     expect(report.metrics.minMs).toBeGreaterThanOrEqual(0);
@@ -163,6 +187,7 @@ describe("fixed D2F benchmark runner contract", () => {
     expect(execution.runs.slice(0, 4).every((run) => run.includedInSamples === false)).toBe(true);
     expect(execution.runs.slice(4).every((run) => run.includedInSamples === true)).toBe(true);
     expect(execution.samples).toEqual([10, 10, 10, 10, 10, 10, 10, 10, 10, 10]);
+    expect(execution.comparisonCount).toBe(14);
     expect(execution.samples).toHaveLength(10);
     expect(execution.warmupIterations).toBe(3);
     expect(execution.measuredIterations).toBe(10);
@@ -228,6 +253,14 @@ describe("fixed D2F benchmark runner contract", () => {
     });
   });
 
+  test("calculates the mean from sorted samples for multiset reproducibility", () => {
+    const first = benchmark.calculateBenchmarkMetrics([1e16, 1, 1, 1]);
+    const second = benchmark.calculateBenchmarkMetrics([1, 1, 1, 1e16]);
+
+    expect(first.meanMs).toBe(second.meanMs);
+    expect(first.throughputPerSecond).toBe(second.throughputPerSecond);
+  });
+
   test("completed-run duration ceiling is exclusive above 60000 milliseconds", () => {
     const result = runTsxExpression('import { isCompletedRunDurationOverCeiling } from "./scripts/benchmarks/d2f-rollout-budget-calibration.ts"; console.log(JSON.stringify([isCompletedRunDurationOverCeiling(60000), isCompletedRunDurationOverCeiling(60000.0001)]));');
     expect(result).toEqual([false, true]);
@@ -255,6 +288,7 @@ describe("fixed D2F benchmark runner contract", () => {
     expect(result.status).toBe(2);
     expect(result.stdout.trim()).toBe("");
     expect(result.stderr).not.toContain('"verdict":"PASS"');
+    expect(result.stderr).toContain("rootDigest");
   });
 
   test("does not use skip, only, or todo modifiers in this contract suite", () => {

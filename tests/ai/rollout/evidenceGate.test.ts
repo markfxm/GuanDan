@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 import type {
   RolloutEvidenceRequirements,
+  RolloutKernelFailure,
   RolloutReplicateResult,
   RolloutScenario,
 } from "../../../src/ai/rollout/contracts";
@@ -63,6 +64,38 @@ function makeInput(overrides: Partial<RolloutEvidenceInput> = {}): RolloutEviden
   };
 }
 
+const SIMULATION_FAILURES = [
+  { kind: "simulation-failed", stage: "input", reason: "malformed-envelope" },
+  { kind: "simulation-failed", stage: "input", reason: "invalid-budget" },
+  { kind: "simulation-failed", stage: "input", reason: "invalid-root-identity" },
+  { kind: "simulation-failed", stage: "input", reason: "invalid-public-state" },
+  { kind: "simulation-failed", stage: "input", reason: "invalid-candidate" },
+  { kind: "simulation-failed", stage: "replay", reason: "invalid-scenario" },
+  { kind: "simulation-failed", stage: "replay", reason: "invalid-replay-context" },
+  { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "scenario.privateState.hands" },
+  { kind: "simulation-failed", stage: "root-action", reason: "illegal-action" },
+  { kind: "simulation-failed", stage: "policy-action", reason: "illegal-action" },
+  { kind: "simulation-failed", stage: "crn", reason: "coordinate" },
+  { kind: "simulation-failed", stage: "crn", reason: "random-domain" },
+  { kind: "simulation-failed", stage: "crn", reason: "view" },
+  { kind: "simulation-failed", stage: "transition", reason: "invalid-action-transition" },
+  { kind: "simulation-failed", stage: "transition", reason: "invalid-pass-quorum" },
+  { kind: "simulation-failed", stage: "transition", reason: "public-history-not-append-only" },
+  { kind: "simulation-failed", stage: "state-conservation", reason: "invalid-shape" },
+  { kind: "simulation-failed", stage: "state-conservation", reason: "duplicate-card" },
+  { kind: "simulation-failed", stage: "state-conservation", reason: "public-card-overlap" },
+  { kind: "simulation-failed", stage: "state-conservation", reason: "unexpected-card" },
+  { kind: "simulation-failed", stage: "state-conservation", reason: "missing-card" },
+  { kind: "simulation-failed", stage: "state-conservation", reason: "hand-count-mismatch" },
+  { kind: "simulation-failed", stage: "state-conservation", reason: "finished-hand-count-mismatch" },
+  { kind: "simulation-failed", stage: "state-conservation", reason: "unfinished-hand-count-mismatch" },
+  { kind: "simulation-failed", stage: "state-conservation", reason: "invalid-finish-order" },
+  { kind: "simulation-failed", stage: "state-conservation", reason: "invalid-trick" },
+  { kind: "simulation-failed", stage: "state-conservation", reason: "invalid-turn" },
+  { kind: "simulation-failed", stage: "terminal-projection", reason: "invalid-finish-order" },
+  { kind: "simulation-failed", stage: "terminal-projection", reason: "utility-failed" },
+] as const satisfies readonly RolloutKernelFailure[];
+
 describe("validateRolloutEvidence", () => {
   test("accepts exact evidence boundaries for multiple candidates without changing the input", () => {
     const input = makeInput();
@@ -97,7 +130,7 @@ describe("validateRolloutEvidence", () => {
     const kernelSpy = vi.spyOn(kernel, "runRolloutReplicate");
     const input = makeInput({
       effectiveSampleSize: 1,
-      results: Object.defineProperty([], "0", {
+      results: Object.defineProperty(new Array(1), "0", {
         get: () => { throw new Error("candidate loop entered"); },
       }) as unknown as RolloutReplicateResult[],
     });
@@ -165,6 +198,21 @@ describe("validateRolloutEvidence", () => {
     }));
   });
 
+  test("reports the observed result count for unknown coverage identities", () => {
+    const input = makeInput();
+    const first = input.results[0];
+    if (!first?.ok) throw new Error("expected successful fixture result");
+    const result = validateRolloutEvidence({
+      ...input,
+      results: [{ ...first, candidateId: "foreign-candidate" }, ...input.results.slice(1)],
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      failure: { kind: "coverage-mismatch", expectedCoverage: 8, actualCoverage: 8 },
+    });
+  });
+
   test("preserves a typed kernel failure and returns no partial evidence", () => {
     const kernelFailure: RolloutReplicateResult = {
       ok: false,
@@ -179,6 +227,24 @@ describe("validateRolloutEvidence", () => {
       failure: { kind: "kernel-failed", failure: kernelFailure.failure },
     });
     expect(result).not.toHaveProperty("value");
+  });
+
+  test.each(SIMULATION_FAILURES)("classifies valid $stage/$reason simulation failures as kernel failures", (failure) => {
+    const result = validateRolloutEvidence(makeInput({ results: [{ ok: false, failure }] }));
+
+    expect(result).toEqual({ ok: false, failure: { kind: "kernel-failed", failure } });
+  });
+
+  test.each([
+    { kind: "simulation-failed", stage: "input" },
+    { kind: "simulation-failed", stage: "input", reason: "not-a-reason" },
+    { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch" },
+    { kind: "simulation-failed", stage: "replay", reason: "invalid-scenario", extra: true },
+    { kind: "simulation-failed", stage: "replay", reason: "scenario-projection-mismatch", field: "scenario.privateState.hands", extra: true },
+  ])("rejects invalid simulation failure shape %# as invalid request", (failure) => {
+    const result = validateRolloutEvidence(makeInput({ results: [{ ok: false, failure: failure as unknown as RolloutKernelFailure }] }));
+
+    expect(result).toEqual({ ok: false, failure: { kind: "invalid-request", field: "request" } });
   });
 
   test.each([

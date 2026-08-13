@@ -136,7 +136,7 @@ describe("D2F keyed CRN invariance and validation", () => {
     expect(bytes(canonicalCrnValueBytes(randomDomain, key("ab")))).not.toBe(bytes(canonicalCrnValueBytes(randomDomain, key("a"))));
   });
 
-  test("pairs candidates without accepting candidate identity or order", async () => {
+  test("pairs candidates without accepting candidate identity or order", () => {
     const candidates = ["candidate-b", "candidate-a"];
     const current = coordinate();
     const randomDomain = deriveRandomDomain(current);
@@ -145,15 +145,14 @@ describe("D2F keyed CRN invariance and validation", () => {
     expect(expected.ok).toBe(true);
     if (!expected.ok) throw new Error("view creation failed");
 
-    const candidateOrderValues = candidates.map(() => expected.view.value(semanticKey));
-    const reversedValues = [...candidates].reverse().map(() => expected.view.value(semanticKey));
-    const completionValues = await Promise.all(candidates.map((candidate, index) => new Promise<number>((resolvePromise) => {
-      setTimeout(() => resolvePromise(expected.view.value(semanticKey)), index === 0 ? 2 : 0);
-    })));
+    const valuesFor = (order: readonly string[]) => order.map((candidate) => ({ candidate, value: expected.view.value(semanticKey) }));
+    const byCandidate = (left: { candidate: string }, right: { candidate: string }): number => (
+      left.candidate < right.candidate ? -1 : left.candidate > right.candidate ? 1 : 0
+    );
+    const candidateOrderValues = valuesFor(candidates);
+    const reversedValues = valuesFor([...candidates].reverse());
 
-    expect(candidateOrderValues).toEqual([expected.view.value(semanticKey), expected.view.value(semanticKey)]);
-    expect(reversedValues).toEqual(candidateOrderValues);
-    expect(completionValues.sort()).toEqual(candidateOrderValues.sort());
+    expect(candidateOrderValues.slice().sort(byCandidate)).toEqual(reversedValues.slice().sort(byCandidate));
   });
 
   test("does not depend on scenario scheduling order", () => {

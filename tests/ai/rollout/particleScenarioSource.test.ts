@@ -746,7 +746,7 @@ describe("particleScenarioSource", () => {
     expect(result).toEqual({ ok: false, failure: { kind: "scenario-source-failed", reason: "private-state-invalid" } });
   });
 
-  test("rejects a particle identity or replay mismatch as private-state-invalid", () => {
+  test("rejects a particle bank identity mismatch as fake-or-unknown-particle-bank", () => {
     const fixture = makeFixture();
     const mismatchedBank = createParticleBankHandle(
       fixture.bank,

@@ -88,6 +88,6 @@ it("runs the real Room decision through ParticleBank, detached rollout, and v3 e
   expect(evidence.formalCandidateId).toBe(candidates.value.selectedCandidateId);
   expect(evidence.ranking).toHaveLength(candidates.value.candidates.length);
   expect(evidence.fallbackReason).toBe("none");
-  expect(evidence.formalCandidateId).not.toContain("hands");
+  expect(JSON.stringify(evidence)).not.toMatch(/"(?:hands|hiddenTransferAssignments|normalizedWeight|particleSeed|privateState)":/);
   expect(Object.isFrozen(evidence)).toBe(true);
 });

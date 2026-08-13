@@ -23,7 +23,8 @@ describe("evaluateTeamUtility", () => {
     const result = evaluateTeamUtility({ perspectiveSeat: 0, finishOrder });
 
     expect(result).toEqual({ ok: true, utility });
-    expect(utility).not.toBe(0);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.utility).not.toBe(0);
     expect(Object.isFrozen(result)).toBe(true);
   });
 
@@ -102,6 +103,16 @@ describe("evaluateTeamUtility", () => {
         reason: "missing-seat",
       });
     }
+  });
+
+  test("uses the captured array length when validating a proxied finish order", () => {
+    const finishOrder = new Proxy([0, 2, 1, 3], {
+      get(target, property, receiver) {
+        return property === "length" ? 3 : Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(evaluateTeamUtility({ perspectiveSeat: 0, finishOrder: finishOrder as never })).toEqual({ ok: true, utility: 3 });
   });
 
   test("rejects malformed envelopes and never invokes hostile getters or callbacks", () => {

@@ -84,7 +84,6 @@ describe("D2F keyed CRN canonical identity", () => {
   test("preserves TLV tuple boundaries in value bytes", () => {
     const domain = "3d1571b8edbf823789c3bb440b98388d2448cb8b15b56025a8ba2d04e4d25e96" as CanonicalRandomDomain;
     const ab = unwrap(createCanonicalSemanticKey("ab"));
-    const a = unwrap(createCanonicalSemanticKey("a"));
     const c = unwrap(createCanonicalSemanticKey("c"));
     const bc = unwrap(createCanonicalSemanticKey("bc"));
     const x = "7ccad33be63bbbe2df49bf4529a7ff06a1288a1debaeafca4dee1aa083f364cb" as CanonicalRandomDomain;
@@ -94,6 +93,7 @@ describe("D2F keyed CRN canonical identity", () => {
 
     expect(hex(canonicalCrnValueBytes(domain, c))).toBe(AB_C_BYTES);
     expect(hex(canonicalCrnValueBytes("9c5bc616973ab50bb7ae1ea133dc9333e41d916c2bad2f1ee1fa54d4ff9f389f" as CanonicalRandomDomain, bc))).toBe(A_BC_BYTES);
+    expect(hex(canonicalCrnValueBytes(domain, c))).not.toBe(hex(canonicalCrnValueBytes("9c5bc616973ab50bb7ae1ea133dc9333e41d916c2bad2f1ee1fa54d4ff9f389f" as CanonicalRandomDomain, bc)));
     expect(hex(canonicalCrnValueBytes(domain, c))).not.toBe(hex(canonicalCrnValueBytes(domain, ab)));
     expect(hex(canonicalCrnValueBytes(x, xyZ))).toBe(X_YZ_BYTES);
     expect(hex(canonicalCrnValueBytes(xy, z))).toBe(XY_Z_BYTES);

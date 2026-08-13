@@ -170,7 +170,7 @@ describe("aggregateRolloutCandidates", () => {
   test.each([
     ["non-finite baseline", { candidates: [{ candidateId: "candidate-a", baselineEvaluatorScore: Number.NaN }, { candidateId: "candidate-b", baselineEvaluatorScore: 0 }] }],
     ["candidate association mismatch", { candidates: [{ candidateId: "candidate-a", baselineEvaluatorScore: 0 }, { candidateId: "foreign", baselineEvaluatorScore: 0 }] }],
-    ["negative utility", { evidence: { ...makeInput().evidence, results: makeInput().evidence.results.map((result) => result.ok ? { ...result, utility: -0 as never } : result) } }],
+    ["zero utility", { evidence: { ...makeInput().evidence, results: makeInput().evidence.results.map((result) => result.ok ? { ...result, utility: 0 as never } : result) } }],
     ["fractional work units", { evidence: { ...makeInput().evidence, results: makeInput().evidence.results.map((result) => result.ok ? { ...result, workUnits: 1.5 } : result) } }],
   ])("returns typed failure for %s without a partial summary", (_label, override) => {
     const result = aggregateRolloutCandidates(makeInput(override));
@@ -191,9 +191,6 @@ describe("aggregateRolloutCandidates", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result).toEqual(expect.objectContaining({
-      ok: false,
-      failure: expect.objectContaining({ kind: "aggregation-failed" }),
-    }));
+    expect(result).toEqual({ ok: false, failure: { kind: "aggregation-failed", failure: { kind: "work-unit-overflow" } } });
   });
 });
