@@ -6,11 +6,22 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "api": "tsx src/server/dev.ts",
-    "test": "vitest run",
+    "test": "vitest run --exclude tests/performance/aiHotPath.test.ts --maxWorkers 1 --minWorkers 1 && vitest run tests/performance/aiHotPath.test.ts",
+    "test:d2a1-regression": "vitest run --exclude \"tests/benchmark/**\" --exclude \"tests/simulation/**\" --exclude \"tests/performance/**\" --testTimeout=120000",
+    "test:benchmark": "vitest run tests/benchmark --testTimeout=120000 --reporter=verbose",
+    "test:simulation": "vitest run tests/simulation --testTimeout=120000",
     "test:watch": "vitest",
-    "build": "tsc --noEmit && vite build"
+    "build": "tsc --noEmit && vite build",
+    "simulate:ai": "tsx scripts/runUnifiedAiSimulation.ts",
+    "benchmark:ai": "tsx scripts/runAiBenchmark.ts",
+    "benchmark:replay": "tsx scripts/replayAiBenchmark.ts",
+    "benchmark:d1": "tsx scripts/runD1TopKBenchmark.ts",
+    "benchmark:d1:replay": "tsx scripts/replayD1TopKBenchmark.ts",
+    "benchmark:d1:freeze": "tsx scripts/freezeD1Calibration.ts",
+    "test:ai-performance": "vitest run tests/performance/aiHotPath.test.ts"
   },
   "dependencies": {
+    "better-sqlite3": "12.11.1",
     "fastify": "^5.2.1",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
@@ -19,6 +30,7 @@
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",
+    "@types/better-sqlite3": "7.6.13",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

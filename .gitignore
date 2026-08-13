@@ -4,6 +4,12 @@ logs/
 outputs/
 work/
 .superpowers/
+artifacts/
+# Benchmark replay, debug, and batch artifacts stay local; compact baseline files
+# can be explicitly force-added when a formal run is reviewed.
+artifacts/ai-benchmark-replays/
+artifacts/ai-benchmark-debug/
+artifacts/ai-benchmark-batches/
 
 *.log
 *.pid
@@ -14,3 +20,5 @@ work/
 
 Thumbs.db
 .DS_Store
+
+.worktrees/

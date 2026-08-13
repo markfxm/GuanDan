@@ -1,0 +1,1453 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import ts from "typescript";
+import { describe, expect, it } from "vitest";
+import { decideAiAction } from "../../src/ai/aiDecisionEngine";
+import type { AiDecision, AiDecisionConfig, AiObservation, AiRuntimeState } from "../../src/ai/contracts";
+import type { Card, Suit } from "../../src/engine/cards";
+import type { CardGroup } from "../../src/engine/groups";
+import { canonicalJson, runtimeCanonicalJson } from "./d0FixtureCanonicalizer";
+import type { D0KeepCurrentFixture } from "./d0FixtureTypes";
+import type { HandPlan } from "../../src/ai/contracts";
+import type { LightweightPublicEvidence } from "../../src/ai/belief/lightweightPublicEvidence";
+import {
+  deriveD2cPlanPriorityQuota,
+  type D2cEvidenceSnapshotRef,
+  type D2cFallbackReason,
+  type D2cPlanCandidate,
+  type D2cPlanPolicyInput,
+  type D2cPlanPolicyResult,
+  type D2cQuotaConfig,
+  type D2cShadowResult,
+  type PlanPruningMode,
+} from "../../src/ai/planning/beliefGuidedPlanPolicy";
+
+const identity = {
+  gameId: "d2c-test-game",
+  roundIdentity: "d2c-test-round",
+  handIdentity: "d2c-test-hand",
+} as const;
+
+const defaultQuotaConfig: D2cQuotaConfig = Object.freeze({
+  schemaVersion: "d2c-plan-quota-v1",
+  maxPlanFamilies: 3,
+  maxPlanExpansions: 5,
+  minQuotaPerFamily: 1,
+  maxQuotaPerFamily: 3,
+});
+
+const defaultMetrics = {
+  hardViolations: 0,
+  protectionLoss: 0.123456789,
+  estimatedTurns: 1.23456789,
+  lowSingleCount: 1,
+  retainedControl: 2,
+  wildcardFlexibility: 0,
+  responseCoverage: 1,
+  leadFlexibility: 2,
+  fallbackScore: 0,
+};
+
+function evidenceWith(
+  overrides: Partial<LightweightPublicEvidence> = {},
+): LightweightPublicEvidence {
+  return {
+    schemaVersion: "d2-lightweight-evidence-v1",
+    ...identity,
+    eventIndex: 7,
+    perspectiveSeat: 0,
+    seatMap: {
+      self: 0,
+      partner: 2,
+      leftOpponent: 1,
+      rightOpponent: 3,
+    },
+    hardPublicFacts: {
+      remainingCardCounts: {
+        self: 20,
+        partner: 20,
+        leftOpponent: 2,
+        rightOpponent: 5,
+      },
+      currentTrick: {
+        trickIndex: 2,
+        leadSeat: 0,
+        passSeats: [],
+      },
+      initiativeRelation: "self",
+      playedCardIds: [],
+      playedCardClasses: [],
+      publicTransfers: [],
+      publicTributeEvents: [],
+      finishOrder: ["leftOpponent"],
+    },
+    derivedSignals: {
+      recentActions: [],
+      recentPassStreakByRelation: {
+        self: 0,
+        partner: 0,
+        leftOpponent: 0,
+        rightOpponent: 0,
+      },
+      recentActionTendencies: {
+        self: { playCount: 1, passCount: 0, lastActionKind: "play" },
+        partner: { playCount: 0, passCount: 1, lastActionKind: "pass" },
+        leftOpponent: { playCount: 0, passCount: 0 },
+        rightOpponent: { playCount: 0, passCount: 0 },
+      },
+    },
+    provenance: [],
+    ...overrides,
+  };
+}
+
+function uncertaintyEvidence(): LightweightPublicEvidence {
+  const base = evidenceWith();
+  return {
+    ...base,
+    derivedSignals: {
+      ...base.derivedSignals,
+      recentActions: [
+        {
+          eventIndex: 5,
+          kind: "play",
+          seat: 1,
+          relation: "leftOpponent",
+          trickIndex: 2,
+          publicStableKey: "play:left-opponent:5",
+          publicCardIds: ["C2-1"],
+        },
+        {
+          eventIndex: 6,
+          kind: "pass",
+          seat: 1,
+          relation: "leftOpponent",
+          trickIndex: 2,
+          publicStableKey: "pass:left-opponent:6",
+          publicCardIds: [],
+        },
+      ],
+      recentActionTendencies: {
+        ...base.derivedSignals.recentActionTendencies,
+        leftOpponent: { playCount: 1, passCount: 1, lastActionKind: "pass" },
+      },
+    },
+  };
+}
+
+function candidate(
+  id: string,
+  overrides: Partial<typeof defaultMetrics> = {},
+  protectedGroupIds: readonly string[] = [],
+): D2cPlanCandidate {
+  const plan: HandPlan = {
+    id,
+    groups: [],
+    metrics: { ...defaultMetrics, ...overrides },
+  };
+  return { plan, protectedGroupIds };
+}
+
+function testCard(id: string, suit: Suit): Card {
+  return { id, kind: "suited", rank: "2", suit, copy: 1 };
+}
+
+function testGroup(type: CardGroup["type"], cards: Card[]): CardGroup {
+  const purpose = type === "single"
+    ? "risk"
+    : type === "straight-flush"
+      ? "attack"
+      : type === "bomb" || type === "joker-bomb"
+        ? "recovery"
+        : "filler";
+  return {
+    id: `${type}:test`,
+    type,
+    label: type,
+    purpose,
+    cards,
+    wildcards: [],
+    strength: 1,
+  };
+}
+
+function withGroups(
+  base: D2cPlanCandidate,
+  groups: CardGroup[],
+): D2cPlanCandidate {
+  return {
+    ...base,
+    plan: { ...base.plan, groups },
+  };
+}
+
+function snapshotFor(evidence: LightweightPublicEvidence): D2cEvidenceSnapshotRef {
+  return {
+    gameId: evidence.gameId,
+    roundIdentity: evidence.roundIdentity,
+    handIdentity: evidence.handIdentity,
+    eventIndex: evidence.eventIndex,
+  };
+}
+
+function inputFor(
+  candidatePlans: readonly D2cPlanCandidate[],
+  overrides: Partial<D2cPlanPolicyInput> = {},
+): D2cPlanPolicyInput {
+  const evidence = evidenceWith();
+  return {
+    schemaVersion: "d2c-plan-policy-input-v1",
+    evidence,
+    expectedEvidenceSnapshot: snapshotFor(evidence),
+    candidatePlans,
+    mode: "shadow",
+    quotaConfig: { ...defaultQuotaConfig },
+    ...overrides,
+  };
+}
+
+function expectShadow(result: D2cPlanPolicyResult): D2cShadowResult {
+  expect(result.kind).toBe("shadow");
+  return result as D2cShadowResult;
+}
+
+function expectFallback(
+  input: D2cPlanPolicyInput,
+  reason: D2cFallbackReason,
+): void {
+  const result = deriveD2cPlanPriorityQuota(input);
+  expect(result.kind).toBe("disabled");
+  if (result.kind !== "disabled") throw new Error("D2C_EXPECTED_DISABLED_RESULT");
+  expect(result.fallbackReason).toBe(reason);
+}
+
+function sumQuotas(result: D2cShadowResult): number {
+  return result.familyQuotas.reduce((sum, item) => sum + item.quota, 0);
+}
+
+function sourceFile(): string {
+  return readFileSync(
+    resolve(process.cwd(), "src/ai/planning/beliefGuidedPlanPolicy.ts"),
+    "utf8",
+  );
+}
+
+function sourceIdentifiers(source: string): Set<string> {
+  const file = ts.createSourceFile(
+    "beliefGuidedPlanPolicy.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const identifiers = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node)) identifiers.add(node.text);
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return identifiers;
+}
+
+function readDetachedDecisionFixture(): {
+  observation: AiObservation;
+  runtime: AiRuntimeState;
+  config: AiDecisionConfig;
+} {
+  const fixturePath = resolve(process.cwd(), "tests/ai/fixtures/d0KeepCurrentCases.json");
+  const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as D0KeepCurrentFixture;
+  const testCase = fixture.cases[0];
+  if (testCase === undefined) throw new Error("D2C_TASK4_FIXTURE_EMPTY");
+  return {
+    observation: structuredClone(testCase.observation) as AiObservation,
+    runtime: structuredClone(testCase.runtimeInput) as AiRuntimeState,
+    config: structuredClone(testCase.config) as AiDecisionConfig,
+  };
+}
+
+function d2cInputFromDecision(
+  decision: AiDecision,
+  mode: PlanPruningMode,
+): D2cPlanPolicyInput {
+  const evidence = evidenceWith();
+  const activePlanId = decision.runtime.activePlanId;
+  return {
+    schemaVersion: "d2c-plan-policy-input-v1",
+    evidence,
+    expectedEvidenceSnapshot: snapshotFor(evidence),
+    candidatePlans: decision.runtime.candidatePlans.map((plan) => ({
+      plan,
+      protectedGroupIds: [],
+    })),
+    ...(activePlanId === undefined ? {} : { activePlanId }),
+    mode,
+    quotaConfig: { ...defaultQuotaConfig },
+  };
+}
+
+function hasObjectReference(root: unknown, target: object): boolean {
+  const seen = new Set<object>();
+  const visit = (value: unknown): boolean => {
+    if (value === target) return true;
+    if (value === null || typeof value !== "object" || seen.has(value)) return false;
+    seen.add(value);
+    return Object.values(value).some(visit);
+  };
+  return visit(root);
+}
+
+function outputKeys(root: unknown): string[] {
+  const seen = new Set<object>();
+  const keys: string[] = [];
+  const visit = (value: unknown): void => {
+    if (value === null || typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    for (const [key, child] of Object.entries(value)) {
+      keys.push(key);
+      visit(child);
+    }
+  };
+  visit(root);
+  return keys;
+}
+
+describe("D2c plan priority and quota Task 1 RED characterization", () => {
+  it("handles zero candidates with action-only semantics", () => {
+    const result = deriveD2cPlanPriorityQuota(inputFor([]));
+    expect(result).toMatchObject({
+      kind: "disabled",
+      candidateCount: 0,
+      fallbackReason: "no-candidates-action-only",
+    });
+  });
+
+  it("keeps one candidate without planner expansion", () => {
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("one")])),
+    );
+    expect(result.candidateCount).toBe(1);
+    expect(Object.keys(result.annotations)).toEqual(["one"]);
+  });
+
+  it("characterizes two through five candidates", () => {
+    const candidates = ["a", "b", "c", "d", "e"].map((id) => candidate(id));
+    const result = expectShadow(deriveD2cPlanPriorityQuota(inputFor(candidates)));
+    expect(result.candidateCount).toBe(5);
+    expect(Object.keys(result.annotations)).toHaveLength(5);
+  });
+
+  it("rejects candidate overflow without truncation", () => {
+    expectFallback(
+      inputFor(["a", "b", "c", "d", "e", "f"].map((id) => candidate(id))),
+      "candidate-count-overflow",
+    );
+  });
+
+  it("classifies active, urgent, finishability, uncertainty, power, alternative, and other families", () => {
+    const candidates = [
+      candidate("active", {}, ["protected-group"]),
+      candidate("finish", { estimatedTurns: 0.5 }),
+      candidate("uncertainty", { responseCoverage: 2 }),
+      candidate("other", { responseCoverage: 0, leadFlexibility: 0 }),
+    ];
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(
+        inputFor(candidates, {
+          activePlanId: "active",
+          evidence: uncertaintyEvidence(),
+        }),
+      ),
+    );
+    const familyIds = Object.values(result.annotations).flatMap((item) => item.familyIds);
+    expect(familyIds).toEqual(expect.arrayContaining([
+      "active",
+      "urgent-defense",
+      "finishability",
+      "uncertainty-cover",
+      "power-preserving",
+      "alternative",
+      "other",
+    ]));
+
+    const withoutRecentActions = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("no-uncertainty", {
+        responseCoverage: 2,
+      })])),
+    );
+    expect(withoutRecentActions.annotations["no-uncertainty"].familyIds).not.toContain("uncertainty-cover");
+  });
+
+  it("deduplicates multi-family labels and assigns one owner family", () => {
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(
+        inputFor([candidate("multi", {}, ["protected-group"])]),
+      ),
+    );
+    const annotation = result.annotations.multi;
+    expect(new Set(annotation.familyIds).size).toBe(annotation.familyIds.length);
+    expect(annotation.ownerFamily).toBeDefined();
+  });
+
+  it("orders stable priority independently of locale", () => {
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(
+        inputFor([candidate("ä"), candidate("z"), candidate("a")]),
+      ),
+    );
+    expect(Object.keys(result.annotations)).toEqual(["a", "z", "ä"]);
+  });
+
+  it("accepts fractional metrics and normalizes derived quality to six decimals", () => {
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("fractional")])),
+    );
+    expect(result.annotations.fractional.priority[2]).toBe(895.370372);
+  });
+
+  it("does not narrow unused metric domains", () => {
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("unused", {
+        hardViolations: -9,
+        wildcardFlexibility: -3.5,
+        fallbackScore: -2.25,
+      })])),
+    );
+    expect(result.annotations.unused).toBeDefined();
+  });
+
+  it("conserves family quota and keeps priority complete", () => {
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("a"), candidate("b"), candidate("c")])),
+    );
+    expect(result.familyPriority.length).toBeGreaterThanOrEqual(result.familyQuotas.length);
+    expect(result.diagnostics.quotaTotal).toBe(sumQuotas(result));
+    expect(result.familyQuotas.every((item) => item.quota > 0)).toBe(true);
+  });
+
+  it("supports a valid zero expansion budget with no quota records", () => {
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("a"), candidate("b")], {
+        quotaConfig: { ...defaultQuotaConfig, maxPlanExpansions: 0 },
+      })),
+    );
+    expect(result.familyPriority.length).toBeGreaterThan(0);
+    expect(result.familyQuotas).toEqual([]);
+    expect(result.diagnostics.quotaTotal).toBe(0);
+  });
+
+  it("is invariant under candidate permutation and repeated calls", () => {
+    const candidates = [candidate("a"), candidate("b"), candidate("c")];
+    const first = deriveD2cPlanPriorityQuota(inputFor(candidates));
+    const permuted = deriveD2cPlanPriorityQuota(inputFor([...candidates].reverse()));
+    const repeated = deriveD2cPlanPriorityQuota(inputFor(candidates));
+    expect(JSON.stringify(permuted)).toBe(JSON.stringify(first));
+    expect(JSON.stringify(repeated)).toBe(JSON.stringify(first));
+  });
+
+  it("matches an older evidence event index as stale", () => {
+    const evidence = evidenceWith({ eventIndex: 6 });
+    expectFallback(
+      inputFor([candidate("stale-old")], {
+        evidence,
+        expectedEvidenceSnapshot: { ...snapshotFor(evidence), eventIndex: 7 },
+      }),
+      "stale-evidence",
+    );
+  });
+
+  it("matches a newer evidence event index as stale", () => {
+    const evidence = evidenceWith({ eventIndex: 8 });
+    expectFallback(
+      inputFor([candidate("stale-new")], {
+        evidence,
+        expectedEvidenceSnapshot: { ...snapshotFor(evidence), eventIndex: 7 },
+      }),
+      "stale-evidence",
+    );
+  });
+
+  it("fails closed when evidence identity differs from the expected snapshot", () => {
+    const evidence = evidenceWith({ gameId: "other-game" });
+    expectFallback(
+      inputFor([candidate("stale-identity")], {
+        evidence,
+        expectedEvidenceSnapshot: snapshotFor(evidenceWith()),
+      }),
+      "stale-evidence",
+    );
+  });
+
+  it("rejects invalid evidence schema and malformed snapshot", () => {
+    const evidence = evidenceWith({ schemaVersion: "wrong" as never });
+    expectFallback(
+      inputFor([candidate("invalid-schema")], { evidence }),
+      "unknown-evidence-schema",
+    );
+
+    const malformedSnapshot = {
+      ...snapshotFor(evidence),
+      eventIndex: "7",
+    } as unknown as D2cEvidenceSnapshotRef;
+    expectFallback(
+      inputFor([candidate("invalid-snapshot")], {
+        expectedEvidenceSnapshot: malformedSnapshot,
+      }),
+      "invalid-evidence",
+    );
+  });
+
+  it("rejects duplicate and missing stable plan keys", () => {
+    expectFallback(
+      inputFor([candidate("duplicate"), candidate("duplicate")]),
+      "duplicate-plan-key",
+    );
+    expectFallback(inputFor([candidate("")]), "missing-plan-key");
+  });
+
+  it("rejects invalid quota configuration and unknown mode", () => {
+    expectFallback(
+      inputFor([candidate("invalid-quota")], {
+        quotaConfig: { ...defaultQuotaConfig, maxPlanFamilies: 0 },
+      }),
+      "invalid-quota-config",
+    );
+    expectFallback(
+      inputFor([candidate("unknown-mode")], {
+        mode: "active" as PlanPruningMode,
+      }),
+      "unknown-mode",
+    );
+  });
+
+  it("does not mutate input evidence, candidates, or configuration", () => {
+    const input = inputFor([candidate("immutable")]);
+    const before = JSON.stringify(input);
+    const result = expectShadow(deriveD2cPlanPriorityQuota(input));
+    expect(JSON.stringify(input)).toBe(before);
+    expect(Object.isFrozen(result)).toBe(true);
+  });
+
+  it("deep-freezes every result node", () => {
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("frozen")])),
+    );
+    const visit = (value: unknown, seen = new Set<object>()): void => {
+      if (value === null || typeof value !== "object" || seen.has(value)) return;
+      seen.add(value);
+      expect(Object.isFrozen(value)).toBe(true);
+      for (const child of Object.values(value)) visit(child, seen);
+    };
+    visit(result);
+  });
+
+  it("keeps privacy-safe detached result shape", () => {
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("shape")])),
+    );
+    expect(result).not.toHaveProperty("action");
+    expect(result).not.toHaveProperty("legalActions");
+    expect(result).not.toHaveProperty("candidatePlans");
+    expect(result).not.toHaveProperty("selectedPlan");
+    expect(result).not.toHaveProperty("selectedPlanId");
+    expect(result).not.toHaveProperty("runtime");
+    expect(JSON.stringify(result)).not.toMatch(/partnerHand|opponentsHands|hiddenState|deck|particle/i);
+  });
+
+  it("classifies finishability from six-decimal canonical estimated turns", () => {
+    const first = candidate("canonical-finish-a", { estimatedTurns: 1.0000001 });
+    const second = candidate("canonical-finish-b", { estimatedTurns: 1.0000004 });
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([first, second])),
+    );
+
+    expect(result.annotations[first.plan.id].familyIds).toContain("finishability");
+    expect(result.annotations[second.plan.id].familyIds).toContain("finishability");
+    expect(first.plan.metrics.estimatedTurns).toBe(1.0000001);
+    expect(second.plan.metrics.estimatedTurns).toBe(1.0000004);
+  });
+
+  it("uses canonical protection loss for power-preserving power groups", () => {
+    const bomb = testGroup("bomb", [
+      testCard("S2-1", "spades"),
+      testCard("H2-1", "hearts"),
+      testCard("C2-1", "clubs"),
+      testCard("D2-1", "diamonds"),
+    ]);
+    const powerCandidate = withGroups(
+      candidate("canonical-power", { protectionLoss: 0.0000004 }),
+      [bomb],
+    );
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([powerCandidate])),
+    );
+
+    expect(result.annotations[powerCandidate.plan.id].familyIds).toContain("power-preserving");
+    expect(powerCandidate.plan.metrics.protectionLoss).toBe(0.0000004);
+  });
+
+  it("does not label an ordinary zero-loss plan as power-preserving", () => {
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([
+        candidate("ordinary-zero-loss", {
+          protectionLoss: 0,
+          responseCoverage: 0,
+          leadFlexibility: 0,
+        }),
+      ])),
+    );
+
+    expect(result.annotations["ordinary-zero-loss"].familyIds).not.toContain("power-preserving");
+  });
+
+  it("marks urgent-defense for a non-single CardGroup object", () => {
+    const pair = testGroup("pair", [
+      testCard("S2-1", "spades"),
+      testCard("H2-1", "hearts"),
+    ]);
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([
+        withGroups(candidate("non-single", {
+          responseCoverage: 0,
+          leadFlexibility: 0,
+        }), [pair]),
+      ])),
+    );
+
+    expect(result.annotations["non-single"].familyIds).toContain("urgent-defense");
+  });
+
+  it("compares the strongest non-active family when deriving alternative", () => {
+    const active = candidate("strongest-active", {
+      responseCoverage: 1,
+      leadFlexibility: 2,
+    });
+    const challenger = candidate("strongest-challenger", {
+      estimatedTurns: 2,
+      responseCoverage: 0,
+      leadFlexibility: 2,
+    });
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([active, challenger], {
+        activePlanId: active.plan.id,
+        evidence: uncertaintyEvidence(),
+      })),
+    );
+
+    expect(result.annotations[active.plan.id].familyIds).toEqual(
+      expect.arrayContaining(["urgent-defense", "uncertainty-cover"]),
+    );
+    expect(result.annotations[challenger.plan.id].familyIds).toContain(
+      "uncertainty-cover",
+    );
+    expect(result.annotations[challenger.plan.id].familyIds).toContain("alternative");
+  });
+
+  it("caps minimum family quota by candidate count without dropping the family", () => {
+    const urgent = candidate("quota-urgent");
+    const small = candidate("quota-small", {
+      estimatedTurns: 2,
+      responseCoverage: 0,
+      leadFlexibility: 0,
+    });
+    const result = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([urgent, small], {
+        quotaConfig: {
+          ...defaultQuotaConfig,
+          maxPlanFamilies: 2,
+          maxPlanExpansions: 4,
+          minQuotaPerFamily: 2,
+          maxQuotaPerFamily: 3,
+        },
+      })),
+    );
+    const smallFamily = result.annotations[small.plan.id].ownerFamily;
+    const smallQuota = result.familyQuotas.find((item) => item.family === smallFamily);
+
+    expect(smallFamily).toBe("other");
+    expect(smallQuota).toEqual({ family: "other", quota: 1 });
+  });
+
+  it("fails closed when a stable plan key becomes a forbidden output key", () => {
+    const result = deriveD2cPlanPriorityQuota(inputFor([candidate("hiddenState")]));
+
+    expect(result).toMatchObject({
+      kind: "disabled",
+      fallbackReason: "privacy-violation",
+    });
+    expect(result).not.toHaveProperty("annotations.hiddenState");
+  });
+
+  it("enforces the exact source-boundary import contract and skeleton boundary", () => {
+    const source = sourceFile();
+    const file = ts.createSourceFile(
+      "beliefGuidedPlanPolicy.ts",
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const imports = file.statements.filter(ts.isImportDeclaration);
+    expect(imports.map((item) => (item.moduleSpecifier as ts.StringLiteral).text)).toEqual([
+      "../belief/lightweightPublicEvidence",
+      "../contracts",
+    ]);
+    const d2bImport = imports[0].importClause;
+    expect(d2bImport?.isTypeOnly).toBe(false);
+    const d2bBindings = d2bImport?.namedBindings;
+    expect(d2bBindings !== undefined && ts.isNamedImports(d2bBindings)).toBe(true);
+    if (!d2bImport || d2bBindings === undefined || !ts.isNamedImports(d2bBindings)) throw new Error("D2C_IMPORT_CONTRACT_INVALID");
+    expect(d2bBindings.elements.map((item) => [item.name.text, item.isTypeOnly])).toEqual([
+      ["assertLightweightPublicEvidencePrivacy", false],
+      ["LightweightPublicEvidence", true],
+    ]);
+    const contractsImport = imports[1].importClause;
+    expect(contractsImport?.isTypeOnly).toBe(true);
+    const contractsBindings = contractsImport?.namedBindings;
+    expect(contractsBindings !== undefined && ts.isNamedImports(contractsBindings)).toBe(true);
+    expect(source).not.toMatch(/import\s*\(/);
+    expect(source).not.toMatch(/\brequire\s*\(/);
+    const forbiddenIdentifiers = [
+      "RoomState",
+      "PublicRoom",
+      "AiRuntimeState",
+      "HandPlanner",
+      "generateHandPlans",
+      "generateFastHandPlans",
+      "generateRapidHandPlan",
+      "ensurePlans",
+      "decideAiAction",
+      "runAiStep",
+      "hands",
+      "initialHands",
+      "partnerHand",
+      "opponentsHands",
+      "deck",
+      "hiddenState",
+      "privateRuntime",
+      "ParticleBank",
+      "particles",
+      "rollout",
+      "likelihood",
+      "server",
+      "provider",
+      "store",
+      "treatment",
+      "benchmark",
+      "simulation",
+      "performance",
+      "smoke",
+      "calibration",
+      "formal",
+    ];
+    const identifiers = sourceIdentifiers(source);
+    for (const identifier of forbiddenIdentifiers) expect(identifiers.has(identifier)).toBe(false);
+  });
+});
+
+describe("D2c Task 3 malformed-input hardening", () => {
+  const expectDisabled = (
+    input: D2cPlanPolicyInput,
+    reason: D2cFallbackReason,
+  ): void => {
+    const result = deriveD2cPlanPriorityQuota(input);
+    expect(result.kind).toBe("disabled");
+    if (result.kind !== "disabled") throw new Error("D2C_EXPECTED_DISABLED_RESULT");
+    expect(result.fallbackReason).toBe(reason);
+    expect(result.annotations).toEqual([]);
+    expect(result.familyPriority).toEqual([]);
+    expect(result.familyQuotas).toEqual([]);
+  };
+
+  const malformedEvidenceInput = (
+    mutate: (evidence: Record<string, unknown>) => void,
+  ): D2cPlanPolicyInput => {
+    const evidence = structuredClone(evidenceWith()) as unknown as Record<string, unknown>;
+    mutate(evidence);
+    const typedEvidence = evidence as unknown as LightweightPublicEvidence;
+    return inputFor([candidate("malformed-evidence")], {
+      evidence: typedEvidence,
+      expectedEvidenceSnapshot: snapshotFor(typedEvidence),
+    });
+  };
+
+  it("fails closed for negative and fractional public evidence counts", () => {
+    const cases: D2cPlanPolicyInput[] = [
+      malformedEvidenceInput((evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        const counts = facts.remainingCardCounts as Record<string, unknown>;
+        counts.leftOpponent = -1;
+      }),
+      malformedEvidenceInput((evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        const counts = facts.remainingCardCounts as Record<string, unknown>;
+        counts.leftOpponent = 1.5;
+      }),
+      malformedEvidenceInput((evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        const streaks = signals.recentPassStreakByRelation as Record<string, unknown>;
+        streaks.leftOpponent = -1;
+      }),
+      malformedEvidenceInput((evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        const tendencies = signals.recentActionTendencies as Record<string, unknown>;
+        const left = tendencies.leftOpponent as Record<string, unknown>;
+        left.playCount = 1.5;
+      }),
+    ];
+
+    for (const input of cases) expectDisabled(input, "invalid-evidence");
+  });
+
+  it("fails closed for malformed expected evidence snapshot fields", () => {
+    const evidence = evidenceWith();
+    const cases: D2cEvidenceSnapshotRef[] = [
+      { ...snapshotFor(evidence), gameId: "" },
+      { ...snapshotFor(evidence), roundIdentity: "" },
+      { ...snapshotFor(evidence), handIdentity: "" },
+      { ...snapshotFor(evidence), eventIndex: -1 },
+      { ...snapshotFor(evidence), eventIndex: 1.5 },
+      { ...snapshotFor(evidence), eventIndex: Number.NaN },
+    ];
+
+    for (const expectedEvidenceSnapshot of cases) {
+      expectDisabled(
+        inputFor([candidate("malformed-snapshot")], { expectedEvidenceSnapshot }),
+        "invalid-evidence",
+      );
+    }
+  });
+
+  it("distinguishes stale snapshot identity and event mismatches", () => {
+    const evidence = evidenceWith();
+    const snapshot = snapshotFor(evidence);
+    const cases: D2cEvidenceSnapshotRef[] = [
+      { ...snapshot, eventIndex: snapshot.eventIndex + 1 },
+      { ...snapshot, eventIndex: snapshot.eventIndex - 1 },
+      { ...snapshot, gameId: "other-game" },
+      { ...snapshot, roundIdentity: "other-round" },
+      { ...snapshot, handIdentity: "other-hand" },
+    ];
+
+    for (const expectedEvidenceSnapshot of cases) {
+      expectDisabled(
+        inputFor([candidate("stale-snapshot")], { expectedEvidenceSnapshot }),
+        "stale-evidence",
+      );
+    }
+  });
+
+  it("fails closed for malformed candidate wrappers and protected group identifiers", () => {
+    const valid = inputFor([candidate("wrapper")]);
+    const cases: D2cPlanPolicyInput[] = [
+      { ...valid, candidatePlans: {} as unknown as readonly D2cPlanCandidate[] },
+      { ...valid, candidatePlans: [{ protectedGroupIds: [] } as unknown as D2cPlanCandidate] },
+      { ...valid, candidatePlans: [{ plan: { id: "wrapper", groups: [], metrics: undefined }, protectedGroupIds: [] } as unknown as D2cPlanCandidate] },
+      { ...valid, candidatePlans: [{ plan: { id: "wrapper", groups: {}, metrics: defaultMetrics }, protectedGroupIds: [] } as unknown as D2cPlanCandidate] },
+      { ...valid, candidatePlans: [{ plan: candidate("wrapper").plan, protectedGroupIds: {} } as unknown as D2cPlanCandidate] },
+      { ...valid, candidatePlans: [candidate("wrapper", {}, [""])] },
+      { ...valid, candidatePlans: [candidate("wrapper", {}, ["same", "same"]) ] },
+    ];
+    const expectedReasons: D2cFallbackReason[] = [
+      "invalid-family-annotation",
+      "invalid-family-annotation",
+      "invalid-family-annotation",
+      "invalid-family-annotation",
+      "invalid-family-annotation",
+      "invalid-family-annotation",
+      "invalid-family-annotation",
+    ];
+
+    cases.forEach((input, index) => expectDisabled(input, expectedReasons[index]));
+  });
+
+  it("fails closed for non-finite metrics without rejecting finite fractional metrics", () => {
+    const metricNames = [
+      "estimatedTurns",
+      "lowSingleCount",
+      "retainedControl",
+      "responseCoverage",
+      "leadFlexibility",
+      "protectionLoss",
+    ] as const;
+    const nonFiniteValues = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
+
+    for (const metricName of metricNames) {
+      for (const value of nonFiniteValues) {
+        expectDisabled(
+          inputFor([candidate(`non-finite-${metricName}`, { [metricName]: value })]),
+          "invalid-family-annotation",
+        );
+      }
+    }
+
+    expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("finite-fractional", {
+        estimatedTurns: 1.0000001,
+        protectionLoss: 0.0000004,
+      })])),
+    );
+  });
+
+  it("fails closed for duplicate empty and prototype-sensitive stable plan keys", () => {
+    expectDisabled(inputFor([candidate("")]), "missing-plan-key");
+    expectDisabled(
+      inputFor([candidate("duplicate"), candidate("duplicate")]),
+      "duplicate-plan-key",
+    );
+
+    for (const id of ["__proto__", "constructor", "prototype"]) {
+      const result = expectShadow(deriveD2cPlanPriorityQuota(inputFor([candidate(id)])));
+      expect(Object.getPrototypeOf(result.annotations)).toBeNull();
+      expect((Object.prototype as Record<string, unknown>).polluted).toBeUndefined();
+      expect(Object.prototype.hasOwnProperty.call(result.annotations, id)).toBe(true);
+      expect(result.annotations[id]?.stablePlanKey).toBe(id);
+    }
+  });
+
+  it("maps every malformed quota configuration to invalid-quota-config", () => {
+    const malformedConfigs: D2cQuotaConfig[] = [
+      { ...defaultQuotaConfig, schemaVersion: "unknown" as D2cQuotaConfig["schemaVersion"] },
+      { ...defaultQuotaConfig, maxPlanFamilies: 0 },
+      { ...defaultQuotaConfig, maxPlanFamilies: 6 },
+      { ...defaultQuotaConfig, maxPlanFamilies: 1.5 },
+      { ...defaultQuotaConfig, maxPlanExpansions: -1 },
+      { ...defaultQuotaConfig, maxPlanExpansions: 6 },
+      { ...defaultQuotaConfig, maxPlanExpansions: 1.5 },
+      { ...defaultQuotaConfig, minQuotaPerFamily: 0 },
+      { ...defaultQuotaConfig, maxQuotaPerFamily: 0 },
+      { ...defaultQuotaConfig, minQuotaPerFamily: 3, maxQuotaPerFamily: 2 },
+      { ...defaultQuotaConfig, maxPlanExpansions: 1, minQuotaPerFamily: 2 },
+      { ...defaultQuotaConfig, maxPlanFamilies: Number.NaN },
+      { ...defaultQuotaConfig, maxPlanExpansions: Number.POSITIVE_INFINITY },
+    ];
+
+    for (const quotaConfig of malformedConfigs) {
+      expectDisabled(
+        inputFor([candidate("malformed-quota")], { quotaConfig }),
+        "invalid-quota-config",
+      );
+    }
+
+    const zeroBudget = expectShadow(
+      deriveD2cPlanPriorityQuota(inputFor([candidate("zero-budget")], {
+        quotaConfig: { ...defaultQuotaConfig, maxPlanExpansions: 0 },
+      })),
+    );
+    expect(zeroBudget.familyPriority.length).toBeGreaterThan(0);
+    expect(zeroBudget.familyQuotas).toEqual([]);
+    expect(zeroBudget.diagnostics.quotaTotal).toBe(0);
+  });
+
+  it("fails closed for an unknown runtime mode", () => {
+    expectDisabled(
+      inputFor([candidate("unknown-mode")], { mode: "active" as PlanPruningMode }),
+      "unknown-mode",
+    );
+  });
+
+  it("fails closed for an unknown policy input schema", () => {
+    expectDisabled(
+      inputFor([candidate("unknown-input-schema")], {
+        schemaVersion: "d2c-plan-policy-input-v2" as D2cPlanPolicyInput["schemaVersion"],
+      }),
+      "invalid-evidence",
+    );
+  });
+
+  it("fails closed for malformed CardGroup elements", () => {
+    const malformedGroups: unknown[] = [
+      null,
+      {},
+      { type: "pair" },
+      { cards: [] },
+      { type: "pair", cards: undefined },
+      { type: 123, cards: [] },
+      { type: "pair", cards: {} },
+    ];
+
+    for (const group of malformedGroups) {
+      const malformedCandidate = withGroups(
+        candidate("malformed-group"),
+        [group as unknown as CardGroup],
+      );
+      const input = inputFor([malformedCandidate]);
+      let result: D2cPlanPolicyResult | undefined;
+      expect(() => {
+        result = deriveD2cPlanPriorityQuota(input);
+      }).not.toThrow();
+      expect(result?.kind).toBe("disabled");
+      if (result?.kind !== "disabled") throw new Error("D2C_EXPECTED_DISABLED_RESULT");
+      expect(result.fallbackReason).toBe("invalid-family-annotation");
+      expect(result.annotations).toEqual([]);
+      expect(result.familyPriority).toEqual([]);
+      expect(result.familyQuotas).toEqual([]);
+    }
+  });
+
+  it("fails closed for malformed nested public evidence", () => {
+    const recentAction = (): Record<string, unknown> => ({
+      eventIndex: 1,
+      kind: "play",
+      seat: 1,
+      relation: "leftOpponent",
+      trickIndex: 0,
+      publicStableKey: "play:left:1",
+      publicCardIds: [],
+    });
+    const publicTransfer = (): Record<string, unknown> => ({
+      eventIndex: 1,
+      kind: "tribute",
+      fromSeat: 1,
+      toSeat: 0,
+      cardId: "C2-1",
+    });
+    const provenanceRow = (): Record<string, unknown> => ({
+      field: "remainingCardCounts",
+      publicSource: "HardPublicLedger",
+      derivation: "copy",
+      hiddenStateRisk: "none",
+      hashImpact: "none",
+    });
+    const cases: Array<[string, (evidence: Record<string, unknown>) => void]> = [
+      ["initiative relation", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.initiativeRelation = "unknown";
+      }],
+      ["finish order relation", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.finishOrder = ["unknown"];
+      }],
+      ["recent action relation", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), relation: "unknown" }];
+      }],
+      ["negative trick index", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.currentTrick = { trickIndex: -1, leadSeat: 0, passSeats: [] };
+      }],
+      ["fractional trick index", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.currentTrick = { trickIndex: 1.5, leadSeat: 0, passSeats: [] };
+      }],
+      ["invalid trick lead seat", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.currentTrick = { trickIndex: 0, leadSeat: 4, passSeats: [] };
+      }],
+      ["invalid trick pass seats container", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.currentTrick = { trickIndex: 0, leadSeat: 0, passSeats: {} };
+      }],
+      ["invalid trick pass seat", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.currentTrick = { trickIndex: 0, leadSeat: 0, passSeats: [4] };
+      }],
+      ["null public transfer", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [null];
+      }],
+      ["empty public transfer", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [{}];
+      }],
+      ["negative public transfer index", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [{ ...publicTransfer(), eventIndex: -1 }];
+      }],
+      ["unknown public transfer kind", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [{ ...publicTransfer(), kind: "unknown" }];
+      }],
+      ["invalid public transfer from seat", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [{ ...publicTransfer(), fromSeat: 4 }];
+      }],
+      ["invalid public transfer to seat", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [{ ...publicTransfer(), toSeat: 4 }];
+      }],
+      ["invalid public transfer card id", (evidence) => {
+        const facts = evidence.hardPublicFacts as Record<string, unknown>;
+        facts.publicTransfers = [{ ...publicTransfer(), cardId: 123 }];
+      }],
+      ["null recent action", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [null];
+      }],
+      ["empty recent action", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{}];
+      }],
+      ["negative recent action index", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), eventIndex: -1 }];
+      }],
+      ["unknown recent action kind", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), kind: "unknown" }];
+      }],
+      ["invalid recent action seat", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), seat: 4 }];
+      }],
+      ["invalid recent action relation", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), relation: "unknown" }];
+      }],
+      ["negative recent action trick index", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), trickIndex: -1 }];
+      }],
+      ["empty recent action stable key", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), publicStableKey: "" }];
+      }],
+      ["invalid recent action card ids container", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), publicCardIds: {} }];
+      }],
+      ["invalid recent action card id", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [{ ...recentAction(), publicCardIds: [123] }];
+      }],
+      ["mixed tendency without valid recent action", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        signals.recentActions = [null];
+        const tendencies = signals.recentActionTendencies as Record<string, unknown>;
+        tendencies.leftOpponent = { playCount: 1, passCount: 1 };
+      }],
+      ["unknown tendency last action", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        const tendencies = signals.recentActionTendencies as Record<string, unknown>;
+        tendencies.leftOpponent = { playCount: 0, passCount: 0, lastActionKind: "unknown" };
+      }],
+      ["negative tendency play count", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        const tendencies = signals.recentActionTendencies as Record<string, unknown>;
+        tendencies.leftOpponent = { playCount: -1, passCount: 0 };
+      }],
+      ["fractional tendency pass count", (evidence) => {
+        const signals = evidence.derivedSignals as Record<string, unknown>;
+        const tendencies = signals.recentActionTendencies as Record<string, unknown>;
+        tendencies.leftOpponent = { playCount: 0, passCount: 1.5 };
+      }],
+      ["null provenance", (evidence) => {
+        evidence.provenance = [null];
+      }],
+      ["empty provenance", (evidence) => {
+        evidence.provenance = [{}];
+      }],
+      ["empty provenance field", (evidence) => {
+        evidence.provenance = [{ ...provenanceRow(), field: "" }];
+      }],
+      ["unknown provenance source", (evidence) => {
+        evidence.provenance = [{ ...provenanceRow(), publicSource: "unknown" }];
+      }],
+      ["invalid provenance derivation", (evidence) => {
+        evidence.provenance = [{ ...provenanceRow(), derivation: 123 }];
+      }],
+      ["unknown provenance risk", (evidence) => {
+        evidence.provenance = [{ ...provenanceRow(), hiddenStateRisk: "unknown" }];
+      }],
+      ["unknown provenance hash impact", (evidence) => {
+        evidence.provenance = [{ ...provenanceRow(), hashImpact: "unknown" }];
+      }],
+      ["duplicate seat map", (evidence) => {
+        evidence.seatMap = { self: 0, partner: 0, leftOpponent: 1, rightOpponent: 2 };
+      }],
+      ["seat map perspective mismatch", (evidence) => {
+        evidence.seatMap = { self: 1, partner: 2, leftOpponent: 0, rightOpponent: 3 };
+      }],
+    ];
+
+    for (const [label, mutate] of cases) {
+      expectDisabled(
+        malformedEvidenceInput(mutate),
+        "invalid-evidence",
+      );
+      expect(label.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("D2c Task 3 immutability", () => {
+  const visitFrozen = (value: unknown, seen = new Set<object>()): void => {
+    if (value === null || typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    expect(Object.isFrozen(value)).toBe(true);
+    for (const child of Object.values(value)) visitFrozen(child, seen);
+  };
+
+  it("deep-freezes every node of shadow and disabled results", () => {
+    const shadow = deriveD2cPlanPriorityQuota(inputFor([candidate("shadow-freeze")]));
+    const disabled = deriveD2cPlanPriorityQuota(inputFor([candidate("disabled-freeze")], {
+      mode: "disabled",
+    }));
+    visitFrozen(shadow);
+    visitFrozen(disabled);
+  });
+
+  it("rejects or neutralizes mutation attempts across the complete result graph", () => {
+    const result = expectShadow(deriveD2cPlanPriorityQuota(inputFor([candidate("mutation")] )));
+    const before = JSON.stringify(result);
+    const annotation = result.annotations.mutation as unknown as {
+      ownerFamily: string;
+      familyIds: string[];
+      priority: number[];
+    };
+    const attempts = [
+      () => ((result as unknown as { kind: string }).kind = "disabled"),
+      () => ((result.diagnostics as unknown as { quotaTotal: number }).quotaTotal = 999),
+      () => (annotation.ownerFamily = "other"),
+      () => (annotation.familyIds[0] = "other"),
+      () => (annotation.priority[0] = -1),
+      () => ((result.familyPriority[0]?.candidatePlanKeys as string[])[0] = "other"),
+      () => ((result.familyQuotas[0] as unknown as { quota: number }).quota = 999),
+      () => ((result.annotations as unknown as Record<string, unknown>).dynamic = {}),
+    ];
+
+    for (const attempt of attempts) {
+      try {
+        attempt();
+      } catch (error) {
+        expect(error).toBeInstanceOf(TypeError);
+      }
+    }
+    expect(JSON.stringify(result)).toBe(before);
+  });
+
+  it("never mutates or retains candidate evidence plan or metric references", () => {
+    const input = inputFor([candidate("detached")]);
+    const before = {
+      evidence: JSON.stringify(input.evidence),
+      snapshot: JSON.stringify(input.expectedEvidenceSnapshot),
+      candidates: JSON.stringify(input.candidatePlans),
+      plan: JSON.stringify(input.candidatePlans[0]?.plan),
+      metrics: JSON.stringify(input.candidatePlans[0]?.plan.metrics),
+      quota: JSON.stringify(input.quotaConfig),
+    };
+    const result = expectShadow(deriveD2cPlanPriorityQuota(input));
+    const resultBeforeMutation = JSON.stringify(result);
+    const mutableEvidence = input.evidence as unknown as {
+      hardPublicFacts: { remainingCardCounts: Record<string, number> };
+    };
+    mutableEvidence.hardPublicFacts.remainingCardCounts.leftOpponent = 99;
+    const mutableCandidate = input.candidatePlans[0] as unknown as {
+      protectedGroupIds: string[];
+      plan: { groups: CardGroup[]; metrics: { estimatedTurns: number } };
+    };
+    mutableCandidate.protectedGroupIds.push("later");
+    mutableCandidate.plan.metrics.estimatedTurns = 99;
+    mutableCandidate.plan.groups.push(testGroup("pair", [
+      testCard("S2-1", "spades"),
+      testCard("H2-1", "hearts"),
+    ]));
+    (input.quotaConfig as unknown as { maxPlanExpansions: number }).maxPlanExpansions = 0;
+
+    expect(JSON.stringify(result)).toBe(resultBeforeMutation);
+    expect(JSON.stringify(input.evidence)).not.toBe(before.evidence);
+    expect(JSON.stringify(input.expectedEvidenceSnapshot)).toBe(before.snapshot);
+    expect(JSON.stringify(input.candidatePlans)).not.toBe(before.candidates);
+    expect(JSON.stringify(input.candidatePlans[0]?.plan)).not.toBe(before.plan);
+    expect(JSON.stringify(input.candidatePlans[0]?.plan.metrics)).not.toBe(before.metrics);
+    expect(JSON.stringify(input.quotaConfig)).not.toBe(before.quota);
+  });
+});
+
+describe("D2c Task 3 determinism and output privacy", () => {
+  const permutations = <T>(values: readonly T[]): T[][] => {
+    if (values.length === 0) return [[]];
+    const result: T[][] = [];
+    values.forEach((value, index) => {
+      const rest = [...values.slice(0, index), ...values.slice(index + 1)];
+      for (const suffix of permutations(rest)) result.push([value, ...suffix]);
+    });
+    return result;
+  };
+
+  it("produces identical bytes for all candidate permutations", () => {
+    const candidates = [
+      candidate("perm-a"),
+      candidate("perm-b", { responseCoverage: 0, leadFlexibility: 0, estimatedTurns: 2 }),
+      candidate("perm-c", { protectionLoss: 0.0000004 },),
+      candidate("perm-d", { estimatedTurns: 0.5, responseCoverage: 2 }),
+    ];
+    const expected = JSON.stringify(
+      deriveD2cPlanPriorityQuota(inputFor(candidates)),
+    );
+    for (const permutation of permutations(candidates)) {
+      const result = deriveD2cPlanPriorityQuota(inputFor(permutation));
+      expect(JSON.stringify(result)).toBe(expected);
+    }
+  });
+
+  it("produces identical bytes across repeated calls without retaining state", () => {
+    const input = inputFor([
+      candidate("repeat-a"),
+      candidate("repeat-b", { estimatedTurns: 0.5 }),
+      candidate("repeat-c", { responseCoverage: 0, leadFlexibility: 0, estimatedTurns: 2 }),
+      candidate("repeat-d", { responseCoverage: 2 }),
+    ]);
+    const expected = JSON.stringify(deriveD2cPlanPriorityQuota(input));
+    for (let index = 0; index < 10; index += 1) {
+      expect(JSON.stringify(deriveD2cPlanPriorityQuota(input))).toBe(expected);
+    }
+  });
+
+  it("fails closed for normalized forbidden output keys at any nesting level", () => {
+    for (const id of [
+      "hiddenState",
+      "Hidden_State",
+      "hidden-state",
+      "HIDDEN STATE",
+      "privateRuntime",
+      "partnerHand",
+      "opponentsHands",
+      "initialHands",
+      "idempotencyKey",
+      "identityStore",
+      "rolloutState",
+      "particles",
+    ]) {
+      const result = deriveD2cPlanPriorityQuota(inputFor([candidate(id)]));
+      expect(result.kind).toBe("disabled");
+      if (result.kind !== "disabled") throw new Error("D2C_EXPECTED_DISABLED_RESULT");
+      expect(result.fallbackReason).toBe("privacy-violation");
+      expect(result.annotations).toEqual([]);
+      expect(result.familyPriority).toEqual([]);
+      expect(result.familyQuotas).toEqual([]);
+      expect(JSON.stringify(result)).not.toContain(id);
+    }
+  });
+});
+
+describe("D2c Task 3 source boundary", () => {
+  it("keeps Task 3 hardening inside the frozen source and privacy boundary", () => {
+    const source = sourceFile();
+    expect(source).not.toMatch(/Math\.random/);
+    expect(source).not.toMatch(/Date\.now/);
+    expect(source).not.toMatch(/performance\.now/);
+    expect(source).not.toMatch(/localeCompare/);
+    expect(source).not.toMatch(/Intl\.Collator/);
+    expect(source).not.toMatch(/\beval\s*\(/);
+    expect(source).not.toMatch(/\bFunction\s*\(/);
+    expect(source).not.toMatch(/JSON\.parse\(\s*JSON\.stringify\(/);
+    expect(source).not.toMatch(/from\s+["'][^"']+\/["']/);
+    const forbiddenIdentifiers = [
+      "RoomState",
+      "AiRuntimeState",
+      "HandPlanner",
+      "ensurePlans",
+      "decideAiAction",
+      "runAiStep",
+      "hands",
+      "deck",
+      "hiddenState",
+      "privateRuntime",
+      "particles",
+      "rollout",
+      "server",
+      "provider",
+      "store",
+      "benchmark",
+      "simulation",
+      "performance",
+    ];
+    const identifiers = sourceIdentifiers(source);
+    for (const identifier of forbiddenIdentifiers) expect(identifiers.has(identifier)).toBe(false);
+  });
+});
+
+describe("D2c Task 4 detached shadow characterization", () => {
+  function runDetachedScenario(mode: PlanPruningMode): {
+    baselineDecision: AiDecision;
+    comparisonDecision: AiDecision;
+    d2cInput: D2cPlanPolicyInput;
+    d2cResult: D2cPlanPolicyResult;
+  } {
+    const initial = readDetachedDecisionFixture();
+    const baselineDecision = decideAiAction(
+      structuredClone(initial.observation),
+      structuredClone(initial.runtime),
+      structuredClone(initial.config),
+    );
+    const d2cInput = d2cInputFromDecision(baselineDecision, mode);
+    const d2cResult = deriveD2cPlanPriorityQuota(d2cInput);
+    const comparisonDecision = decideAiAction(
+      structuredClone(initial.observation),
+      structuredClone(initial.runtime),
+      structuredClone(initial.config),
+    );
+    return { baselineDecision, comparisonDecision, d2cInput, d2cResult };
+  }
+
+  it("emits detached shadow diagnostics without changing the existing action", () => {
+    const { baselineDecision, comparisonDecision, d2cInput, d2cResult } = runDetachedScenario("shadow");
+
+    expect(d2cResult.kind).toBe("shadow");
+    if (d2cResult.kind !== "shadow") throw new Error("D2C_TASK4_EXPECTED_SHADOW_RESULT");
+    expect(d2cResult.candidateCount).toBe(d2cInput.candidatePlans.length);
+    expect(d2cResult).toHaveProperty("annotations");
+    expect(d2cResult).toHaveProperty("familyPriority");
+    expect(d2cResult).toHaveProperty("familyQuotas");
+    expect(baselineDecision.action).toEqual(comparisonDecision.action);
+    expect(canonicalJson(baselineDecision.action)).toBe(canonicalJson(comparisonDecision.action));
+    expect(baselineDecision.selectedPlanId).toBe(comparisonDecision.selectedPlanId);
+  });
+
+  it("preserves returned runtime and candidate order beside detached shadow output", () => {
+    const { baselineDecision, comparisonDecision, d2cResult } = runDetachedScenario("shadow");
+
+    expect(d2cResult.kind).toBe("shadow");
+    expect(baselineDecision.runtime).toEqual(comparisonDecision.runtime);
+    expect(runtimeCanonicalJson(baselineDecision.runtime)).toBe(runtimeCanonicalJson(comparisonDecision.runtime));
+    expect(baselineDecision.runtime.candidatePlans.map((plan) => plan.id))
+      .toEqual(comparisonDecision.runtime.candidatePlans.map((plan) => plan.id));
+    expect(baselineDecision.runtime.generatedTurn).toBe(comparisonDecision.runtime.generatedTurn);
+    expect(baselineDecision.runtime.configVersion).toBe(comparisonDecision.runtime.configVersion);
+    expect(baselineDecision.runtime.activePlanId).toBe(comparisonDecision.runtime.activePlanId);
+    expect(baselineDecision.runtime.needsReplan).toBe(comparisonDecision.runtime.needsReplan);
+  });
+
+  it("keeps disabled D2c mode detached from the decision path", () => {
+    const { baselineDecision, comparisonDecision, d2cResult } = runDetachedScenario("disabled");
+
+    expect(d2cResult).toMatchObject({
+      kind: "disabled",
+      mode: "disabled",
+      fallbackReason: "disabled-by-config",
+    });
+    expect(baselineDecision.action).toEqual(comparisonDecision.action);
+    expect(baselineDecision.runtime).toEqual(comparisonDecision.runtime);
+    expect(baselineDecision.runtime.candidatePlans.map((plan) => plan.id))
+      .toEqual(comparisonDecision.runtime.candidatePlans.map((plan) => plan.id));
+  });
+
+  it("does not expose an action candidate list or runtime through detached shadow output", () => {
+    const { baselineDecision, d2cInput, d2cResult } = runDetachedScenario("shadow");
+
+    expect(d2cResult.kind).toBe("shadow");
+    const forbiddenOutputKeys = new Set([
+      "action",
+      "legalActions",
+      "candidatePlans",
+      "selectedPlan",
+      "selectedPlanId",
+      "runtime",
+      "actionScore",
+      "observation",
+      "config",
+      "hands",
+      "deck",
+    ]);
+    expect(outputKeys(d2cResult).some((key) => forbiddenOutputKeys.has(key))).toBe(false);
+    const referencedObjects: object[] = [
+      baselineDecision,
+      baselineDecision.runtime,
+      d2cInput.evidence,
+      ...d2cInput.candidatePlans.map((candidate) => candidate.plan),
+    ];
+    for (const referencedObject of referencedObjects) {
+      expect(hasObjectReference(d2cResult, referencedObject)).toBe(false);
+    }
+  });
+});

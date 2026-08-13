@@ -1,11 +1,15 @@
 import { createDeck, isHeartRankWild, rankStrength, type Card, type GameRank, type Rank, type Suit } from "../engine/cards";
-import { detectGroups, type CardGroup } from "../engine/groups";
-import { comparePlanQuality, isLegalBombReduction, measurePlanQuality } from "../engine/planQuality";
-import { wildcardStructureBonus } from "../engine/planner";
-import { chooseAiAction } from "./ai";
+import type { CardGroup } from "../engine/groups";
+import { DEFAULT_AI_PERFORMANCE_CONFIG } from "../ai/config";
+import type { AiRuntimeState, HandPlan } from "../ai/contracts";
+import { applyExecutedAction, ensurePlans } from "../ai/planning/planManager";
+import { decideAiAction } from "../ai/aiDecisionEngine";
+import type { AiPlanningDiagnostics } from "../ai/diagnostics/aiPlanningDiagnostics";
 import { canBeatPlay, classifyPlay } from "./playRules";
-import { createHandAnalysis, type HandAnalysis } from "./protectedGroups";
 import { settleRound, type RoundSettlement, type TributeItem, type TributeState } from "./settlement";
+import { buildPublicGameIdentity, type PublicActionEventDraft, type PublicGameIdentity } from "./publicEvent";
+import { finalizePublicActionEvent } from "./publicEventHash";
+import { applyPublicEvent, createInitialPublicLedger, type HardPublicLedger } from "./publicLedger";
 
 export type Seat = 0 | 1 | 2 | 3;
 
@@ -53,12 +57,16 @@ export type RoomState = {
   settlement?: RoundSettlement;
   openingTribute?: TributeState;
   aiPlans: Partial<Record<Seat, AiPlanState>>;
+  aiRuntime: Partial<Record<Seat, AiRuntimeState>>;
   status: "playing" | "finished";
   actionLog: string[];
   playHistory: TrickPlay[];
+  publicIdentity?: PublicGameIdentity;
+  publicLedger?: HardPublicLedger;
+  publicEvents?: ReturnType<typeof finalizePublicActionEvent>[];
 };
 
-export type PublicRoom = Omit<RoomState, "hands" | "initialHands"> & {
+export type PublicRoom = Omit<RoomState, "hands" | "initialHands" | "publicIdentity" | "publicLedger" | "publicEvents"> & {
   humanSeat: Seat;
   humanHand: Card[];
   replayHands: Record<Seat, Card[]>;
@@ -67,15 +75,31 @@ export type PublicRoom = Omit<RoomState, "hands" | "initialHands"> & {
 
 let nextRoomId = 1;
 
-export function createRoom({
-  rank,
-  seed = Date.now(),
-  pendingTributeItems = [],
-}: {
+type CommonRoomCreationInput = Readonly<{
   rank: GameRank;
   seed?: number;
   pendingTributeItems?: TributeItem[];
-}): RoomState {
+}>;
+
+export type CanonicalRoomCreationInput = Readonly<{
+  rank: GameRank;
+  seed: number;
+  pendingTributeItems?: TributeItem[];
+  publicIdentity: PublicGameIdentity;
+}>;
+
+export type LegacyBenchmarkRoomCreationInput = CommonRoomCreationInput;
+
+type RoomIdentitySource =
+  | { kind: "canonical"; identity: PublicGameIdentity }
+  | { kind: "legacy-benchmark" };
+
+function createRoomInternal({
+  source,
+  rank,
+  seed = Date.now(),
+  pendingTributeItems = [],
+}: CommonRoomCreationInput & { source: RoomIdentitySource }): RoomState {
   const deck = shuffledDeck(seed);
   const hands = {
     0: deck.slice(0, 27),
@@ -87,7 +111,7 @@ export function createRoom({
   const openingTribute = resolveOpeningTribute(hands, pendingTributeItems, rank);
   const openingLeader = openingTribute?.status === "pending" ? openingTribute.activeSeat ?? 0 : randomOpeningLeader(seed);
 
-  return {
+  const room: RoomState = {
     id: `room-${nextRoomId++}`,
     rank,
     players: [0, 1, 2, 3].map((seat) => ({
@@ -111,10 +135,51 @@ export function createRoom({
     finishOrder: [],
     openingTribute,
     aiPlans: {},
+    aiRuntime: {},
     status: "playing",
     actionLog: ["房间已创建，AI 已补齐空位。"],
     playHistory: [],
   };
+  if (source.kind === "canonical") {
+    const publicIdentity = source.identity;
+    room.publicIdentity = publicIdentity;
+    room.publicLedger = createInitialPublicLedger({
+      identity: publicIdentity,
+      initialHandCounts: { 0: hands[0].length, 1: hands[1].length, 2: hands[2].length, 3: hands[3].length },
+      openingLeader,
+      initialTrickIndex: 0,
+      openingTributePublicState: { status: openingTribute?.status ?? "none" },
+    });
+    room.publicEvents = [];
+    if (openingTribute?.status === "anti-tribute") {
+      const antiTribute = finalizePublicActionEvent({
+        schemaVersion: "d2-public-event-v2",
+        gameId: publicIdentity.gameId,
+        roundIdentity: publicIdentity.roundIdentity,
+        handIdentity: publicIdentity.handIdentity,
+        eventIndex: room.publicLedger.nextEventIndex,
+        kind: "anti-tribute",
+        seat: openingLeader,
+        publicStableKey: "anti-tribute:anti-tribute",
+        trickIndex: 0,
+        reasonCode: "anti-tribute",
+      } as PublicActionEventDraft);
+      const result = applyPublicEvent(room.publicLedger, antiTribute);
+      if (!result.ok) throw new Error(result.error);
+      room.publicLedger = result.ledger;
+      room.publicEvents = [antiTribute];
+    }
+  }
+  return room;
+}
+
+export function createRoom(input: CanonicalRoomCreationInput): RoomState {
+  if (input.publicIdentity === undefined) throw new Error("CANONICAL_ROOM_IDENTITY_REQUIRED");
+  return createRoomInternal({ ...input, source: { kind: "canonical", identity: input.publicIdentity } });
+}
+
+export function createLegacyBenchmarkRoom(input: LegacyBenchmarkRoomCreationInput): RoomState {
+  return createRoomInternal({ ...input, source: { kind: "legacy-benchmark" } });
 }
 
 export function getPublicRoom(
@@ -125,7 +190,7 @@ export function getPublicRoom(
   if (options.ensurePlans !== false) {
     ensureAiPlans(room);
   }
-  const { hands: _hands, initialHands: _initialHands, ...publicState } = room;
+  const { hands: _hands, initialHands: _initialHands, publicIdentity: _publicIdentity, publicLedger: _publicLedger, publicEvents: _publicEvents, ...publicState } = room;
 
   return {
     ...publicState,
@@ -145,840 +210,34 @@ export function getPublicRoom(
 function ensureAiPlans(room: RoomState): void {
   if (room.openingTribute?.status === "pending") {
     room.aiPlans = {};
+    room.aiRuntime = {};
     return;
   }
 
   for (const player of room.players) {
-    if (!player.isAI || room.aiPlans[player.seat] !== undefined) {
-      continue;
+    if (player.isAI) {
+      ensureAiPlanForSeat(room, player.seat);
     }
-
-    room.aiPlans[player.seat] = buildAiPlan(room, player.seat);
   }
 }
 
-function buildAiPlan(room: RoomState, seat: Seat, analysis?: HandAnalysis): AiPlanState {
-  const groups = analysis !== undefined && room.hands[seat].length > 12
-    ? buildRapidAiPlanGroups(analysis)
-    : buildFastAiPlanGroups(room.hands[seat], room.rank);
-
+function toLegacyAiPlanState(seat: Seat, plan: HandPlan): AiPlanState {
   return {
     seat,
-    name: "AI 最少手数组牌",
-    score: scoreAiPlanGroups(groups, room.rank),
-    groups,
+    name: "AI hand plan",
+    score: Math.max(1, 100 - plan.metrics.estimatedTurns),
+    groups: plan.groups,
   };
-}
-
-function buildRapidAiPlanGroups(analysis: HandAnalysis): CardGroup[] {
-  const usedIds = new Set<string>();
-  const selected: CardGroup[] = [];
-  const candidates = [...analysis.accepted.map((candidate) => candidate.group)]
-    .sort((left, right) =>
-      rapidPlanPriority(right) - rapidPlanPriority(left) ||
-      right.cards.length - left.cards.length ||
-      left.wildcards.length - right.wildcards.length ||
-      left.strength - right.strength ||
-      left.id.localeCompare(right.id),
-    );
-
-  for (const group of candidates) {
-    if (group.cards.some((card) => usedIds.has(card.id))) {
-      continue;
-    }
-    if (group.type === "single" && analysis.allGroups.some((power) =>
-      (power.type === "bomb" || power.type === "straight-flush" || power.type === "joker-bomb") &&
-      power.cards.some((card) => card.id === group.cards[0]?.id) &&
-      power.cards.every((card) => !usedIds.has(card.id)))) {
-      continue;
-    }
-
-    selected.push(group);
-    group.cards.forEach((card) => usedIds.add(card.id));
-  }
-
-  for (const card of analysis.hand) {
-    if (usedIds.has(card.id)) {
-      continue;
-    }
-    const single = analysis.allGroups.find((group) => group.type === "single" && group.cards[0]?.id === card.id);
-    if (single !== undefined) {
-      selected.push(single);
-      usedIds.add(card.id);
-    }
-  }
-
-  return selected;
-}
-
-function rapidPlanPriority(group: CardGroup): number {
-  if (group.type === "bomb" || group.type === "straight-flush" || group.type === "joker-bomb") return 250;
-  if (group.type === "consecutive-pairs" || group.type === "plate" || group.type === "straight") return 700;
-  if (group.type === "full-house") return 600;
-  if (group.type === "triple") return 400;
-  if (group.type === "pair") return 300;
-  return 0;
-}
-
-function buildFastAiPlanGroups(cards: Card[], gameRank: GameRank): CardGroup[] {
-  const groups = detectGroups(cards, gameRank);
-  const naturalBombs = maximalNaturalBombs(groups);
-  const legalReductionKeys = new Set<string>();
-  for (const bomb of naturalBombs) {
-    for (const group of groups) {
-      if (
-        group.type === "straight" &&
-        groupsOverlap(group, bomb) &&
-        isLegalRoomBombReduction(bomb, group, groups, gameRank)
-      ) {
-        legalReductionKeys.add(bombReductionKey(bomb, group));
-      }
-    }
-  }
-  const requiredFourBombReductions = new Set(
-    groups
-      .filter((group) => isRequiredFourBombReduction(group, naturalBombs, legalReductionKeys))
-      .map((group) => group.id),
-  );
-  const scoreOrder = prioritizeGroups(
-    [...groups].sort(compareAiPlanGroups(gameRank)),
-    requiredFourBombReductions,
-  );
-  const structureOrder = prioritizeGroups([...groups].sort((left, right) => {
-    const priorityDelta = structureSelectionPriority(right) - structureSelectionPriority(left);
-    if (priorityDelta !== 0) {
-      return priorityDelta;
-    }
-    if (left.type === "full-house" && right.type === "full-house") {
-      const majorStrengthDelta =
-        fullHouseMajorStrength(right, gameRank) - fullHouseMajorStrength(left, gameRank);
-      if (majorStrengthDelta !== 0) {
-        return majorStrengthDelta;
-      }
-    }
-    return compareAiPlanGroups(gameRank)(left, right);
-  }), requiredFourBombReductions);
-  const reductionPriorityById = new Map(
-    groups.map((group) => [
-      group.id,
-      bombReductionSelectionPriority(group, groups, naturalBombs, legalReductionKeys),
-    ]),
-  );
-  const reductionOrder = prioritizeGroups([...groups].sort((left, right) => {
-    const priorityDelta =
-      (reductionPriorityById.get(right.id) ?? 0) -
-      (reductionPriorityById.get(left.id) ?? 0);
-    return priorityDelta !== 0 ? priorityDelta : compareAiPlanGroups(gameRank)(left, right);
-  }), requiredFourBombReductions);
-  const scoreCover = buildGreedyAiCover(cards, groups, naturalBombs, legalReductionKeys, scoreOrder, gameRank);
-  const structureCover = buildGreedyAiCover(cards, groups, naturalBombs, legalReductionKeys, structureOrder, gameRank, true);
-  const reductionCover = buildGreedyAiCover(cards, groups, naturalBombs, legalReductionKeys, reductionOrder, gameRank);
-  const beamCover = buildBeamAiCover(
-    cards,
-    groups,
-    naturalBombs,
-    legalReductionKeys,
-    requiredFourBombReductions,
-    reductionPriorityById,
-    gameRank,
-  );
-  const covers = [scoreCover];
-
-  if (structureCover.some((group) => usesPairFromTriple(group, cards))) {
-    covers.push(structureCover);
-  }
-  if (reductionCover.some((group) => (reductionPriorityById.get(group.id) ?? 0) >= 6000)) {
-    covers.push(reductionCover);
-  }
-  if (beamCover.some((group) => group.type === "straight")) {
-    covers.push(beamCover);
-  }
-
-  const distinctCovers = [...new Map(
-    covers.map((cover) => [deterministicGroupIds(cover), cover]),
-  ).values()];
-  const bestGroups = distinctCovers
-    .map((cover) => ({
-      groups: cover,
-      quality: measurePlanQuality(cards, cover, gameRank, scoreAiPlanGroups(cover, gameRank)),
-    }))
-    .sort((left, right) => {
-      const qualityDelta = comparePlanQuality(left.quality, right.quality);
-      return qualityDelta !== 0
-        ? qualityDelta
-        : deterministicGroupIds(left.groups).localeCompare(deterministicGroupIds(right.groups));
-    })[0]?.groups ?? scoreCover;
-
-  return bestGroups;
-}
-
-function usesPairFromTriple(group: CardGroup, cards: Card[]): boolean {
-  if (group.type !== "full-house") {
-    return false;
-  }
-
-  const groupCounts = rankCounts(group.cards);
-  const pairRank = [...groupCounts.entries()].find(([, count]) => count === 2)?.[0];
-  return pairRank !== undefined && rankCounts(cards).get(pairRank) === 3;
-}
-
-type AiCandidateEntry = {
-  group: CardGroup;
-  mask: number;
-  quality: ReturnType<typeof measurePlanQuality>;
-};
-
-type BeamState = {
-  usedMask: number;
-  groups: CardGroup[];
-  quality: ReturnType<typeof measurePlanQuality>;
-};
-
-function buildBeamAiCover(
-  cards: Card[],
-  groups: CardGroup[],
-  sourceBombs: CardGroup[],
-  legalReductionKeys: Set<string>,
-  requiredFourBombReductions: Set<string>,
-  reductionPriorityById: Map<string, number>,
-  gameRank: GameRank,
-): CardGroup[] {
-  const cardIndexById = new Map(cards.map((card, index) => [card.id, index]));
-  const fullMask = (1 << cards.length) - 1;
-  const orderedGroups = prioritizeGroups(
-    [...groups]
-      .filter((group) => preservesAiBeamStructures(group, cards, groups, gameRank))
-      .filter((group) => respectsAiProtectedStructures(group, groups, sourceBombs, legalReductionKeys))
-      .sort((left, right) => {
-        const reductionDelta = (reductionPriorityById.get(right.id) ?? 0) - (reductionPriorityById.get(left.id) ?? 0);
-        if (reductionDelta !== 0) {
-          return reductionDelta;
-        }
-
-        const structureDelta = structureSelectionPriority(right) - structureSelectionPriority(left);
-        if (structureDelta !== 0) {
-          return structureDelta;
-        }
-
-        return compareAiPlanGroups(gameRank)(left, right);
-      }),
-    requiredFourBombReductions,
-  );
-  const entries = orderedGroups
-    .map((group): AiCandidateEntry | undefined => {
-      let mask = 0;
-
-      for (const card of group.cards) {
-        const index = cardIndexById.get(card.id);
-        if (index === undefined) {
-          return undefined;
-        }
-
-        mask |= 1 << index;
-      }
-
-      return {
-        group,
-        mask,
-        quality: measurePlanQuality([], [group], gameRank, aiPlanGroupScore(group, gameRank)),
-      };
-    })
-    .filter((entry): entry is AiCandidateEntry => entry !== undefined);
-  const entriesByFirstOpenCard = cards.map((_, index) =>
-    entries.filter((entry) => (entry.mask & (1 << index)) !== 0),
-  );
-  const beamWidth = cards.length <= 12 ? 512 : cards.length <= 18 ? 96 : 16;
-  const expansionWidth = cards.length <= 12 ? 64 : cards.length <= 18 ? 24 : 6;
-  const completed = new Map<string, CardGroup[]>();
-  let frontier: BeamState[] = [{
-    usedMask: 0,
-    groups: [],
-    quality: {
-      protectedLoss: 0,
-      lowSingleCount: 0,
-      groupCount: 0,
-      retainedControl: 0,
-      fallbackScore: 0,
-    },
-  }];
-
-  while (frontier.length > 0) {
-    const nextStates: BeamState[] = [];
-
-    for (const state of frontier) {
-      if (state.usedMask === fullMask) {
-        completed.set(deterministicGroupIds(state.groups), state.groups);
-        continue;
-      }
-
-      const nextCardIndex = firstOpenCardIndex(state.usedMask, cards.length);
-      let expanded = 0;
-
-      for (const entry of entriesByFirstOpenCard[nextCardIndex]) {
-        if ((entry.mask & state.usedMask) !== 0) {
-          continue;
-        }
-
-        nextStates.push({
-          usedMask: state.usedMask | entry.mask,
-          groups: [...state.groups, entry.group],
-          quality: addAiPlanQuality(state.quality, entry.quality),
-        });
-        expanded += 1;
-
-        if (expanded >= expansionWidth) {
-          break;
-        }
-      }
-    }
-
-    if (nextStates.length === 0) {
-      break;
-    }
-
-    const bestStateByMask = new Map<number, BeamState>();
-    for (const state of nextStates) {
-      const best = bestStateByMask.get(state.usedMask);
-      if (best === undefined || compareBeamStates(state, best) < 0) {
-        bestStateByMask.set(state.usedMask, state);
-      }
-    }
-
-    frontier = [...bestStateByMask.values()]
-      .sort(compareBeamStates)
-      .slice(0, beamWidth);
-  }
-
-  const covers = [...completed.values()];
-  if (covers.length === 0) {
-    return buildGreedyAiCover(cards, groups, sourceBombs, legalReductionKeys, orderedGroups, gameRank);
-  }
-
-  return covers
-    .map((cover) => ({
-      groups: cover,
-      quality: measurePlanQuality(cards, cover, gameRank, scoreAiPlanGroups(cover, gameRank)),
-    }))
-    .sort((left, right) => {
-      const qualityDelta = comparePlanQuality(left.quality, right.quality);
-      return qualityDelta !== 0
-        ? qualityDelta
-        : deterministicGroupIds(left.groups).localeCompare(deterministicGroupIds(right.groups));
-    })[0].groups;
-}
-
-function compareBeamStates(left: BeamState, right: BeamState): number {
-  const qualityDelta = comparePlanQuality(left.quality, right.quality);
-  if (qualityDelta !== 0) {
-    return qualityDelta;
-  }
-
-  return deterministicGroupIds(left.groups).localeCompare(deterministicGroupIds(right.groups));
-}
-
-function addAiPlanQuality(
-  left: ReturnType<typeof measurePlanQuality>,
-  right: ReturnType<typeof measurePlanQuality>,
-): ReturnType<typeof measurePlanQuality> {
-  return {
-    protectedLoss: 0,
-    lowSingleCount: left.lowSingleCount + right.lowSingleCount,
-    groupCount: left.groupCount + right.groupCount,
-    retainedControl: left.retainedControl + right.retainedControl,
-    fallbackScore: left.fallbackScore + right.fallbackScore,
-  };
-}
-
-function firstOpenCardIndex(usedMask: number, cardCount: number): number {
-  for (let index = 0; index < cardCount; index += 1) {
-    if ((usedMask & (1 << index)) === 0) {
-      return index;
-    }
-  }
-
-  return cardCount;
-}
-
-function buildGreedyAiCover(
-  cards: Card[],
-  allGroups: CardGroup[],
-  sourceBombs: CardGroup[],
-  legalReductionKeys: Set<string>,
-  orderedGroups: CardGroup[],
-  gameRank: GameRank,
-  allowLinkedFullHouse = false,
-): CardGroup[] {
-  const usedIds = new Set<string>();
-  const selected: CardGroup[] = [];
-
-  for (const group of orderedGroups) {
-    if (
-      allowLinkedFullHouse &&
-      group.type === "full-house" &&
-      selected.some((selectedGroup) => selectedGroup.type === "full-house")
-    ) {
-      continue;
-    }
-
-    if (
-      !canSelectAiPlanGroup(group, cards, usedIds, allGroups, allowLinkedFullHouse) ||
-      !respectsAiProtectedStructures(group, allGroups, sourceBombs, legalReductionKeys)
-    ) {
-      continue;
-    }
-
-    selected.push(group);
-    for (const card of group.cards) {
-      usedIds.add(card.id);
-    }
-  }
-
-  const remainingSingles = allGroups.filter(
-    (group) => group.type === "single" && group.cards.every((card) => !usedIds.has(card.id)),
-  );
-  return [...selected, ...remainingSingles].sort(compareAiPlanGroups(gameRank));
-}
-
-function compareAiPlanGroups(gameRank: GameRank): (left: CardGroup, right: CardGroup) => number {
-  return (left, right) => {
-    const scoreDelta = aiPlanGroupScore(right, gameRank) - aiPlanGroupScore(left, gameRank);
-    return scoreDelta !== 0 ? scoreDelta : left.id.localeCompare(right.id);
-  };
-}
-
-function preservesAiNaturalStructures(group: CardGroup, cards: Card[], gameRank: GameRank): boolean {
-  if (group.type === "pair" && group.wildcards.length === 0) {
-    return naturalRankCount(group.cards[0]?.rank, cards, gameRank) === 2;
-  }
-
-  if (group.type !== "full-house" || group.wildcards.length > 0) {
-    return true;
-  }
-
-  const counts = rankCounts(group.cards);
-  const pairRank = [...counts.entries()].find(([, count]) => count === 2)?.[0];
-  if (pairRank === undefined) {
-    return true;
-  }
-
-  return naturalRankCount(pairRank, cards, gameRank) === 2;
-}
-
-function preservesAiBeamStructures(
-  group: CardGroup,
-  cards: Card[],
-  allGroups: CardGroup[],
-  gameRank: GameRank,
-): boolean {
-  if (group.type === "pair" && group.wildcards.length === 0) {
-    const naturalCount = naturalRankCount(group.cards[0]?.rank, cards, gameRank);
-    if (naturalCount < 2) {
-      return false;
-    }
-
-    if (naturalCount === 2) {
-      return true;
-    }
-
-    return !breaksBeamLinkedPair(group, allGroups);
-  }
-
-  return preservesAiNaturalStructures(group, cards, gameRank);
-}
-
-function breaksBeamLinkedPair(group: CardGroup, allGroups: CardGroup[]): boolean {
-  const groupIds = new Set(group.cards.map((card) => card.id));
-
-  return allGroups.some((container) => {
-    if ((container.type !== "plate" && container.type !== "consecutive-pairs") || container.wildcards.length > 0) {
-      return false;
-    }
-
-    return container.cards.some((card) => groupIds.has(card.id)) &&
-      container.cards.some((card) => !groupIds.has(card.id));
-  });
-}
-
-function naturalRankCount(rank: Card["rank"] | undefined, cards: Card[], gameRank: GameRank): number {
-  if (rank === undefined) {
-    return 0;
-  }
-
-  return cards.filter(
-    (card) => card.kind === "suited" && card.rank === rank && !isHeartRankWild(card, gameRank),
-  ).length;
-}
-
-function fullHouseMajorStrength(group: CardGroup, gameRank: GameRank): number {
-  const counts = rankCounts(group.cards);
-  const majorRank = [...counts.entries()].find(([, count]) => count === 3)?.[0];
-  return majorRank === undefined ? 0 : rankStrength(majorRank, gameRank);
-}
-
-function prioritizeGroups(groups: CardGroup[], prioritizedIds: Set<string>): CardGroup[] {
-  return [...groups].sort((left, right) => {
-    const priorityDelta = Number(prioritizedIds.has(right.id)) - Number(prioritizedIds.has(left.id));
-    return priorityDelta !== 0 ? priorityDelta : 0;
-  });
-}
-
-function structureSelectionPriority(group: CardGroup): number {
-  if (group.type === "straight-flush") {
-    return 5000;
-  }
-  if (group.type === "bomb" || group.type === "joker-bomb") {
-    return 4800;
-  }
-  if (group.type === "full-house") {
-    return 4200;
-  }
-  if (group.type === "straight") {
-    return 4000;
-  }
-  if (group.type === "plate" || group.type === "consecutive-pairs") {
-    return 3000;
-  }
-
-  return group.cards.length * 100;
-}
-
-function bombReductionSelectionPriority(
-  group: CardGroup,
-  allGroups: CardGroup[],
-  sourceBombs: CardGroup[],
-  legalReductionKeys: Set<string>,
-): number {
-  const retainedBombSize = retainedBombSizeAfterReduction(
-    group,
-    allGroups,
-    sourceBombs,
-    legalReductionKeys,
-  );
-  if (retainedBombSize > 0) {
-    return 6000 + retainedBombSize;
-  }
-
-  return structureSelectionPriority(group);
-}
-
-function retainedBombSizeAfterReduction(
-  group: CardGroup,
-  allGroups: CardGroup[],
-  sourceBombs: CardGroup[],
-  legalReductionKeys: Set<string>,
-): number {
-  if (group.type !== "straight") {
-    return 0;
-  }
-
-  let retainedBombSize = 0;
-  const groupIds = new Set(group.cards.map((card) => card.id));
-
-  for (const bomb of sourceBombs) {
-    if (!groupsOverlap(group, bomb) || !legalReductionKeys.has(bombReductionKey(bomb, group))) {
-      continue;
-    }
-
-    if (bomb.cards.length === 4) {
-      retainedBombSize = Math.max(retainedBombSize, 1);
-      continue;
-    }
-
-    const remainingBomb = allGroups
-      .filter(
-        (candidate) =>
-          candidate.type === "bomb" &&
-          candidate.wildcards.length === 0 &&
-          candidate.cards.length >= 4 &&
-          candidate.cards.every(
-            (card) =>
-              bomb.cards.some((bombCard) => bombCard.id === card.id) &&
-              !groupIds.has(card.id),
-          ),
-      )
-      .sort((left, right) => right.cards.length - left.cards.length)[0];
-
-    retainedBombSize = Math.max(retainedBombSize, remainingBomb?.cards.length ?? 0);
-  }
-
-  return retainedBombSize;
-}
-
-function respectsAiProtectedStructures(
-  group: CardGroup,
-  allGroups: CardGroup[],
-  sourceBombs: CardGroup[],
-  legalReductionKeys: Set<string>,
-): boolean {
-  if (
-    group.type !== "straight-flush" &&
-    allGroups.some((candidate) => candidate.type === "straight-flush" && groupsOverlap(group, candidate))
-  ) {
-    return false;
-  }
-
-  return sourceBombs.every((bomb) => {
-    if (!groupsOverlap(group, bomb) || group.type === "bomb") {
-      return true;
-    }
-
-    return legalReductionKeys.has(bombReductionKey(bomb, group));
-  });
-}
-
-function isRequiredFourBombReduction(
-  group: CardGroup,
-  sourceBombs: CardGroup[],
-  legalReductionKeys: Set<string>,
-): boolean {
-  return sourceBombs.some(
-    (bomb) =>
-      bomb.cards.length === 4 &&
-      groupsOverlap(group, bomb) &&
-      legalReductionKeys.has(bombReductionKey(bomb, group)),
-  );
-}
-
-function bombReductionKey(bomb: CardGroup, consumingGroup: CardGroup): string {
-  return `${bomb.id}|${consumingGroup.id}`;
-}
-
-function isLegalRoomBombReduction(
-  bomb: CardGroup,
-  consumingGroup: CardGroup,
-  allGroups: CardGroup[],
-  gameRank: GameRank,
-): boolean {
-  const bombIds = new Set(bomb.cards.map((card) => card.id));
-  const nonBombIds = consumingGroup.cards
-    .filter((card) => !bombIds.has(card.id))
-    .map((card) => card.id)
-    .sort()
-    .join("|");
-  const context = allGroups.filter((group) => {
-    if (group.type !== "straight" || group.id === consumingGroup.id) {
-      return true;
-    }
-
-    const candidateNonBombIds = group.cards
-      .filter((card) => !bombIds.has(card.id))
-      .map((card) => card.id)
-      .sort()
-      .join("|");
-    return candidateNonBombIds !== nonBombIds;
-  });
-
-  return isLegalBombReduction(bomb, consumingGroup, context, gameRank);
-}
-
-function maximalNaturalBombs(groups: CardGroup[]): CardGroup[] {
-  return groups.filter((group) => {
-    if (group.type !== "bomb" || group.wildcards.length > 0) {
-      return false;
-    }
-
-    return !groups.some(
-      (candidate) =>
-        candidate.type === "bomb" &&
-        candidate.wildcards.length === 0 &&
-        candidate.cards.length > group.cards.length &&
-        group.cards.every((card) => candidate.cards.some((candidateCard) => candidateCard.id === card.id)),
-    );
-  });
-}
-
-function groupsOverlap(left: CardGroup, right: CardGroup): boolean {
-  const rightIds = new Set(right.cards.map((card) => card.id));
-  return left.cards.some((card) => rightIds.has(card.id));
-}
-
-function deterministicGroupIds(groups: CardGroup[]): string {
-  return groups.map((group) => group.id).sort().join("|");
-}
-
-function scoreAiPlanGroups(groups: CardGroup[], gameRank: GameRank): number {
-  const turnEfficiency = Math.max(0, 100 - Math.max(0, groups.length - 8) * 6);
-  const averagePower = groups.length === 0 ? 0 : groups.reduce((total, group) => total + Math.min(100, group.strength * 2), 0) / groups.length;
-  return Math.round(turnEfficiency * 0.7 + averagePower * 0.3);
-}
-
-function aiPlanGroupScore(group: CardGroup, gameRank: GameRank): number {
-  const typeWeight: Record<CardGroup["type"], number> = {
-    "straight-flush": 1200,
-    bomb: 1100,
-    "joker-bomb": 100,
-    straight: 500,
-    plate: 640,
-    "consecutive-pairs": 580,
-    "full-house": 420,
-    triple: 260,
-    pair: 170,
-    single: 5,
-  };
-
-  return typeWeight[group.type] + powerResourceBonus(group) + wildcardStructureBonus(group) + group.cards.length * 20 + aiPlanRankScore(group) + groupCardCost(group, gameRank) / 100 - fullHouseKickerCost(group, gameRank);
-}
-
-function aiPlanRankScore(group: CardGroup): number {
-  if (group.type === "straight" || group.type === "consecutive-pairs" || group.type === "plate") {
-    return -group.strength * 2;
-  }
-
-  return group.strength;
-}
-
-function groupCardCost(group: CardGroup, gameRank: GameRank): number {
-  return group.cards.reduce((total, card) => total + rankStrength(card.rank, gameRank), 0);
-}
-
-function canSelectAiPlanGroup(
-  group: CardGroup,
-  cards: Card[],
-  usedIds: Set<string>,
-  allGroups: CardGroup[],
-  allowLinkedFullHouse = false,
-): boolean {
-  if (group.cards.some((card) => usedIds.has(card.id))) {
-    return false;
-  }
-
-  if (group.type !== "full-house") {
-    return true;
-  }
-
-  if (allowLinkedFullHouse) {
-    return (
-      isNaturalStructureFullHouse(group, cards, usedIds) &&
-      leavesTwoDisjointStraights(group, allGroups, usedIds)
-    );
-  }
-
-  return isNaturalRemainingFullHouse(group, cards, usedIds) && !breaksRemainingLinkedStructure(group, allGroups, usedIds);
-}
-
-function isNaturalStructureFullHouse(group: CardGroup, cards: Card[], usedIds: Set<string>): boolean {
-  if (group.wildcards.length > 0) {
-    return false;
-  }
-
-  const groupCounts = rankCounts(group.cards);
-  const tripleRank = [...groupCounts.entries()].find(([, count]) => count === 3)?.[0];
-  const pairRank = [...groupCounts.entries()].find(([, count]) => count === 2)?.[0];
-  if (tripleRank === undefined || pairRank === undefined) {
-    return false;
-  }
-
-  const remainingCounts = rankCounts(cards.filter((card) => !usedIds.has(card.id)));
-  return remainingCounts.get(tripleRank) === 3 && (remainingCounts.get(pairRank) ?? 0) >= 2;
-}
-
-function leavesTwoDisjointStraights(
-  group: CardGroup,
-  allGroups: CardGroup[],
-  usedIds: Set<string>,
-): boolean {
-  const unavailableIds = new Set([
-    ...usedIds,
-    ...group.cards.map((card) => card.id),
-  ]);
-  const availableStraights = allGroups.filter(
-    (candidate) =>
-      candidate.type === "straight" &&
-      candidate.cards.every((card) => !unavailableIds.has(card.id)),
-  );
-
-  return availableStraights.some((left, index) => {
-    const leftIds = new Set(left.cards.map((card) => card.id));
-    return availableStraights
-      .slice(index + 1)
-      .some((right) => right.cards.every((card) => !leftIds.has(card.id)));
-  });
-}
-
-function isNaturalRemainingFullHouse(group: CardGroup, cards: Card[], usedIds: Set<string>): boolean {
-  if (group.wildcards.length > 0) {
-    return false;
-  }
-
-  const groupCounts = rankCounts(group.cards);
-  const tripleRank = [...groupCounts.entries()].find(([, count]) => count === 3)?.[0];
-  const pairRank = [...groupCounts.entries()].find(([, count]) => count === 2)?.[0];
-  if (tripleRank === undefined || pairRank === undefined) {
-    return false;
-  }
-
-  const remainingCounts = rankCounts(cards.filter((card) => !usedIds.has(card.id)));
-  return remainingCounts.get(tripleRank) === 3 && remainingCounts.get(pairRank) === 2;
-}
-
-function rankCounts(cards: Card[]): Map<Card["rank"], number> {
-  const counts = new Map<Card["rank"], number>();
-  for (const card of cards) {
-    counts.set(card.rank, (counts.get(card.rank) ?? 0) + 1);
-  }
-
-  return counts;
-}
-
-function breaksRemainingLinkedStructure(group: CardGroup, allGroups: CardGroup[], usedIds: Set<string>): boolean {
-  const protectedTypes: CardGroup["type"][] = ["straight", "consecutive-pairs", "plate", "straight-flush", "bomb", "joker-bomb"];
-  const groupIds = new Set(group.cards.map((card) => card.id));
-
-  return allGroups.some((container) => {
-    if (!protectedTypes.includes(container.type) || container.cards.some((card) => usedIds.has(card.id))) {
-      return false;
-    }
-
-    const containerIds = new Set(container.cards.map((card) => card.id));
-    return group.cards.some((card) => containerIds.has(card.id)) && container.cards.some((card) => !groupIds.has(card.id));
-  });
-}
-
-function fullHouseKickerCost(group: CardGroup, gameRank: GameRank): number {
-  if (group.type !== "full-house") {
-    return 0;
-  }
-
-  const counts = new Map<string, { count: number; strength: number; wildcardCount: number }>();
-  for (const card of group.cards) {
-    const current = counts.get(card.rank) ?? { count: 0, strength: rankStrength(card.rank, gameRank), wildcardCount: 0 };
-    counts.set(card.rank, {
-      count: current.count + 1,
-      strength: current.strength,
-      wildcardCount: current.wildcardCount + (isHeartRankWild(card, gameRank) ? 1 : 0),
-    });
-  }
-
-  const major = [...counts.values()]
-    .filter((entry) => entry.count >= 3)
-    .sort((left, right) => left.strength - right.strength)[0];
-  const pair = [...counts.values()]
-    .filter((entry) => entry.count === 2)
-    .sort((left, right) => left.strength - right.strength)[0];
-  if (major === undefined || pair === undefined) {
-    return 0;
-  }
-
-  return pair.wildcardCount * 1000 + major.strength * 4 + pair.strength * 12;
-}
-
-function powerResourceBonus(group: CardGroup): number {
-  if (group.type === "bomb" && group.wildcards.length === 0) {
-    return 500 + group.cards.length * 80;
-  }
-
-  if (group.type === "bomb") {
-    return group.cards.length <= 5 ? 260 : 420;
-  }
-
-  if (group.type === "straight-flush") {
-    return 650;
-  }
-
-  return 0;
 }
 
 export function playCards(room: RoomState, seat: Seat, cardIds: string[]): void {
+  if (room.publicIdentity !== undefined && room.publicLedger !== undefined && room.publicEvents !== undefined) {
+    return playCardsWithPublicLedger(room, seat, cardIds);
+  }
+  playCardsLegacy(room, seat, cardIds);
+}
+
+function playCardsLegacy(room: RoomState, seat: Seat, cardIds: string[]): void {
   assertActiveTurn(room, seat);
   assertNoOpeningTribute(room);
   const selected = selectCards(room.hands[seat], cardIds);
@@ -1011,6 +270,13 @@ export function playCards(room: RoomState, seat: Seat, cardIds: string[]): void 
 }
 
 export function passTurn(room: RoomState, seat: Seat): void {
+  if (room.publicIdentity !== undefined && room.publicLedger !== undefined && room.publicEvents !== undefined) {
+    return passTurnWithPublicLedger(room, seat);
+  }
+  passTurnLegacy(room, seat);
+}
+
+function passTurnLegacy(room: RoomState, seat: Seat): void {
   assertActiveTurn(room, seat);
   assertNoOpeningTribute(room);
   if (room.trick.lastPlay === undefined) {
@@ -1037,7 +303,127 @@ export function passTurn(room: RoomState, seat: Seat): void {
   }
 }
 
-export function runAiStep(room: RoomState): void {
+function playCardsWithPublicLedger(room: RoomState, seat: Seat, cardIds: string[]): void {
+  const draft = structuredClone(room);
+  const beforeHandCount = room.hands[seat].length;
+  playCardsLegacy(draft, seat, cardIds);
+  const play = draft.playHistory.at(-1);
+  if (play?.action !== "play" || play.group === undefined || room.publicIdentity === undefined || room.publicLedger === undefined || room.publicEvents === undefined) throw new Error("D2A_PUBLIC_PLAY_EVENT_MISSING");
+  const eventDrafts: PublicActionEventDraft[] = [{
+    schemaVersion: "d2-public-event-v2",
+    gameId: room.publicIdentity.gameId,
+    roundIdentity: room.publicIdentity.roundIdentity,
+    handIdentity: room.publicIdentity.handIdentity,
+    eventIndex: room.publicLedger.nextEventIndex,
+    kind: "play",
+    seat,
+    publicStableKey: `play:${[...cardIds].sort().join(",")}`,
+    publicCardIds: [...cardIds],
+    patternType: play.group.type,
+    groupType: play.group.type,
+    handCountBefore: beforeHandCount,
+    handCountAfter: draft.hands[seat].length,
+    trickIndex: play.trickIndex ?? room.currentTrickIndex,
+    usedWildcardCount: play.group.wildcards.length,
+    usedBomb: play.group.type === "bomb" || play.group.type === "straight-flush" || play.group.type === "joker-bomb",
+  } as PublicActionEventDraft];
+  for (const finishedSeat of draft.finishOrder.slice(room.finishOrder.length)) {
+    const finishReason = finishedSeat === seat && draft.hands[finishedSeat].length === 0 ? "hand-empty" : "round-settlement";
+    eventDrafts.push({
+      schemaVersion: "d2-public-event-v2",
+      gameId: room.publicIdentity.gameId,
+      roundIdentity: room.publicIdentity.roundIdentity,
+      handIdentity: room.publicIdentity.handIdentity,
+      eventIndex: room.publicLedger.nextEventIndex + eventDrafts.length,
+      kind: "finish",
+      seat: finishedSeat,
+      publicStableKey: `finish:${room.finishOrder.length + eventDrafts.length}:${finishReason}`,
+      trickIndex: play.trickIndex ?? room.currentTrickIndex,
+      finishPosition: room.finishOrder.length + eventDrafts.length,
+      remainingHandCount: draft.hands[finishedSeat].length,
+      finishReason,
+    } as PublicActionEventDraft);
+  }
+  commitPublicTransition(room, draft, eventDrafts);
+}
+
+function passTurnWithPublicLedger(room: RoomState, seat: Seat): void {
+  const draft = structuredClone(room);
+  passTurnLegacy(draft, seat);
+  if (JSON.stringify(draft.finishOrder) !== JSON.stringify(room.finishOrder)) throw new Error("D2A_FINISH_EVENT_PENDING");
+  const pass = draft.playHistory.at(-1);
+  if (pass?.action !== "pass" || room.publicIdentity === undefined || room.publicLedger === undefined || room.publicEvents === undefined) throw new Error("D2A_PUBLIC_PASS_EVENT_MISSING");
+  const eventDrafts: PublicActionEventDraft[] = [{
+    schemaVersion: "d2-public-event-v2",
+    gameId: room.publicIdentity.gameId,
+    roundIdentity: room.publicIdentity.roundIdentity,
+    handIdentity: room.publicIdentity.handIdentity,
+    eventIndex: room.publicLedger.nextEventIndex,
+    kind: "pass",
+    seat,
+    publicStableKey: "pass:v2",
+    handCountBefore: room.hands[seat].length,
+    handCountAfter: room.hands[seat].length,
+    trickIndex: pass.trickIndex ?? room.currentTrickIndex,
+  } as PublicActionEventDraft];
+  if (draft.currentTrickIndex !== room.currentTrickIndex) {
+    eventDrafts.push({
+      schemaVersion: "d2-public-event-v2",
+      gameId: room.publicIdentity.gameId,
+      roundIdentity: room.publicIdentity.roundIdentity,
+      handIdentity: room.publicIdentity.handIdentity,
+      eventIndex: room.publicLedger.nextEventIndex + 1,
+      kind: "trick-clear",
+      seat,
+      publicStableKey: `trick-clear:${room.currentTrickIndex}:${draft.currentTrickIndex}`,
+      trickIndex: room.currentTrickIndex,
+      leadSeat: draft.trick.leadSeat,
+    } as PublicActionEventDraft);
+  }
+  commitPublicTransition(room, draft, eventDrafts);
+}
+
+function commitPublicTransition(room: RoomState, draft: RoomState, eventDrafts: readonly PublicActionEventDraft[]): void {
+  if (room.publicLedger === undefined || room.publicEvents === undefined) throw new Error("D2A_PUBLIC_LEDGER_MISSING");
+  const finalizedEvents = eventDrafts.map((eventDraft) => finalizePublicActionEvent(eventDraft));
+  let nextLedger = room.publicLedger;
+  for (const event of finalizedEvents) {
+    const result = applyPublicEvent(nextLedger, event);
+    if (!result.ok) throw new Error(result.error);
+    nextLedger = result.ledger;
+  }
+  crossCheckTransition(draft, nextLedger, finalizedEvents);
+  room.players = structuredClone(draft.players);
+  room.hands = structuredClone(draft.hands);
+  room.initialHands = structuredClone(draft.initialHands);
+  room.currentTurn = draft.currentTurn;
+  room.leaderSeat = draft.leaderSeat;
+  room.trick = structuredClone(draft.trick);
+  room.currentTrickIndex = draft.currentTrickIndex;
+  room.finishOrder = structuredClone(draft.finishOrder);
+  room.openingTribute = structuredClone(draft.openingTribute);
+  room.settlement = structuredClone(draft.settlement);
+  room.aiPlans = structuredClone(draft.aiPlans);
+  room.aiRuntime = structuredClone(draft.aiRuntime);
+  room.status = draft.status;
+  room.actionLog = structuredClone(draft.actionLog);
+  room.playHistory = structuredClone(draft.playHistory);
+  room.publicLedger = nextLedger;
+  room.publicEvents = [...room.publicEvents, ...finalizedEvents];
+}
+
+function crossCheckTransition(room: RoomState, ledger: HardPublicLedger, events: readonly ReturnType<typeof finalizePublicActionEvent>[]): void {
+  if (ledger.handCounts[0] !== room.hands[0].length || ledger.handCounts[1] !== room.hands[1].length || ledger.handCounts[2] !== room.hands[2].length || ledger.handCounts[3] !== room.hands[3].length) throw new Error("D2A_LEDGER_ROOM_MISMATCH");
+  if (ledger.currentTrick.trickIndex !== room.currentTrickIndex) throw new Error("D2A_LEDGER_TRICK_MISMATCH");
+  const lastEvent = events.at(-1);
+  if (lastEvent?.kind === "trick-clear") {
+    if (ledger.currentTrick.leadSeat !== room.trick.leadSeat || ledger.currentTrick.passSeats.length !== 0 || ledger.currentTrick.lastPlaySeat !== undefined) throw new Error("D2A_LEDGER_TRICK_MISMATCH");
+  } else if (room.trick.lastPlaySeat !== undefined && ledger.currentTrick.lastPlaySeat !== room.trick.lastPlaySeat) {
+    throw new Error("D2A_LEDGER_TRICK_MISMATCH");
+  }
+}
+
+export function runAiStep(room: RoomState, diagnostics?: AiPlanningDiagnostics): void {
   if (room.status !== "playing") {
     return;
   }
@@ -1062,48 +448,36 @@ export function runAiStep(room: RoomState): void {
 
   const seat = room.currentTurn;
   const partner = partnerSeat(seat);
-  const analysis = createHandAnalysis(room.hands[seat], room.rank);
-  ensureAiPlanForSeat(room, seat, analysis);
-  const action = chooseAiAction({
-    hand: room.hands[seat],
-    partnerHand: room.hands[partner],
-    plannedGroups: currentPlannedGroups(room, seat),
+  const handBefore = [...room.hands[seat]];
+  const decision = decideAiAction({
+    hand: [...room.hands[seat]],
     gameRank: room.rank,
     seat,
     partnerSeat: partner,
     lastPlay: room.trick.lastPlay,
     lastPlaySeat: room.trick.lastPlaySeat,
-    analysis,
-    preferPlannedLead: true,
-    context: {
-      ownHandCount: room.hands[seat].length,
-      partnerHandCount: room.hands[partner].length,
-      opponentHandCounts: room.players
-        .filter((candidate) => candidate.seat !== seat && candidate.seat !== partner)
-        .map((candidate) => room.hands[candidate.seat].length),
-      playedCards: room.playHistory.flatMap((play) => play.group?.cards ?? []),
-      finishOrder: room.finishOrder,
-      partnerPassedCurrentTrick: room.trick.passSeats.includes(partner),
-    },
-  });
+    playedCards: room.playHistory.flatMap((play) => play.group?.cards ?? []),
+    handCounts: Object.fromEntries(room.players.map((candidate) => [candidate.seat, room.hands[candidate.seat].length])),
+    finishOrder: room.finishOrder,
+    partnerPassedCurrentTrick: room.trick.passSeats.includes(partner),
+  }, room.aiRuntime[seat] ?? emptyAiRuntime(), { ...DEFAULT_AI_PERFORMANCE_CONFIG, turn: room.currentTrickIndex, diagnostics });
+  const selectedPlan = decision.selectedPlan ?? decision.runtime.candidatePlans.find((plan) => plan.id === decision.selectedPlanId);
+  if (selectedPlan === undefined) throw new Error("AI_ENGINE_MISSING_SELECTED_PLAN");
+  const action = decision.action;
 
   if (action.type === "pass") {
     if (room.trick.lastPlay === undefined) {
-      const fallbackGroup = selectSafeAiLeadFallback(room.hands[seat], room.rank, analysis);
-      if (fallbackGroup === undefined) {
-        if (room.hands[seat].length === 0) {
-          throw new Error("AI_ACTIVE_SEAT_EMPTY");
-        }
-        throw new Error("AI_NON_EMPTY_HAND_HAS_NO_LEGAL_LEAD");
-      }
-
-      room.actionLog.unshift(`${playerName(room, seat)} 首发策略为空，按保护规则兜底出牌。`);
-      playCards(room, seat, fallbackGroup.cards.map((card) => card.id));
-      return;
+      throw new Error("AI_ENGINE_RETURNED_LEAD_PASS");
     }
     passTurn(room, seat);
+    room.aiRuntime[seat] = applyExecutedAction(decision.runtime, handBefore, undefined, room.hands[seat], room.rank, room.currentTrickIndex, DEFAULT_AI_PERFORMANCE_CONFIG.planning, DEFAULT_AI_PERFORMANCE_CONFIG.version, diagnostics);
+    room.aiPlans[seat] = toLegacyAiPlanState(seat, selectedPlan);
   } else {
     playCards(room, seat, action.group.cards.map((card) => card.id));
+    const runtime = applyExecutedAction(decision.runtime, handBefore, action.group, room.hands[seat], room.rank, room.currentTrickIndex, DEFAULT_AI_PERFORMANCE_CONFIG.planning, DEFAULT_AI_PERFORMANCE_CONFIG.version, diagnostics);
+    room.aiRuntime[seat] = runtime;
+    const plan = runtime.candidatePlans.find((candidate) => candidate.id === runtime.activePlanId);
+    if (runtime.needsReplan || plan === undefined) delete room.aiPlans[seat]; else room.aiPlans[seat] = toLegacyAiPlanState(seat, plan);
   }
 }
 
@@ -1128,46 +502,86 @@ function normalizeActiveSeat(room: RoomState): void {
   }
 }
 
-export function selectSafeAiLeadFallback(
-  hand: Card[],
-  gameRank: GameRank,
-  analysis = createHandAnalysis(hand, gameRank),
-): CardGroup | undefined {
-  return analysis.accepted
-    .map((candidate) => candidate.group)
-    .sort((left, right) =>
-      left.cards.length - right.cards.length ||
-      left.strength - right.strength ||
-      left.id.localeCompare(right.id),
-    )[0];
-}
-
-function ensureAiPlanForSeat(room: RoomState, seat: Seat, analysis?: HandAnalysis): void {
-  const plan = room.aiPlans[seat];
-  const hand = room.hands[seat];
-  if (plan !== undefined && planCoversHand(plan, hand)) {
+function ensureAiPlanForSeat(room: RoomState, seat: Seat): void {
+  const previousRuntime = room.aiRuntime[seat];
+  const runtime = ensurePlans(
+    previousRuntime ?? emptyAiRuntime(),
+    room.hands[seat],
+    room.rank,
+    room.currentTrickIndex,
+    DEFAULT_AI_PERFORMANCE_CONFIG.planning,
+    DEFAULT_AI_PERFORMANCE_CONFIG.version,
+  );
+  if (runtime === previousRuntime && room.aiPlans[seat] !== undefined) {
     return;
   }
-
-  room.aiPlans[seat] = buildAiPlan(room, seat, analysis);
+  room.aiRuntime[seat] = runtime;
+  const plan = runtime.candidatePlans.find((candidate) => candidate.id === runtime.activePlanId) ?? runtime.candidatePlans[0];
+  if (plan === undefined) {
+    throw new Error("AI_PLAN_GENERATION_FAILED");
+  }
+  room.aiPlans[seat] = toLegacyAiPlanState(seat, plan);
 }
 
-function planCoversHand(plan: AiPlanState, hand: Card[]): boolean {
-  const handIds = new Set(hand.map((card) => card.id));
-  const plannedCardIds = new Set(
-    plan.groups
-      .filter((group) => group.cards.every((card) => handIds.has(card.id)))
-      .flatMap((group) => group.cards.map((card) => card.id)),
-  );
-  return plannedCardIds.size === hand.length && hand.every((card) => plannedCardIds.has(card.id));
-}
-
-function currentPlannedGroups(room: RoomState, seat: Seat): CardGroup[] {
-  const handIds = new Set(room.hands[seat].map((card) => card.id));
-  return room.aiPlans[seat]?.groups.filter((group) => group.cards.every((card) => handIds.has(card.id))) ?? [];
+function emptyAiRuntime(): AiRuntimeState {
+  return {
+    candidatePlans: [],
+    generatedTurn: -1,
+    configVersion: "",
+    needsReplan: true,
+  };
 }
 
 export function advanceOpeningTribute(room: RoomState, seat?: Seat, cardIds: string[] = []): void {
+  if (room.publicIdentity !== undefined && room.publicLedger !== undefined && room.publicEvents !== undefined) {
+    return advanceOpeningTributeWithPublicLedger(room, seat, cardIds);
+  }
+  advanceOpeningTributeLegacy(room, seat, cardIds);
+}
+
+function advanceOpeningTributeWithPublicLedger(room: RoomState, seat?: Seat, cardIds: string[] = []): void {
+  const draft = structuredClone(room);
+  const phase = room.openingTribute?.phase;
+  advanceOpeningTributeLegacy(draft, seat, cardIds);
+  const eventDrafts = buildTransferEventDrafts(room, draft, phase);
+  commitPublicTransition(room, draft, eventDrafts);
+}
+
+function buildTransferEventDrafts(room: RoomState, draft: RoomState, phase: TributeState["phase"]): PublicActionEventDraft[] {
+  if (room.publicIdentity === undefined || room.publicLedger === undefined) return [];
+  const identity = room.publicIdentity;
+  const ledger = room.publicLedger;
+  const transfers: Array<{ fromSeat: Seat; toSeat: Seat; cardId: string }> = [];
+  for (const candidate of [0, 1, 2, 3] as const) {
+    const before = new Set(room.hands[candidate].map((card) => card.id));
+    const after = new Set(draft.hands[candidate].map((card) => card.id));
+    const removed = [...before].filter((id) => !after.has(id));
+    for (const cardId of removed) {
+      const toSeat = ([0, 1, 2, 3] as const).find((seat) => !room.hands[seat].some((card) => card.id === cardId) && draft.hands[seat].some((card) => card.id === cardId));
+      if (toSeat !== undefined && toSeat !== candidate) transfers.push({ fromSeat: candidate, toSeat, cardId });
+    }
+  }
+  const kind = phase === "return" ? "return" : "tribute";
+  const exchangeOrder = new Map(draft.openingTribute?.exchanges?.map((exchange, index) => [kind === "return" ? exchange.returnCard?.id : exchange.tributeCard.id, index]));
+  transfers.sort((left, right) => (exchangeOrder.get(left.cardId) ?? Number.MAX_SAFE_INTEGER) - (exchangeOrder.get(right.cardId) ?? Number.MAX_SAFE_INTEGER));
+  return transfers.map(({ fromSeat, toSeat, cardId }, index) => ({
+    schemaVersion: "d2-public-event-v2",
+    gameId: identity.gameId,
+    roundIdentity: identity.roundIdentity,
+    handIdentity: identity.handIdentity,
+    eventIndex: ledger.nextEventIndex + index,
+    kind,
+    seat: fromSeat,
+    publicCardIds: [cardId],
+    fromSeat,
+    toSeat,
+    handCountChanges: { 0: fromSeat === 0 ? -1 : toSeat === 0 ? 1 : 0, 1: fromSeat === 1 ? -1 : toSeat === 1 ? 1 : 0, 2: fromSeat === 2 ? -1 : toSeat === 2 ? 1 : 0, 3: fromSeat === 3 ? -1 : toSeat === 3 ? 1 : 0 },
+    publicStableKey: `${kind}:${fromSeat}:${toSeat}:${cardId}`,
+    trickIndex: ledger.currentTrick.trickIndex,
+  } as PublicActionEventDraft));
+}
+
+function advanceOpeningTributeLegacy(room: RoomState, seat?: Seat, cardIds: string[] = []): void {
   const tribute = room.openingTribute;
   if (tribute === undefined || tribute.status !== "pending") {
     return;
@@ -1211,7 +625,6 @@ export function advanceOpeningTribute(room: RoomState, seat?: Seat, cardIds: str
   const item = activeItem;
   const payerSeat = item.payer;
   const tributeCard = selectOpeningTributeCard(room, payerSeat, seat, cardIds);
-  removeCard(room.hands, payerSeat, tributeCard);
 
   const exchanges = [...(tribute.exchanges ?? [])];
   exchanges[itemIndex] = {
@@ -1276,6 +689,12 @@ function randomOpeningLeader(seed: number): Seat {
 }
 
 function selectCards(hand: Card[], cardIds: string[]): Card[] {
+  if (cardIds.length === 0) {
+    throw new Error("AI_ACTION_EMPTY_CARDS");
+  }
+  if (new Set(cardIds).size !== cardIds.length) {
+    throw new Error("AI_ACTION_CONTAINS_DUPLICATE_CARDS");
+  }
   const cards = cardIds.map((id) => hand.find((card) => card.id === id));
   if (cards.some((card) => card === undefined)) {
     throw new Error("所选牌不在当前手牌中。");
@@ -1378,6 +797,7 @@ function assignTributeReceivers(room: RoomState, items: TributeItem[], exchanges
 
   return assigned.map((exchange, index) => {
     const receiver = receivers[index] ?? exchange.receiver;
+    removeCard(room.hands, exchange.payer, exchange.tributeCard);
     room.hands[receiver] = [...room.hands[receiver], exchange.tributeCard];
     return {
       ...exchange,
@@ -1387,15 +807,17 @@ function assignTributeReceivers(room: RoomState, items: TributeItem[], exchanges
 }
 
 function selectOpeningTributeCard(room: RoomState, payerSeat: Seat, actingSeat: Seat | undefined, cardIds: string[]): Card {
+  const reservedCardIds = new Set(room.openingTribute?.exchanges?.map((exchange) => exchange.tributeCard.id) ?? []);
+  const availableCards = room.hands[payerSeat].filter((card) => !reservedCardIds.has(card.id));
   if (room.players.find((player) => player.seat === payerSeat)?.isAI === true) {
-    return strongestTributeCard(room.hands[payerSeat], room.rank);
+    return strongestTributeCard(availableCards, room.rank);
   }
 
   if (actingSeat !== payerSeat) {
     throw new Error("请由进贡方选择进贡牌。");
   }
 
-  const selected = selectCards(room.hands[payerSeat], cardIds);
+  const selected = selectCards(availableCards, cardIds);
   if (selected.length !== 1 || isHeartRankWild(selected[0], room.rank)) {
     throw new Error("进贡牌必须是一张非红心级牌。");
   }

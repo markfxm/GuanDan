@@ -1,0 +1,537 @@
+{
+  "schemaVersion": "2",
+  "reportVersion": "d0-r2",
+  "benchmarkVersion": "d0-r2",
+  "generatedAt": "2026-07-14T00:00:00.000Z",
+  "sourceCommit": "6aad8b32d96f996944a91f8ada5cb646530548b6",
+  "roomRulesVersion": "1dd758f6dedf71de3a4244a84d4b838b7f54ba2fb38a95e3417f8acb2ef3b8b8",
+  "configHash": "8f2bd2e3445f54d03500dae5a8e11c563c59251e4e16c0bd8dd7a943c7cb65f6",
+  "config": {
+    "rank": "2",
+    "seeds": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      83,
+      84,
+      85,
+      86,
+      87,
+      88,
+      89,
+      90,
+      91,
+      92,
+      93,
+      94,
+      95,
+      96,
+      97,
+      98,
+      99,
+      100,
+      101,
+      102,
+      103,
+      104,
+      105,
+      106,
+      107,
+      108,
+      109,
+      110,
+      111,
+      112,
+      113,
+      114,
+      115,
+      116,
+      117,
+      118,
+      119,
+      120,
+      121,
+      122,
+      123,
+      124,
+      125,
+      126,
+      127,
+      128,
+      129,
+      130,
+      131,
+      132,
+      133,
+      134,
+      135,
+      136,
+      137,
+      138,
+      139,
+      140,
+      141,
+      142,
+      143,
+      144,
+      145,
+      146,
+      147,
+      148,
+      149,
+      150,
+      151,
+      152,
+      153,
+      154,
+      155,
+      156,
+      157,
+      158,
+      159,
+      160,
+      161,
+      162,
+      163,
+      164,
+      165,
+      166,
+      167,
+      168,
+      169,
+      170,
+      171,
+      172,
+      173,
+      174,
+      175,
+      176,
+      177,
+      178,
+      179,
+      180,
+      181,
+      182,
+      183,
+      184,
+      185,
+      186,
+      187,
+      188,
+      189,
+      190,
+      191,
+      192,
+      193,
+      194,
+      195,
+      196,
+      197,
+      198,
+      199,
+      200
+    ],
+    "seedCount": 200,
+    "rawGames": 4800,
+    "pairedUnits": 2400,
+    "baseSeeds": 600,
+    "rotationsPerSeed": 4,
+    "placementsPerRotation": 2,
+    "gamesPerSeedPerMatchup": 8,
+    "matchupCount": 3,
+    "replayMode": "failures"
+  },
+  "matchups": [
+    {
+      "strategyA": "unified-current",
+      "strategyB": "legal-greedy",
+      "configHash": "8108ad7199f6ae1092f69767608e63e6397a4e8875e6bb2f6bb54eff61793d9f",
+      "baseSeedCount": 200,
+      "rawGameCount": 1600,
+      "pairedUnitCount": 800,
+      "raw": {
+        "winsA": 752,
+        "winsB": 848,
+        "draws": 0,
+        "winRateA": 0.47,
+        "winRateB": 0.53,
+        "drawRate": 0
+      },
+      "paired": {
+        "winsA": 152,
+        "winsB": 200,
+        "draws": 448,
+        "winRateA": 0.4318181818181818,
+        "winRateB": 0.5681818181818182,
+        "drawRate": 0.56,
+        "meanScoreDifference": -0.06,
+        "medianScoreDifference": 0,
+        "scoreDifferenceCI": [
+          -0.12903225806451613,
+          0.008547008547008548
+        ],
+        "winRateCI": [
+          0.35714285714285715,
+          0.5098039215686274
+        ]
+      },
+      "bootstrap": {
+        "blockUnit": "base-seed",
+        "iterations": 200,
+        "seed": 1
+      },
+      "elo": {
+        "initialRating": 1500,
+        "kFactor": 32,
+        "delta": -0.9600000000000009,
+        "version": "d0-elo-v1"
+      },
+      "duration": {
+        "mean": 15811.844610933145,
+        "median": 12315.617558000144,
+        "p95": 36092.64068499999
+      },
+      "errors": {
+        "total": 0,
+        "failed": 0,
+        "timeouts": 0,
+        "illegalActions": 0,
+        "engineErrors": 0,
+        "strategyErrors": 0
+      },
+      "replayValidation": {
+        "replayFilesExpected": 800,
+        "replayFilesFound": 800,
+        "replayFilesVerified": 800,
+        "hashVerified": 800,
+        "versionVerified": 800,
+        "hiddenStateLeakCount": 0,
+        "randomReplayVerified": 0,
+        "greedyReplayVerified": 4,
+        "legacyReplayVerified": 0,
+        "sampledReplayVerification": {
+          "method": "sampled",
+          "expected": 4,
+          "verified": 4
+        }
+      },
+      "classification": {
+        "exploratory": true
+      },
+      "significance": {
+        "score": "CI includes neutral",
+        "winRate": "CI includes neutral",
+        "interpretation": "未观察到显著差异"
+      }
+    },
+    {
+      "strategyA": "unified-current",
+      "strategyB": "legacy-reference",
+      "configHash": "f41864564a0dab5bb455dd19b83e42a009eb695b471d9b8d998841c08e678395",
+      "baseSeedCount": 200,
+      "rawGameCount": 1600,
+      "pairedUnitCount": 800,
+      "raw": {
+        "winsA": 1552,
+        "winsB": 48,
+        "draws": 0,
+        "winRateA": 0.97,
+        "winRateB": 0.03,
+        "drawRate": 0
+      },
+      "paired": {
+        "winsA": 752,
+        "winsB": 0,
+        "draws": 48,
+        "winRateA": 1,
+        "winRateB": 0,
+        "drawRate": 0.06,
+        "meanScoreDifference": 0.94,
+        "medianScoreDifference": 1,
+        "scoreDifferenceCI": [
+          0.9140625,
+          0.9672131147540983
+        ],
+        "winRateCI": [
+          1,
+          1
+        ]
+      },
+      "bootstrap": {
+        "blockUnit": "base-seed",
+        "iterations": 200,
+        "seed": 1
+      },
+      "elo": {
+        "initialRating": 1500,
+        "kFactor": 32,
+        "delta": 15.04,
+        "version": "d0-elo-v1"
+      },
+      "duration": {
+        "mean": 10906.72354700314,
+        "median": 9562.551944999956,
+        "p95": 20285.872785999905
+      },
+      "errors": {
+        "total": 0,
+        "failed": 0,
+        "timeouts": 0,
+        "illegalActions": 0,
+        "engineErrors": 0,
+        "strategyErrors": 0
+      },
+      "replayValidation": {
+        "replayFilesExpected": 800,
+        "replayFilesFound": 800,
+        "replayFilesVerified": 800,
+        "hashVerified": 800,
+        "versionVerified": 800,
+        "hiddenStateLeakCount": 0,
+        "randomReplayVerified": 0,
+        "greedyReplayVerified": 0,
+        "legacyReplayVerified": 4,
+        "sampledReplayVerification": {
+          "method": "sampled",
+          "expected": 4,
+          "verified": 4
+        }
+      },
+      "classification": {
+        "exploratory": true
+      },
+      "significance": {
+        "score": "CI excludes neutral",
+        "winRate": "CI excludes neutral",
+        "interpretation": "paired CI excludes neutral"
+      }
+    },
+    {
+      "strategyA": "unified-current",
+      "strategyB": "legal-random",
+      "configHash": "7dcaefa1f56b8590a2f3cd20911503e4ad83df3abf462401eaf17c5501bcf33c",
+      "baseSeedCount": 200,
+      "rawGameCount": 1600,
+      "pairedUnitCount": 800,
+      "raw": {
+        "winsA": 1445,
+        "winsB": 155,
+        "draws": 0,
+        "winRateA": 0.903125,
+        "winRateB": 0.096875,
+        "drawRate": 0
+      },
+      "paired": {
+        "winsA": 647,
+        "winsB": 2,
+        "draws": 151,
+        "winRateA": 0.9969183359013868,
+        "winRateB": 0.0030816640986132513,
+        "drawRate": 0.18875,
+        "meanScoreDifference": 0.80625,
+        "medianScoreDifference": 1,
+        "scoreDifferenceCI": [
+          0.78125,
+          0.8269230769230769
+        ],
+        "winRateCI": [
+          0.9947780678851175,
+          1
+        ]
+      },
+      "bootstrap": {
+        "blockUnit": "base-seed",
+        "iterations": 200,
+        "seed": 1
+      },
+      "elo": {
+        "initialRating": 1500,
+        "kFactor": 32,
+        "delta": 12.899999999999999,
+        "version": "d0-elo-v1"
+      },
+      "duration": {
+        "mean": 14575.988137064352,
+        "median": 12541.833598999772,
+        "p95": 27082.069647999946
+      },
+      "errors": {
+        "total": 0,
+        "failed": 0,
+        "timeouts": 0,
+        "illegalActions": 0,
+        "engineErrors": 0,
+        "strategyErrors": 0
+      },
+      "replayValidation": {
+        "replayFilesExpected": 800,
+        "replayFilesFound": 800,
+        "replayFilesVerified": 800,
+        "hashVerified": 800,
+        "versionVerified": 800,
+        "hiddenStateLeakCount": 0,
+        "randomReplayVerified": 12,
+        "greedyReplayVerified": 0,
+        "legacyReplayVerified": 0,
+        "sampledReplayVerification": {
+          "method": "sampled",
+          "expected": 12,
+          "verified": 12
+        }
+      },
+      "classification": {
+        "exploratory": true
+      },
+      "significance": {
+        "score": "CI excludes neutral",
+        "winRate": "CI excludes neutral",
+        "interpretation": "paired CI excludes neutral"
+      }
+    }
+  ],
+  "manifestValidation": {
+    "expectedMatchIds": 4800,
+    "completedMatchIds": 4800,
+    "duplicate": 0,
+    "missing": 0,
+    "unknown": 0,
+    "configHashConsistent": true,
+    "provenanceMissing": 0,
+    "nonPositiveDuration": 0
+  },
+  "replayValidation": {
+    "replayFilesExpected": 2400,
+    "replayFilesFound": 2400,
+    "replayFilesVerified": 2400,
+    "hashVerified": 2400,
+    "versionVerified": 2400,
+    "hiddenStateLeakCount": 0,
+    "randomReplayVerified": 12,
+    "greedyReplayVerified": 4,
+    "legacyReplayVerified": 4,
+    "sampledReplayVerification": {
+      "method": "sampled",
+      "expected": 20,
+      "verified": 20
+    }
+  },
+  "provenance": {
+    "strategyDescriptors": [
+      {
+        "id": "unified-current",
+        "implementationVersion": "production-ai-v1",
+        "configHash": "d0-v1",
+        "sourceCommit": "87fffb3f330069d9534aa29503120e2a7c9abfcf",
+        "candidatePolicy": "production-policy"
+      },
+      {
+        "id": "legacy-reference",
+        "implementationVersion": "legacy-reference-v1",
+        "configHash": "d0-v1",
+        "sourceCommit": "87fffb3f330069d9534aa29503120e2a7c9abfcf",
+        "candidatePolicy": "production-policy"
+      },
+      {
+        "id": "legal-random",
+        "implementationVersion": "legal-random-v1",
+        "configHash": "d0-v1",
+        "sourceCommit": "87fffb3f330069d9534aa29503120e2a7c9abfcf",
+        "candidatePolicy": "legal-only"
+      },
+      {
+        "id": "legal-greedy",
+        "implementationVersion": "legal-greedy-v1",
+        "configHash": "d0-v1",
+        "sourceCommit": "87fffb3f330069d9534aa29503120e2a7c9abfcf",
+        "candidatePolicy": "legal-only"
+      }
+    ],
+    "sourceCommits": [
+      "87fffb3f330069d9534aa29503120e2a7c9abfcf",
+      "b6a7d1bf992cfee2d93e994d15852272d06e55fb"
+    ]
+  },
+  "privacy": {
+    "publicOnly": true,
+    "hiddenStateLeakCount": 0
+  }
+}

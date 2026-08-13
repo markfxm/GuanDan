@@ -1,6 +1,6 @@
 import { createDeck, type Card, type Rank, type Suit } from "../../src/engine/cards";
 import { classifyPlay } from "../../src/game/playRules";
-import { chooseAiAction, chooseFollowAction, chooseLeadAction, classifyAiRole } from "../../src/game/ai";
+import { chooseAiAction, chooseFollowAction, chooseLeadAction, classifyAiRole } from "../helpers/legacyAiReference";
 
 function suited(rank: Rank, suit: Suit, copy: 1 | 2 = 1): Card {
   const card = createDeck().find(

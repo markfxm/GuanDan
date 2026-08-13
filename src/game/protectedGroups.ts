@@ -1,6 +1,7 @@
 import { isHeartRankWild, rankStrength, type Card, type GameRank } from "../engine/cards";
 import { detectGroups, type CardGroup } from "../engine/groups";
 import { isLegalBombReduction } from "../engine/planQuality";
+import { powerProtectionLevel } from "../ai/policy/powerGroupPolicy";
 
 export type ProtectedGroup = {
   id: string;
@@ -45,6 +46,16 @@ export type HandAnalysis = AiCandidatePool & {
   allGroups: CardGroup[];
 };
 
+let createHandAnalysisCallCount = 0;
+
+export function resetCreateHandAnalysisCallCount(): void {
+  createHandAnalysisCallCount = 0;
+}
+
+export function getCreateHandAnalysisCallCount(): number {
+  return createHandAnalysisCallCount;
+}
+
 export function detectProtectedGroups(hand: Card[], gameRank: GameRank): ProtectedGroup[] {
   const allGroups = detectGroups(hand, gameRank);
   return detectProtectedGroupsFromGroups(allGroups, gameRank);
@@ -75,15 +86,15 @@ function detectProtectedGroupsFromGroups(allGroups: CardGroup[], gameRank: GameR
     });
 
   return [...nonStraightFlushGroups, ...naturalStraightFlushes, ...canonicalWildcardStraightFlushes]
-    .filter((group) => isHardProtectedPower(group, allGroups) || isConditionallyProtectedPower(group, allGroups))
+    .filter((group) => isHardProtectedPower(group, allGroups, gameRank) || isConditionallyProtectedPower(group, allGroups, gameRank))
     .map((group) => ({
       id: group.id,
       type: group.type,
       cards: group.cards,
       rank: protectedRank(group, gameRank),
       size: group.cards.length,
-      protectionLevel: isHardProtectedPower(group, allGroups) ? "HARD" as const : "CONDITIONAL" as const,
-      reason: `${isHardProtectedPower(group, allGroups) ? "Protected" : "Conditionally protected"} ${protectedTypeLabel(group)} ${group.cards.map((card) => card.rank).join("")}`,
+      protectionLevel: isHardProtectedPower(group, allGroups, gameRank) ? "HARD" as const : "CONDITIONAL" as const,
+      reason: `${isHardProtectedPower(group, allGroups, gameRank) ? "Protected" : "Conditionally protected"} ${protectedTypeLabel(group)} ${group.cards.map((card) => card.rank).join("")}`,
     }));
 }
 
@@ -96,6 +107,7 @@ export function createHandAnalysis(
   gameRank: GameRank,
   options: BombBreakContext = {},
 ): HandAnalysis {
+  createHandAnalysisCallCount += 1;
   const allGroups = detectGroups(hand, gameRank);
   const protectedGroups = detectProtectedGroupsFromGroups(allGroups, gameRank);
   const normalCards = getCardsAvailableForNormalPatterns(hand, protectedGroups, options);
@@ -295,17 +307,12 @@ function isPowerGroup(group: CardGroup): boolean {
   return group.type === "bomb" || group.type === "straight-flush" || group.type === "joker-bomb";
 }
 
-function isHardProtectedPower(group: CardGroup, allGroups: CardGroup[]): boolean {
-  if (group.type === "straight-flush") {
-    return true;
-  }
-
-  return group.type === "bomb" && group.cards.length === 4 && !hasLargerSameBomb(group, allGroups);
+function isHardProtectedPower(group: CardGroup, allGroups: CardGroup[], gameRank: GameRank): boolean {
+  return powerProtectionLevel(group, allGroups, gameRank) === "HARD";
 }
 
-function isConditionallyProtectedPower(group: CardGroup, allGroups: CardGroup[]): boolean {
-  return (group.type === "bomb" && group.cards.length >= 5 && !hasLargerSameBomb(group, allGroups)) ||
-    group.type === "joker-bomb";
+function isConditionallyProtectedPower(group: CardGroup, allGroups: CardGroup[], gameRank: GameRank): boolean {
+  return powerProtectionLevel(group, allGroups, gameRank) === "CONDITIONAL";
 }
 
 function hasLargerSameBomb(group: CardGroup, allGroups: CardGroup[]): boolean {

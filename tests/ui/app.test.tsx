@@ -7,6 +7,7 @@ const cardA: Card = { id: "SA-1", kind: "suited", rank: "A", suit: "spades", cop
 const cardK: Card = { id: "SK-1", kind: "suited", rank: "K", suit: "spades", copy: 1 };
 const cardQ: Card = { id: "SQ-1", kind: "suited", rank: "Q", suit: "spades", copy: 1 };
 const card5: Card = { id: "C5-1", kind: "suited", rank: "5", suit: "clubs", copy: 1 };
+const createRoomTestKey = "not-a-uuid";
 
 afterEach(() => {
   delete (globalThis as { __GUANDAN_AI_PAUSE_MS__?: number }).__GUANDAN_AI_PAUSE_MS__;
@@ -17,6 +18,11 @@ afterEach(() => {
 });
 
 it("defaults new rooms to rank 2 and does not render the game information sidebar", async () => {
+  vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(createRoomTestKey as `${string}-${string}-${string}-${string}-${string}`);
+  vi.spyOn(globalThis.crypto, "getRandomValues").mockImplementation(<T extends ArrayBufferView | null>(values: T): T => {
+    if (values instanceof Uint32Array) values[0] = 17;
+    return values;
+  });
   mockFetchQueue([{ room: createRoom({ rank: "2" }) }, { plans: [] }]);
 
   render(<App />);
@@ -25,12 +31,17 @@ it("defaults new rooms to rank 2 and does not render the game information sideba
   expect(screen.queryByRole("heading", { name: "牌局信息" })).not.toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: /开房/ }));
-  await waitFor(() => expect(fetch).toHaveBeenCalledWith(
-    "/api/rooms",
-    expect.objectContaining({
-      body: JSON.stringify({ rank: "2", pendingTributeItems: [] }),
-    }),
-  ));
+  await waitFor(() => {
+    const [url, request] = vi.mocked(fetch).mock.calls[0]!;
+    const body = JSON.parse(String((request as RequestInit).body));
+    expect(url).toBe("/api/rooms");
+    expect((request as RequestInit).headers).toEqual({
+      "Content-Type": "application/json",
+      "Idempotency-Key": createRoomTestKey,
+    });
+    expect(body).toEqual({ rank: "2", seed: 17, pendingTributeItems: [] });
+    expect(String((request as RequestInit).body)).not.toMatch(/idempotency|identity|publicIdentity|gameSequence|gameId/);
+  });
 });
 
 it("shows low-card flags only for players holding one through nine cards", async () => {

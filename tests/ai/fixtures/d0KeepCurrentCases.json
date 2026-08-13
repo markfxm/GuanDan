@@ -1,0 +1,991 @@
+{
+  "schemaVersion": "d0-keep-current-fixture-v1",
+  "sourceCommit": "e2a20e18f8e5c0871db38ad69426262e43766ce1",
+  "sourceTag": "ai-benchmark-d0-baseline",
+  "generatorCommit": "1963d7fe9921996b6fba7cbd546346b3f6270cc8",
+  "generatorVersion": "d0-fixture-v1",
+  "generatorCodeTreeSha256": "8e5bbe872c460a7cffc0be6b859e95bc23a4ff63c1ab34cd6622da24e3bae1c3",
+  "inputSha256": "725358f1fc3e3907221128e91015e8f15eded68c5ea790c00bf843604c194906",
+  "outputSha256": "87f62e6ba533a7b0d8d364298085fa8b050291ee450e9e6de160b6a66043e70e",
+  "cases": [
+    {
+      "caseId": "lead-single",
+      "observation": {
+        "hand": [
+          {
+            "id": "S3-1",
+            "kind": "suited",
+            "rank": "3",
+            "suit": "spades",
+            "copy": 1
+          },
+          {
+            "id": "C5-1",
+            "kind": "suited",
+            "rank": "5",
+            "suit": "clubs",
+            "copy": 1
+          },
+          {
+            "id": "H7-1",
+            "kind": "suited",
+            "rank": "7",
+            "suit": "hearts",
+            "copy": 1
+          },
+          {
+            "id": "D9-1",
+            "kind": "suited",
+            "rank": "9",
+            "suit": "diamonds",
+            "copy": 1
+          }
+        ],
+        "gameRank": "10",
+        "seat": 1,
+        "partnerSeat": 3,
+        "playedCards": [],
+        "handCounts": {
+          "0": 8,
+          "1": 4,
+          "2": 8,
+          "3": 8
+        },
+        "finishOrder": [],
+        "partnerPassedCurrentTrick": false
+      },
+      "runtimeInput": {
+        "candidatePlans": [],
+        "generatedTurn": -1,
+        "configVersion": "",
+        "needsReplan": true
+      },
+      "config": {
+        "analysisCacheSize": 64,
+        "planning": {
+          "maxPlans": 5,
+          "beamWidth": 1,
+          "timeBudgetMs": 0
+        },
+        "version": "ai-core-v1",
+        "turn": 0
+      },
+      "inputSha256": "322220e29b26e70060f121cee103b86c1b2ebd51204c4a31011639e45f3678f3",
+      "expected": {
+        "actionStableKey": "play:C5-1",
+        "action": {
+          "type": "play",
+          "group": {
+            "id": "single:C5-1",
+            "type": "single",
+            "label": "single (♣5#1)",
+            "purpose": "risk",
+            "cards": [
+              {
+                "id": "C5-1",
+                "kind": "suited",
+                "rank": "5",
+                "suit": "clubs",
+                "copy": 1
+              }
+            ],
+            "wildcards": [],
+            "strength": 4
+          }
+        },
+        "runtime": {
+          "handKey": "C5-1|D9-1|H7-1|S3-1",
+          "candidatePlans": [
+            {
+              "id": "fast-greedy",
+              "groups": [
+                {
+                  "id": "single:D9-1",
+                  "type": "single",
+                  "label": "single (♦9#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "D9-1",
+                      "kind": "suited",
+                      "rank": "9",
+                      "suit": "diamonds",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 8
+                },
+                {
+                  "id": "single:H7-1",
+                  "type": "single",
+                  "label": "single (♥7#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "H7-1",
+                      "kind": "suited",
+                      "rank": "7",
+                      "suit": "hearts",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 6
+                },
+                {
+                  "id": "single:C5-1",
+                  "type": "single",
+                  "label": "single (♣5#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "C5-1",
+                      "kind": "suited",
+                      "rank": "5",
+                      "suit": "clubs",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 4
+                },
+                {
+                  "id": "single:S3-1",
+                  "type": "single",
+                  "label": "single (♠3#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "S3-1",
+                      "kind": "suited",
+                      "rank": "3",
+                      "suit": "spades",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 2
+                }
+              ],
+              "metrics": {
+                "hardViolations": 0,
+                "protectionLoss": 0,
+                "estimatedTurns": 4,
+                "lowSingleCount": 4,
+                "retainedControl": 0,
+                "wildcardFlexibility": 0,
+                "responseCoverage": 0,
+                "leadFlexibility": 4,
+                "fallbackScore": 0
+              }
+            }
+          ],
+          "activePlanId": "fast-greedy",
+          "generatedTurn": 0,
+          "configVersion": "ai-core-v1",
+          "needsReplan": false
+        },
+        "runtimeCanonicalJson": "{\"activePlanId\":\"fast-greedy\",\"candidatePlans\":[{\"groups\":[{\"cards\":[{\"copy\":1,\"id\":\"D9-1\",\"kind\":\"suited\",\"rank\":\"9\",\"suit\":\"diamonds\"}],\"id\":\"single:D9-1\",\"label\":\"single (♦9#1)\",\"purpose\":\"risk\",\"strength\":8,\"type\":\"single\",\"wildcards\":[]},{\"cards\":[{\"copy\":1,\"id\":\"H7-1\",\"kind\":\"suited\",\"rank\":\"7\",\"suit\":\"hearts\"}],\"id\":\"single:H7-1\",\"label\":\"single (♥7#1)\",\"purpose\":\"risk\",\"strength\":6,\"type\":\"single\",\"wildcards\":[]},{\"cards\":[{\"copy\":1,\"id\":\"C5-1\",\"kind\":\"suited\",\"rank\":\"5\",\"suit\":\"clubs\"}],\"id\":\"single:C5-1\",\"label\":\"single (♣5#1)\",\"purpose\":\"risk\",\"strength\":4,\"type\":\"single\",\"wildcards\":[]},{\"cards\":[{\"copy\":1,\"id\":\"S3-1\",\"kind\":\"suited\",\"rank\":\"3\",\"suit\":\"spades\"}],\"id\":\"single:S3-1\",\"label\":\"single (♠3#1)\",\"purpose\":\"risk\",\"strength\":2,\"type\":\"single\",\"wildcards\":[]}],\"id\":\"fast-greedy\",\"metrics\":{\"estimatedTurns\":4,\"fallbackScore\":0,\"hardViolations\":0,\"leadFlexibility\":4,\"lowSingleCount\":4,\"protectionLoss\":0,\"responseCoverage\":0,\"retainedControl\":0,\"wildcardFlexibility\":0}}],\"configVersion\":\"ai-core-v1\",\"generatedTurn\":0,\"handKey\":\"C5-1|D9-1|H7-1|S3-1\",\"needsReplan\":false}",
+        "publicTraceHash": "f11757e42ac60d9a4d4377785910f28650c113eba43d813c6eceba9a585d16d0",
+        "schemaVersion": "d0-keep-current-fixture-v1",
+        "engineVersion": "d0-ai@e2a20e18f8e5c0871db38ad69426262e43766ce1"
+      }
+    },
+    {
+      "caseId": "follow-normal",
+      "observation": {
+        "hand": [
+          {
+            "id": "S6-1",
+            "kind": "suited",
+            "rank": "6",
+            "suit": "spades",
+            "copy": 1
+          },
+          {
+            "id": "C7-1",
+            "kind": "suited",
+            "rank": "7",
+            "suit": "clubs",
+            "copy": 1
+          },
+          {
+            "id": "H8-1",
+            "kind": "suited",
+            "rank": "8",
+            "suit": "hearts",
+            "copy": 1
+          }
+        ],
+        "gameRank": "10",
+        "seat": 1,
+        "partnerSeat": 3,
+        "playedCards": [
+          {
+            "id": "S5-2",
+            "kind": "suited",
+            "rank": "5",
+            "suit": "spades",
+            "copy": 2
+          }
+        ],
+        "handCounts": {
+          "0": 8,
+          "1": 3,
+          "2": 8,
+          "3": 8
+        },
+        "lastPlay": {
+          "id": "single:S5-2",
+          "type": "single",
+          "label": "single (♠5#2)",
+          "purpose": "risk",
+          "cards": [
+            {
+              "id": "S5-2",
+              "kind": "suited",
+              "rank": "5",
+              "suit": "spades",
+              "copy": 2
+            }
+          ],
+          "wildcards": [],
+          "strength": 4
+        },
+        "lastPlaySeat": 0,
+        "finishOrder": [],
+        "partnerPassedCurrentTrick": false
+      },
+      "runtimeInput": {
+        "candidatePlans": [],
+        "generatedTurn": -1,
+        "configVersion": "",
+        "needsReplan": true
+      },
+      "config": {
+        "analysisCacheSize": 64,
+        "planning": {
+          "maxPlans": 5,
+          "beamWidth": 1,
+          "timeBudgetMs": 0
+        },
+        "version": "ai-core-v1",
+        "turn": 0
+      },
+      "inputSha256": "962b26de0ed04ca3375a670f13a4c57651af9e9b60e9b79fe3d5b96a23bfa498",
+      "expected": {
+        "actionStableKey": "play:C7-1",
+        "action": {
+          "type": "play",
+          "group": {
+            "id": "single:C7-1",
+            "type": "single",
+            "label": "single (♣7#1)",
+            "purpose": "risk",
+            "cards": [
+              {
+                "id": "C7-1",
+                "kind": "suited",
+                "rank": "7",
+                "suit": "clubs",
+                "copy": 1
+              }
+            ],
+            "wildcards": [],
+            "strength": 6
+          }
+        },
+        "runtime": {
+          "handKey": "C7-1|H8-1|S6-1",
+          "candidatePlans": [
+            {
+              "id": "fast-greedy",
+              "groups": [
+                {
+                  "id": "single:H8-1",
+                  "type": "single",
+                  "label": "single (♥8#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "H8-1",
+                      "kind": "suited",
+                      "rank": "8",
+                      "suit": "hearts",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 7
+                },
+                {
+                  "id": "single:C7-1",
+                  "type": "single",
+                  "label": "single (♣7#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "C7-1",
+                      "kind": "suited",
+                      "rank": "7",
+                      "suit": "clubs",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 6
+                },
+                {
+                  "id": "single:S6-1",
+                  "type": "single",
+                  "label": "single (♠6#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "S6-1",
+                      "kind": "suited",
+                      "rank": "6",
+                      "suit": "spades",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 5
+                }
+              ],
+              "metrics": {
+                "hardViolations": 0,
+                "protectionLoss": 0,
+                "estimatedTurns": 3,
+                "lowSingleCount": 3,
+                "retainedControl": 0,
+                "wildcardFlexibility": 0,
+                "responseCoverage": 0,
+                "leadFlexibility": 3,
+                "fallbackScore": 0
+              }
+            }
+          ],
+          "activePlanId": "fast-greedy",
+          "generatedTurn": 0,
+          "configVersion": "ai-core-v1",
+          "needsReplan": false
+        },
+        "runtimeCanonicalJson": "{\"activePlanId\":\"fast-greedy\",\"candidatePlans\":[{\"groups\":[{\"cards\":[{\"copy\":1,\"id\":\"H8-1\",\"kind\":\"suited\",\"rank\":\"8\",\"suit\":\"hearts\"}],\"id\":\"single:H8-1\",\"label\":\"single (♥8#1)\",\"purpose\":\"risk\",\"strength\":7,\"type\":\"single\",\"wildcards\":[]},{\"cards\":[{\"copy\":1,\"id\":\"C7-1\",\"kind\":\"suited\",\"rank\":\"7\",\"suit\":\"clubs\"}],\"id\":\"single:C7-1\",\"label\":\"single (♣7#1)\",\"purpose\":\"risk\",\"strength\":6,\"type\":\"single\",\"wildcards\":[]},{\"cards\":[{\"copy\":1,\"id\":\"S6-1\",\"kind\":\"suited\",\"rank\":\"6\",\"suit\":\"spades\"}],\"id\":\"single:S6-1\",\"label\":\"single (♠6#1)\",\"purpose\":\"risk\",\"strength\":5,\"type\":\"single\",\"wildcards\":[]}],\"id\":\"fast-greedy\",\"metrics\":{\"estimatedTurns\":3,\"fallbackScore\":0,\"hardViolations\":0,\"leadFlexibility\":3,\"lowSingleCount\":3,\"protectionLoss\":0,\"responseCoverage\":0,\"retainedControl\":0,\"wildcardFlexibility\":0}}],\"configVersion\":\"ai-core-v1\",\"generatedTurn\":0,\"handKey\":\"C7-1|H8-1|S6-1\",\"needsReplan\":false}",
+        "publicTraceHash": "746edf3809d02a82fbafa4ff2386c1db30bfdd0f389cff51043ec1270326fac2",
+        "schemaVersion": "d0-keep-current-fixture-v1",
+        "engineVersion": "d0-ai@e2a20e18f8e5c0871db38ad69426262e43766ce1"
+      }
+    },
+    {
+      "caseId": "follow-pass-only",
+      "observation": {
+        "hand": [
+          {
+            "id": "S3-1",
+            "kind": "suited",
+            "rank": "3",
+            "suit": "spades",
+            "copy": 1
+          },
+          {
+            "id": "C4-1",
+            "kind": "suited",
+            "rank": "4",
+            "suit": "clubs",
+            "copy": 1
+          },
+          {
+            "id": "H5-1",
+            "kind": "suited",
+            "rank": "5",
+            "suit": "hearts",
+            "copy": 1
+          }
+        ],
+        "gameRank": "10",
+        "seat": 1,
+        "partnerSeat": 3,
+        "playedCards": [
+          {
+            "id": "SJ-2",
+            "kind": "suited",
+            "rank": "J",
+            "suit": "spades",
+            "copy": 2
+          }
+        ],
+        "handCounts": {
+          "0": 8,
+          "1": 3,
+          "2": 8,
+          "3": 8
+        },
+        "lastPlay": {
+          "id": "single:SJ-2",
+          "type": "single",
+          "label": "single (♠J#2)",
+          "purpose": "risk",
+          "cards": [
+            {
+              "id": "SJ-2",
+              "kind": "suited",
+              "rank": "J",
+              "suit": "spades",
+              "copy": 2
+            }
+          ],
+          "wildcards": [],
+          "strength": 9
+        },
+        "lastPlaySeat": 0,
+        "finishOrder": [],
+        "partnerPassedCurrentTrick": false
+      },
+      "runtimeInput": {
+        "candidatePlans": [],
+        "generatedTurn": -1,
+        "configVersion": "",
+        "needsReplan": true
+      },
+      "config": {
+        "analysisCacheSize": 64,
+        "planning": {
+          "maxPlans": 5,
+          "beamWidth": 1,
+          "timeBudgetMs": 0
+        },
+        "version": "ai-core-v1",
+        "turn": 0
+      },
+      "inputSha256": "e8efbba2399e95a791d7b7ee0fd048e5299119688159e410cf15c35caaf383e8",
+      "expected": {
+        "actionStableKey": "pass",
+        "action": {
+          "type": "pass"
+        },
+        "runtime": {
+          "handKey": "C4-1|H5-1|S3-1",
+          "candidatePlans": [
+            {
+              "id": "fast-greedy",
+              "groups": [
+                {
+                  "id": "single:H5-1",
+                  "type": "single",
+                  "label": "single (♥5#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "H5-1",
+                      "kind": "suited",
+                      "rank": "5",
+                      "suit": "hearts",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 4
+                },
+                {
+                  "id": "single:C4-1",
+                  "type": "single",
+                  "label": "single (♣4#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "C4-1",
+                      "kind": "suited",
+                      "rank": "4",
+                      "suit": "clubs",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 3
+                },
+                {
+                  "id": "single:S3-1",
+                  "type": "single",
+                  "label": "single (♠3#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "S3-1",
+                      "kind": "suited",
+                      "rank": "3",
+                      "suit": "spades",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 2
+                }
+              ],
+              "metrics": {
+                "hardViolations": 0,
+                "protectionLoss": 0,
+                "estimatedTurns": 3,
+                "lowSingleCount": 3,
+                "retainedControl": 0,
+                "wildcardFlexibility": 0,
+                "responseCoverage": 0,
+                "leadFlexibility": 3,
+                "fallbackScore": 0
+              }
+            }
+          ],
+          "activePlanId": "fast-greedy",
+          "generatedTurn": 0,
+          "configVersion": "ai-core-v1",
+          "needsReplan": false
+        },
+        "runtimeCanonicalJson": "{\"activePlanId\":\"fast-greedy\",\"candidatePlans\":[{\"groups\":[{\"cards\":[{\"copy\":1,\"id\":\"H5-1\",\"kind\":\"suited\",\"rank\":\"5\",\"suit\":\"hearts\"}],\"id\":\"single:H5-1\",\"label\":\"single (♥5#1)\",\"purpose\":\"risk\",\"strength\":4,\"type\":\"single\",\"wildcards\":[]},{\"cards\":[{\"copy\":1,\"id\":\"C4-1\",\"kind\":\"suited\",\"rank\":\"4\",\"suit\":\"clubs\"}],\"id\":\"single:C4-1\",\"label\":\"single (♣4#1)\",\"purpose\":\"risk\",\"strength\":3,\"type\":\"single\",\"wildcards\":[]},{\"cards\":[{\"copy\":1,\"id\":\"S3-1\",\"kind\":\"suited\",\"rank\":\"3\",\"suit\":\"spades\"}],\"id\":\"single:S3-1\",\"label\":\"single (♠3#1)\",\"purpose\":\"risk\",\"strength\":2,\"type\":\"single\",\"wildcards\":[]}],\"id\":\"fast-greedy\",\"metrics\":{\"estimatedTurns\":3,\"fallbackScore\":0,\"hardViolations\":0,\"leadFlexibility\":3,\"lowSingleCount\":3,\"protectionLoss\":0,\"responseCoverage\":0,\"retainedControl\":0,\"wildcardFlexibility\":0}}],\"configVersion\":\"ai-core-v1\",\"generatedTurn\":0,\"handKey\":\"C4-1|H5-1|S3-1\",\"needsReplan\":false}",
+        "publicTraceHash": "16e9138bdfc258ab8061516072d62bd39a34ad3857211ec501cbb2a57285546f",
+        "schemaVersion": "d0-keep-current-fixture-v1",
+        "engineVersion": "d0-ai@e2a20e18f8e5c0871db38ad69426262e43766ce1"
+      }
+    },
+    {
+      "caseId": "complete-replan",
+      "observation": {
+        "hand": [
+          {
+            "id": "S4-1",
+            "kind": "suited",
+            "rank": "4",
+            "suit": "spades",
+            "copy": 1
+          },
+          {
+            "id": "C6-1",
+            "kind": "suited",
+            "rank": "6",
+            "suit": "clubs",
+            "copy": 1
+          },
+          {
+            "id": "H8-1",
+            "kind": "suited",
+            "rank": "8",
+            "suit": "hearts",
+            "copy": 1
+          },
+          {
+            "id": "D9-1",
+            "kind": "suited",
+            "rank": "9",
+            "suit": "diamonds",
+            "copy": 1
+          }
+        ],
+        "gameRank": "10",
+        "seat": 1,
+        "partnerSeat": 3,
+        "playedCards": [],
+        "handCounts": {
+          "0": 8,
+          "1": 4,
+          "2": 8,
+          "3": 8
+        },
+        "finishOrder": [],
+        "partnerPassedCurrentTrick": false
+      },
+      "runtimeInput": {
+        "handKey": "obsolete",
+        "candidatePlans": [],
+        "generatedTurn": 0,
+        "configVersion": "shadow-v1",
+        "needsReplan": false
+      },
+      "config": {
+        "analysisCacheSize": 64,
+        "planning": {
+          "maxPlans": 5,
+          "beamWidth": 1,
+          "timeBudgetMs": 0
+        },
+        "version": "ai-core-v1",
+        "turn": 0
+      },
+      "inputSha256": "83ce64eff07972a0f6465892c34e1e4b39462d94dd139e235257bec14667af03",
+      "expected": {
+        "actionStableKey": "play:C6-1",
+        "action": {
+          "type": "play",
+          "group": {
+            "id": "single:C6-1",
+            "type": "single",
+            "label": "single (♣6#1)",
+            "purpose": "risk",
+            "cards": [
+              {
+                "id": "C6-1",
+                "kind": "suited",
+                "rank": "6",
+                "suit": "clubs",
+                "copy": 1
+              }
+            ],
+            "wildcards": [],
+            "strength": 5
+          }
+        },
+        "runtime": {
+          "handKey": "C6-1|D9-1|H8-1|S4-1",
+          "candidatePlans": [
+            {
+              "id": "fast-greedy",
+              "groups": [
+                {
+                  "id": "single:D9-1",
+                  "type": "single",
+                  "label": "single (♦9#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "D9-1",
+                      "kind": "suited",
+                      "rank": "9",
+                      "suit": "diamonds",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 8
+                },
+                {
+                  "id": "single:H8-1",
+                  "type": "single",
+                  "label": "single (♥8#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "H8-1",
+                      "kind": "suited",
+                      "rank": "8",
+                      "suit": "hearts",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 7
+                },
+                {
+                  "id": "single:C6-1",
+                  "type": "single",
+                  "label": "single (♣6#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "C6-1",
+                      "kind": "suited",
+                      "rank": "6",
+                      "suit": "clubs",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 5
+                },
+                {
+                  "id": "single:S4-1",
+                  "type": "single",
+                  "label": "single (♠4#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "S4-1",
+                      "kind": "suited",
+                      "rank": "4",
+                      "suit": "spades",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 3
+                }
+              ],
+              "metrics": {
+                "hardViolations": 0,
+                "protectionLoss": 0,
+                "estimatedTurns": 4,
+                "lowSingleCount": 4,
+                "retainedControl": 0,
+                "wildcardFlexibility": 0,
+                "responseCoverage": 0,
+                "leadFlexibility": 4,
+                "fallbackScore": 0
+              }
+            }
+          ],
+          "activePlanId": "fast-greedy",
+          "generatedTurn": 0,
+          "configVersion": "ai-core-v1",
+          "needsReplan": false
+        },
+        "runtimeCanonicalJson": "{\"activePlanId\":\"fast-greedy\",\"candidatePlans\":[{\"groups\":[{\"cards\":[{\"copy\":1,\"id\":\"D9-1\",\"kind\":\"suited\",\"rank\":\"9\",\"suit\":\"diamonds\"}],\"id\":\"single:D9-1\",\"label\":\"single (♦9#1)\",\"purpose\":\"risk\",\"strength\":8,\"type\":\"single\",\"wildcards\":[]},{\"cards\":[{\"copy\":1,\"id\":\"H8-1\",\"kind\":\"suited\",\"rank\":\"8\",\"suit\":\"hearts\"}],\"id\":\"single:H8-1\",\"label\":\"single (♥8#1)\",\"purpose\":\"risk\",\"strength\":7,\"type\":\"single\",\"wildcards\":[]},{\"cards\":[{\"copy\":1,\"id\":\"C6-1\",\"kind\":\"suited\",\"rank\":\"6\",\"suit\":\"clubs\"}],\"id\":\"single:C6-1\",\"label\":\"single (♣6#1)\",\"purpose\":\"risk\",\"strength\":5,\"type\":\"single\",\"wildcards\":[]},{\"cards\":[{\"copy\":1,\"id\":\"S4-1\",\"kind\":\"suited\",\"rank\":\"4\",\"suit\":\"spades\"}],\"id\":\"single:S4-1\",\"label\":\"single (♠4#1)\",\"purpose\":\"risk\",\"strength\":3,\"type\":\"single\",\"wildcards\":[]}],\"id\":\"fast-greedy\",\"metrics\":{\"estimatedTurns\":4,\"fallbackScore\":0,\"hardViolations\":0,\"leadFlexibility\":4,\"lowSingleCount\":4,\"protectionLoss\":0,\"responseCoverage\":0,\"retainedControl\":0,\"wildcardFlexibility\":0}}],\"configVersion\":\"ai-core-v1\",\"generatedTurn\":0,\"handKey\":\"C6-1|D9-1|H8-1|S4-1\",\"needsReplan\":false}",
+        "publicTraceHash": "c8ec5cc242320a0c17cc69e0f0a18b85d5c4e52be56105b5c80b56585f71d918",
+        "schemaVersion": "d0-keep-current-fixture-v1",
+        "engineVersion": "d0-ai@e2a20e18f8e5c0871db38ad69426262e43766ce1"
+      }
+    },
+    {
+      "caseId": "incremental-runtime",
+      "observation": {
+        "hand": [
+          {
+            "id": "S3-1",
+            "kind": "suited",
+            "rank": "3",
+            "suit": "spades",
+            "copy": 1
+          },
+          {
+            "id": "H7-1",
+            "kind": "suited",
+            "rank": "7",
+            "suit": "hearts",
+            "copy": 1
+          },
+          {
+            "id": "D9-1",
+            "kind": "suited",
+            "rank": "9",
+            "suit": "diamonds",
+            "copy": 1
+          }
+        ],
+        "gameRank": "10",
+        "seat": 1,
+        "partnerSeat": 3,
+        "playedCards": [
+          {
+            "id": "C5-1",
+            "kind": "suited",
+            "rank": "5",
+            "suit": "clubs",
+            "copy": 1
+          }
+        ],
+        "handCounts": {
+          "0": 8,
+          "1": 3,
+          "2": 8,
+          "3": 8
+        },
+        "finishOrder": [],
+        "partnerPassedCurrentTrick": false
+      },
+      "runtimeInput": {
+        "handKey": "C5-1|D9-1|H7-1|S3-1",
+        "candidatePlans": [
+          {
+            "id": "fast-greedy",
+            "groups": [
+              {
+                "id": "single:D9-1",
+                "type": "single",
+                "label": "single (♦9#1)",
+                "purpose": "risk",
+                "cards": [
+                  {
+                    "id": "D9-1",
+                    "kind": "suited",
+                    "rank": "9",
+                    "suit": "diamonds",
+                    "copy": 1
+                  }
+                ],
+                "wildcards": [],
+                "strength": 8
+              },
+              {
+                "id": "single:H7-1",
+                "type": "single",
+                "label": "single (♥7#1)",
+                "purpose": "risk",
+                "cards": [
+                  {
+                    "id": "H7-1",
+                    "kind": "suited",
+                    "rank": "7",
+                    "suit": "hearts",
+                    "copy": 1
+                  }
+                ],
+                "wildcards": [],
+                "strength": 6
+              },
+              {
+                "id": "single:C5-1",
+                "type": "single",
+                "label": "single (♣5#1)",
+                "purpose": "risk",
+                "cards": [
+                  {
+                    "id": "C5-1",
+                    "kind": "suited",
+                    "rank": "5",
+                    "suit": "clubs",
+                    "copy": 1
+                  }
+                ],
+                "wildcards": [],
+                "strength": 4
+              },
+              {
+                "id": "single:S3-1",
+                "type": "single",
+                "label": "single (♠3#1)",
+                "purpose": "risk",
+                "cards": [
+                  {
+                    "id": "S3-1",
+                    "kind": "suited",
+                    "rank": "3",
+                    "suit": "spades",
+                    "copy": 1
+                  }
+                ],
+                "wildcards": [],
+                "strength": 2
+              }
+            ],
+            "metrics": {
+              "hardViolations": 0,
+              "protectionLoss": 0,
+              "estimatedTurns": 4,
+              "lowSingleCount": 4,
+              "retainedControl": 0,
+              "wildcardFlexibility": 0,
+              "responseCoverage": 0,
+              "leadFlexibility": 4,
+              "fallbackScore": 0
+            }
+          }
+        ],
+        "activePlanId": "fast-greedy",
+        "generatedTurn": 0,
+        "configVersion": "ai-core-v1",
+        "needsReplan": false
+      },
+      "config": {
+        "analysisCacheSize": 64,
+        "planning": {
+          "maxPlans": 5,
+          "beamWidth": 1,
+          "timeBudgetMs": 0
+        },
+        "version": "ai-core-v1",
+        "turn": 1
+      },
+      "inputSha256": "e3c014e59276fd80add33ce7d1c1013beed922d3151b4fd2f4436bc6e8a32764",
+      "expected": {
+        "actionStableKey": "play:D9-1",
+        "action": {
+          "type": "play",
+          "group": {
+            "id": "single:D9-1",
+            "type": "single",
+            "label": "single (♦9#1)",
+            "purpose": "risk",
+            "cards": [
+              {
+                "id": "D9-1",
+                "kind": "suited",
+                "rank": "9",
+                "suit": "diamonds",
+                "copy": 1
+              }
+            ],
+            "wildcards": [],
+            "strength": 8
+          }
+        },
+        "runtime": {
+          "handKey": "D9-1|H7-1|S3-1",
+          "candidatePlans": [
+            {
+              "id": "fast-greedy",
+              "groups": [
+                {
+                  "id": "single:D9-1",
+                  "type": "single",
+                  "label": "single (♦9#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "D9-1",
+                      "kind": "suited",
+                      "rank": "9",
+                      "suit": "diamonds",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 8
+                },
+                {
+                  "id": "single:H7-1",
+                  "type": "single",
+                  "label": "single (♥7#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "H7-1",
+                      "kind": "suited",
+                      "rank": "7",
+                      "suit": "hearts",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 6
+                },
+                {
+                  "id": "single:S3-1",
+                  "type": "single",
+                  "label": "single (♠3#1)",
+                  "purpose": "risk",
+                  "cards": [
+                    {
+                      "id": "S3-1",
+                      "kind": "suited",
+                      "rank": "3",
+                      "suit": "spades",
+                      "copy": 1
+                    }
+                  ],
+                  "wildcards": [],
+                  "strength": 2
+                }
+              ],
+              "metrics": {
+                "hardViolations": 0,
+                "protectionLoss": 0,
+                "estimatedTurns": 3,
+                "lowSingleCount": 3,
+                "retainedControl": 0,
+                "wildcardFlexibility": 0,
+                "responseCoverage": 0,
+                "leadFlexibility": 3,
+                "fallbackScore": 0
+              }
+            }
+          ],
+          "activePlanId": "fast-greedy",
+          "generatedTurn": 1,
+          "configVersion": "ai-core-v1",
+          "needsReplan": false
+        },
+        "runtimeCanonicalJson": "{\"activePlanId\":\"fast-greedy\",\"candidatePlans\":[{\"groups\":[{\"cards\":[{\"copy\":1,\"id\":\"D9-1\",\"kind\":\"suited\",\"rank\":\"9\",\"suit\":\"diamonds\"}],\"id\":\"single:D9-1\",\"label\":\"single (♦9#1)\",\"purpose\":\"risk\",\"strength\":8,\"type\":\"single\",\"wildcards\":[]},{\"cards\":[{\"copy\":1,\"id\":\"H7-1\",\"kind\":\"suited\",\"rank\":\"7\",\"suit\":\"hearts\"}],\"id\":\"single:H7-1\",\"label\":\"single (♥7#1)\",\"purpose\":\"risk\",\"strength\":6,\"type\":\"single\",\"wildcards\":[]},{\"cards\":[{\"copy\":1,\"id\":\"S3-1\",\"kind\":\"suited\",\"rank\":\"3\",\"suit\":\"spades\"}],\"id\":\"single:S3-1\",\"label\":\"single (♠3#1)\",\"purpose\":\"risk\",\"strength\":2,\"type\":\"single\",\"wildcards\":[]}],\"id\":\"fast-greedy\",\"metrics\":{\"estimatedTurns\":3,\"fallbackScore\":0,\"hardViolations\":0,\"leadFlexibility\":3,\"lowSingleCount\":3,\"protectionLoss\":0,\"responseCoverage\":0,\"retainedControl\":0,\"wildcardFlexibility\":0}}],\"configVersion\":\"ai-core-v1\",\"generatedTurn\":1,\"handKey\":\"D9-1|H7-1|S3-1\",\"needsReplan\":false}",
+        "publicTraceHash": "88b8b106ab4efe8c4de38a51204f142d423ad71d869f332fdd16f635d5cc3762",
+        "schemaVersion": "d0-keep-current-fixture-v1",
+        "engineVersion": "d0-ai@e2a20e18f8e5c0871db38ad69426262e43766ce1"
+      }
+    }
+  ]
+}

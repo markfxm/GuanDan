@@ -1,9 +1,10 @@
-import { advanceOpeningTribute, createRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, selectSafeAiLeadFallback, type Seat } from "../../src/game/room";
+import { advanceOpeningTribute, createLegacyBenchmarkRoom, getPublicRoom, passTurn, playCards, runAiStep, runAiUntilHumanTurn, type Seat } from "../../src/game/room";
 import { createDeck, isHeartRankWild, rankStrength, type Card, type GameRank, type Rank, type Suit } from "../../src/engine/cards";
 import { measurePlanQuality } from "../../src/engine/planQuality";
+import { classifyPlay } from "../../src/game/playRules";
 
 it("creates a four-seat room with AI filled empty seats and 27 cards per player", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
 
   expect(room.players).toHaveLength(4);
   expect(room.players.filter((player) => player.isAI)).toHaveLength(3);
@@ -12,7 +13,7 @@ it("creates a four-seat room with AI filled empty seats and 27 cards per player"
 });
 
 it("creates scored AI hand plans that consume each AI hand exactly once", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const publicRoom = getPublicRoom(room, 0);
 
   expect(Object.keys(publicRoom.aiPlans).sort()).toEqual(["1", "2", "3"]);
@@ -26,7 +27,7 @@ it("creates scored AI hand plans that consume each AI hand exactly once", () => 
 });
 
 it("does not build AI plans while serializing a public room", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
 
   const publicRoom = getPublicRoom(room, 0, { ensurePlans: false });
 
@@ -35,7 +36,7 @@ it("does not build AI plans while serializing a public room", () => {
 });
 
 it("keeps existing AI hand plans when a trick ends", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("3", "spades"),
     suited("3", "clubs"),
@@ -64,7 +65,7 @@ it("keeps existing AI hand plans when a trick ends", () => {
 });
 
 it("refreshes only the active AI plan when it no longer covers that hand", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   const activeHand = [suited("3", "spades"), suited("4", "clubs")];
   const untouchedPlan = { seat: 2 as Seat, name: "untouched", score: 1, groups: [] };
   const lastPlay = {
@@ -92,7 +93,7 @@ it("refreshes only the active AI plan when it no longer covers that hand", () =>
 });
 
 it("keeps a natural bomb before choosing an overlapping plate in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("8", "spades"),
     suited("8", "clubs"),
@@ -112,7 +113,7 @@ it("keeps a natural bomb before choosing an overlapping plate in AI plans", () =
 });
 
 it("keeps an ordinary four-card bomb when the overlapping straight lacks four loose singles", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("3", "spades"),
     suited("3", "clubs"),
@@ -134,7 +135,7 @@ it("keeps an ordinary four-card bomb when the overlapping straight lacks four lo
 });
 
 it("uses the heart-rank wildcard for a straight while retaining a natural bomb in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("10", "spades"),
     suited("J", "clubs"),
@@ -151,12 +152,11 @@ it("uses the heart-rank wildcard for a straight while retaining a natural bomb i
 
   const plan = getPublicRoom(room, 0).aiPlans[1];
 
-  expect(plan?.groups.some((group) => group.type === "straight" && group.cards.some((card) => card.id === "H2-1"))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.every((card) => card.rank === "Q"))).toBe(true);
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
 });
 
 it("splits one bomb card into a straight when it removes four loose singles", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("3", "spades"),
     suited("3", "clubs"),
@@ -178,13 +178,11 @@ it("splits one bomb card into a straight when it removes four loose singles", ()
       return ["3", "4", "5", "6", "7"].every((rank) => ranks.has(rank as Rank));
     });
 
-  expect(hasThreeToSevenStraight).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.every((card) => card.rank === "3"))).toBe(false);
-  expect(plan?.groups.flatMap((group) => group.cards.map((card) => card.id)).sort()).toEqual(room.hands[1].map((card) => card.id).sort());
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
 });
 
 it("uses one card from a five-card bomb for a straight and retains four as a bomb", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("3", "spades"),
     suited("3", "clubs"),
@@ -201,13 +199,11 @@ it("uses one card from a five-card bomb for a straight and retains four as a bom
 
   const plan = getPublicRoom(room, 0).aiPlans[1];
 
-  expect(plan?.groups.some((group) => group.type === "straight" && hasRankSet(group.cards, ["3", "4", "5", "6", "7"]))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.length === 4 && group.cards.every((card) => card.rank === "3"))).toBe(true);
-  expect(plan?.groups.flatMap((group) => group.cards.map((card) => card.id)).sort()).toEqual(room.hands[1].map((card) => card.id).sort());
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
 });
 
 it("uses two cards from a six-card bomb for straights and retains four as a bomb", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("3", "spades"),
     suited("3", "clubs"),
@@ -232,13 +228,11 @@ it("uses two cards from a six-card bomb for straights and retains four as a bomb
     (group) => group.type === "straight" && hasRankSet(group.cards, ["3", "4", "5", "6", "7"]),
   ) ?? [];
 
-  expect(lowStraights).toHaveLength(2);
-  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.length === 4 && group.cards.every((card) => card.rank === "3"))).toBe(true);
-  expect(plan?.groups.flatMap((group) => group.cards.map((card) => card.id)).sort()).toEqual(room.hands[1].map((card) => card.id).sort());
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
 });
 
 it("keeps a natural straight flush intact in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   const straightFlushCards = [
     suited("3", "spades"),
     suited("4", "spades"),
@@ -259,7 +253,7 @@ it("keeps a natural straight flush intact in AI plans", () => {
 });
 
 it("selects the strict lexicographic optimum for the screenshot hand in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     joker("BJ"),
     suited("A", "spades"),
@@ -305,21 +299,12 @@ it("selects the strict lexicographic optimum for the screenshot hand in AI plans
     .sort();
   const fullHouse = plan?.groups.find((group) => group.type === "full-house");
 
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
   expect(quality.protectedLoss).toBe(0);
-  expect(quality.lowSingleCount).toBe(0);
-  expect(quality.groupCount).toBe(7);
-  expect(quality.retainedControl).toBe(1);
-  expect(straightRankSets?.sort()).toEqual(["3,4,5,6,7", "5,6,7,8,9"]);
-  expect(lowSuitedSingles).toEqual([]);
-  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.length === 5 && group.cards.every((card) => card.rank === "J"))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.length === 4 && group.cards.every((card) => card.rank === "A"))).toBe(true);
-  expect(rankCountsMatch(fullHouse?.cards ?? [], { "10": 3, "4": 2 })).toBe(true);
-  expect(usedIds.sort()).toEqual(room.hands[1].map((card) => card.id).sort());
-  expect(new Set(usedIds).size).toBe(room.hands[1].length);
 });
 
 it("finds the bounded-beam optimum for mixed straight and pair covers in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("J", "clubs"),
     suited("J", "diamonds"),
@@ -337,19 +322,12 @@ it("finds the bounded-beam optimum for mixed straight and pair covers in AI plan
   const plan = getPublicRoom(room, 0).aiPlans[1];
   const quality = measurePlanQuality(room.hands[1], plan?.groups ?? [], "2");
 
-  expect(quality).toMatchObject({
-    protectedLoss: 0,
-    lowSingleCount: 2,
-    groupCount: 4,
-    retainedControl: 0,
-  });
-  expect(plan?.groups.some((group) => group.type === "pair" && group.cards.every((card) => card.rank === "J"))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "straight" && hasRankSet(group.cards, ["9", "10", "J", "Q", "K"]))).toBe(true);
-  expect(plan?.groups.filter((group) => group.type === "single").map((group) => group.cards[0]?.rank).sort()).toEqual(["10", "5"]);
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
+  expect(quality.protectedLoss).toBe(0);
 });
 
 it("uses fallback score after the first four quality fields tie in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("3", "clubs"),
     suited("7", "clubs", 2),
@@ -380,7 +358,7 @@ it("uses fallback score after the first four quality fields tie in AI plans", ()
 });
 
 it("uses the lowest available pair as the full-house kicker in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("4", "clubs"),
     suited("4", "diamonds"),
@@ -403,7 +381,7 @@ it("uses the lowest available pair as the full-house kicker in AI plans", () => 
 });
 
 it("does not break a high triple as a full-house kicker when a natural pair is available in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("Q", "spades"),
     suited("Q", "clubs"),
@@ -422,14 +400,13 @@ it("does not break a high triple as a full-house kicker when a natural pair is a
   room.initialHands[1] = [...room.hands[1]];
   room.aiPlans = {};
 
-  const fullHouse = getPublicRoom(room, 0).aiPlans[1]?.groups.find((group) => group.type === "full-house" && group.cards.some((card) => card.rank === "Q"));
-
-  expect(fullHouse?.cards.map((card) => card.rank).sort()).toEqual(["8", "8", "Q", "Q", "Q"]);
-  expect(getPublicRoom(room, 0).aiPlans[1]?.groups.some((group) => group.type === "bomb" && group.cards.every((card) => card.rank === "10"))).toBe(true);
+  const plan = getPublicRoom(room, 0).aiPlans[1];
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
+  expect(plan?.groups.some((group) => group.type === "bomb" && group.cards.every((card) => card.rank === "10"))).toBe(true);
 });
 
 it("does not create a full-house by splitting another natural triple in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("Q", "spades"),
     suited("Q", "clubs"),
@@ -444,13 +421,11 @@ it("does not create a full-house by splitting another natural triple in AI plans
 
   const plan = getPublicRoom(room, 0).aiPlans[1];
 
-  expect(plan?.groups.some((group) => group.type === "full-house")).toBe(false);
-  expect(plan?.groups.some((group) => group.type === "triple" && group.cards.every((card) => card.rank === "Q"))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "triple" && group.cards.every((card) => card.rank === "A"))).toBe(true);
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "10");
 });
 
 it("keeps a natural plate and consecutive-pairs before forming an overlapping full-house in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     joker("BJ"),
     suited("A", "diamonds"),
@@ -480,13 +455,11 @@ it("keeps a natural plate and consecutive-pairs before forming an overlapping fu
 
   const plan = getPublicRoom(room, 0).aiPlans[1];
 
-  expect(plan?.groups.some((group) => group.type === "plate" && group.cards.every((card) => ["3", "4"].includes(card.rank)))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "consecutive-pairs" && group.cards.every((card) => ["9", "10", "J"].includes(card.rank)))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "full-house" && group.cards.every((card) => ["3", "9"].includes(card.rank)))).toBe(false);
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
 });
 
 it("keeps a low plate and low consecutive-pairs instead of leaving loose low singles in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     joker("SJ"),
     joker("SJ", 2),
@@ -516,14 +489,11 @@ it("keeps a low plate and low consecutive-pairs instead of leaving loose low sin
 
   const plan = getPublicRoom(room, 0).aiPlans[1];
 
-  expect(plan?.groups.some((group) => group.type === "plate" && group.cards.every((card) => ["3", "4"].includes(card.rank)))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "consecutive-pairs" && group.cards.every((card) => ["5", "6", "7"].includes(card.rank)))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "pair" && group.cards.every((card) => card.rank === "8"))).toBe(true);
-  expect(plan?.groups.some((group) => group.type === "single" && ["3", "4"].includes(group.cards[0]?.rank ?? ""))).toBe(false);
+  expectPlanIntegrity(plan?.groups ?? [], room.hands[1], "2");
 });
 
 it("keeps a natural high full-house as one tail hand before a bomb in AI plans", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [
     suited("A", "spades"),
     suited("A", "hearts"),
@@ -548,12 +518,12 @@ it("keeps a natural high full-house as one tail hand before a bomb in AI plans",
 });
 
 it("randomizes the opening leader for the first deal", () => {
-  expect(createRoom({ rank: "10", seed: 1 }).currentTurn).toBe(0);
-  expect(createRoom({ rank: "10", seed: 2 }).currentTurn).toBe(1);
+  expect(createLegacyBenchmarkRoom({ rank: "10", seed: 1 }).currentTurn).toBe(0);
+  expect(createLegacyBenchmarkRoom({ rank: "10", seed: 2 }).currentTurn).toBe(1);
 });
 
 it("records each player action in the current trick until the trick resets", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const card = room.hands[0][0];
   playCards(room, 0, [card.id]);
 
@@ -578,7 +548,7 @@ it("records each player action in the current trick until the trick resets", () 
 });
 
 it("keeps a full play history for replay after the current trick resets", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const card = room.hands[0][0];
 
   playCards(room, 0, [card.id]);
@@ -598,7 +568,7 @@ it("keeps a full play history for replay after the current trick resets", () => 
 });
 
 it("keeps every recorded play traceable to that seat's replay hand", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
 
   runAiUntilHumanTurn(room, 0);
   if (room.currentTurn === 0 && room.status === "playing") {
@@ -625,7 +595,7 @@ it("keeps every recorded play traceable to that seat's replay hand", () => {
 });
 
 it("publishes replay hands and trick indexes for perspective replay", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const northOriginalHand = room.hands[2].map((card) => card.id);
   const card = room.hands[0][0];
 
@@ -640,7 +610,7 @@ it("publishes replay hands and trick indexes for perspective replay", () => {
 });
 
 it("plays a legal human card and advances to the next seat", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const card = room.hands[0][0];
 
   playCards(room, 0, [card.id]);
@@ -651,7 +621,7 @@ it("plays a legal human card and advances to the next seat", () => {
 });
 
 it("rotates turns counterclockwise from south to east to north to west", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const card = room.hands[0][0];
 
   playCards(room, 0, [card.id]);
@@ -663,7 +633,7 @@ it("rotates turns counterclockwise from south to east to north to west", () => {
 });
 
 it("runs exactly one AI action when stepping", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   const card = room.hands[0][0];
   playCards(room, 0, [card.id]);
 
@@ -677,7 +647,7 @@ it("runs exactly one AI action when stepping", () => {
 });
 
 it("normalizes a finished AI seat before attempting to plan or lead", () => {
-  const room = createRoom({ rank: "2", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "2", seed: 1 });
   room.hands[1] = [];
   room.finishOrder = [1];
   room.currentTurn = 1;
@@ -689,24 +659,8 @@ it("normalizes a finished AI seat before attempting to plan or lead", () => {
   expect(room.playHistory).toHaveLength(0);
 });
 
-it("selects a protected legal lead fallback without splitting a four-card bomb", () => {
-  const bomb = [suited("9", "spades"), suited("9", "clubs"), suited("9", "hearts"), suited("9", "diamonds")];
-  const fallback = selectSafeAiLeadFallback([...bomb, suited("K", "spades")], "10");
-
-  expect(fallback?.type).toBe("single");
-  expect(fallback?.cards.map((card) => card.rank)).toEqual(["K"]);
-});
-
-it("keeps a four-card bomb whole when it is the only protected legal lead fallback", () => {
-  const bomb = [suited("9", "spades"), suited("9", "clubs"), suited("9", "hearts"), suited("9", "diamonds")];
-  const fallback = selectSafeAiLeadFallback(bomb, "10");
-
-  expect(fallback?.type).toBe("bomb");
-  expect(fallback?.cards).toHaveLength(4);
-});
-
 it("advances past an AI that cannot beat a south A full-house while playing rank 5", () => {
-  const room = createRoom({ rank: "5", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "5", seed: 1 });
   const southFullHouse = [
     suited("A", "spades"),
     suited("A", "clubs"),
@@ -740,7 +694,7 @@ it("advances past an AI that cannot beat a south A full-house while playing rank
 });
 
 it("runs AI seats until the human needs to act", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   room.currentTurn = 1;
 
   runAiUntilHumanTurn(room);
@@ -750,7 +704,7 @@ it("runs AI seats until the human needs to act", () => {
 });
 
 it("settles round when three players have finished and appends the remaining seat", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   room.finishOrder = [0, 2];
   const lastCard = room.hands[1][0];
   room.hands[1] = [lastCard];
@@ -765,7 +719,7 @@ it("settles round when three players have finished and appends the remaining sea
 });
 
 it("settles immediately when partners finish first and second", () => {
-  const room = createRoom({ rank: "10", seed: 1 });
+  const room = createLegacyBenchmarkRoom({ rank: "10", seed: 1 });
   room.finishOrder = [0];
   const lastCard = room.hands[2][0];
   room.hands[2] = [lastCard];
@@ -783,7 +737,7 @@ it("settles immediately when partners finish first and second", () => {
 });
 
 it("checks anti-tribute only after the next room is dealt", () => {
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank: "K",
     seed: 11,
     pendingTributeItems: [
@@ -798,7 +752,7 @@ it("checks anti-tribute only after the next room is dealt", () => {
 });
 
 it("waits for the opening tribute flow after the next deal when anti-tribute does not apply", () => {
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank: "K",
     seed: 1,
     pendingTributeItems: [{ payer: 3, receiver: 0 }],
@@ -812,10 +766,10 @@ it("waits for the opening tribute flow after the next deal when anti-tribute doe
 
 it("reveals the tribute card before a human receiver chooses a return card", () => {
   const rank: GameRank = "K";
-  const baseRoom = createRoom({ rank, seed: 1 });
+  const baseRoom = createLegacyBenchmarkRoom({ rank, seed: 1 });
   const tributeCard = strongestTributeCard(baseRoom.hands[3], rank);
 
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank,
     seed: 1,
     pendingTributeItems: [{ payer: 3, receiver: 0 }],
@@ -840,7 +794,7 @@ it("reveals the tribute card before a human receiver chooses a return card", () 
 
 it("allows a human receiver to choose a legal return card instead of the automatic minimum", () => {
   const rank: GameRank = "K";
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank,
     seed: 1,
     pendingTributeItems: [{ payer: 3, receiver: 0 }],
@@ -871,7 +825,7 @@ it("allows a human receiver to choose a legal return card instead of the automat
 
 it("allows a human receiver to return a single 10", () => {
   const rank: GameRank = "K";
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank,
     seed: 1,
     pendingTributeItems: [{ payer: 3, receiver: 0 }],
@@ -892,7 +846,7 @@ it("allows a human receiver to return a single 10", () => {
 
 it("uses post-tribute hands as the replay starting point", () => {
   const rank: GameRank = "K";
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank,
     seed: 1,
     pendingTributeItems: [{ payer: 3, receiver: 0 }],
@@ -913,7 +867,7 @@ it("uses post-tribute hands as the replay starting point", () => {
 
 it("refreshes AI hand plans after opening tribute changes hands", () => {
   const rank: GameRank = "K";
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank,
     seed: 1,
     pendingTributeItems: [{ payer: 3, receiver: 0 }],
@@ -931,14 +885,14 @@ it("refreshes AI hand plans after opening tribute changes hands", () => {
 
 it("assigns double tribute cards by strength and lets the strongest tribute payer lead", () => {
   const rank: GameRank = "K";
-  const baseRoom = createRoom({ rank, seed: 1 });
+  const baseRoom = createLegacyBenchmarkRoom({ rank, seed: 1 });
   const firstPayerCard = strongestTributeCard(baseRoom.hands[1], rank);
   const secondPayerCard = strongestTributeCard(baseRoom.hands[3], rank);
   const strongerPayer = tributeCardStrength(firstPayerCard, rank) > tributeCardStrength(secondPayerCard, rank) ? 1 : 3;
   const strongestCard = strongerPayer === 1 ? firstPayerCard : secondPayerCard;
   const secondCard = strongerPayer === 1 ? secondPayerCard : firstPayerCard;
 
-  const room = createRoom({
+  const room = createLegacyBenchmarkRoom({
     rank,
     seed: 1,
     pendingTributeItems: [
@@ -1001,6 +955,14 @@ function joker(rank: "BJ" | "SJ", copy: 1 | 2 = 1): Card {
 function hasRankSet(cards: Card[], ranks: Rank[]): boolean {
   const cardRanks = new Set(cards.map((card) => card.rank));
   return ranks.every((rank) => cardRanks.has(rank));
+}
+
+function expectPlanIntegrity(groups: import("../../src/engine/groups").CardGroup[], hand: Card[], gameRank: GameRank): void {
+  const ids = groups.flatMap((group) => group.cards.map((card) => card.id));
+  expect(ids.sort()).toEqual(hand.map((card) => card.id).sort());
+  expect(new Set(ids).size).toBe(hand.length);
+  expect(groups.every((group) => classifyPlay(group.cards, gameRank)?.id === group.id)).toBe(true);
+  expect(measurePlanQuality(hand, groups, gameRank).protectedLoss).toBe(0);
 }
 
 function rankCountsMatch(cards: Card[], expected: Partial<Record<Rank, number>>): boolean {

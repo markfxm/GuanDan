@@ -5,7 +5,7 @@ import { RANKS, type Card, type GameRank, type Suit } from "../engine/cards";
 import type { ScoredPlan } from "../engine/scorer";
 import { CardFace } from "./CardFace";
 import { groupCardsForHandDisplay } from "./handLayout";
-import { createGameRoom, generatePlans, passRoomTurn, playRoomCards, runRoomAiStep, submitOpeningTribute, type PublicRoom, type Seat, type TrickPlay } from "./api";
+import { createGameRoom, createRoomIntent, generatePlans, isRetryableCreateRoomError, passRoomTurn, playRoomCards, runRoomAiStep, submitOpeningTribute, type CreateRoomIntent, type PublicRoom, type Seat, type TrickPlay } from "./api";
 import { draggedCardIds, ManualGroupTray, setDraggedCardIds } from "./ManualGroupTray";
 import {
   addCardToManualGroup,
@@ -38,6 +38,10 @@ type BombEffectState = {
   eventId: string;
 };
 
+type CreateIntentRuntime =
+  | { kind: "pending"; intent: CreateRoomIntent }
+  | { kind: "uncertain"; intent: CreateRoomIntent };
+
 export function App() {
   const [gameRank, setGameRank] = useState<GameRank>(DEFAULT_RANK);
   const [room, setRoom] = useState<PublicRoom>();
@@ -58,7 +62,18 @@ export function App() {
   const [replaySpeed, setReplaySpeed] = useState(1);
   const [replayScale, setReplayScale] = useState(1);
   const [bombEffect, setBombEffect] = useState<BombEffectState>();
+  const [retryableCreateIntent, setRetryableCreateIntent] = useState<CreateRoomIntent>();
   const bombEffectTimerRef = useRef<number>();
+  const createIntentRef = useRef<CreateIntentRuntime | undefined>(undefined);
+  const mountedOwnerRef = useRef(true);
+
+  useEffect(() => {
+    mountedOwnerRef.current = true;
+    return () => {
+      mountedOwnerRef.current = false;
+      createIntentRef.current = undefined;
+    };
+  }, []);
 
   const visibleHumanHand = useMemo(() => ungroupedCards(room?.humanHand ?? [], manualGroups), [room?.humanHand, manualGroups]);
   const groupedHand = useMemo(() => groupCardsForHandDisplay(visibleHumanHand, gameRank), [visibleHumanHand, gameRank]);
@@ -259,9 +274,65 @@ export function App() {
     return () => window.removeEventListener("keydown", handleReplayKeyDown);
   }, [room, showReplayDialog]);
 
+  async function runCreateIntent(
+    pendingStatus: string,
+    intent: CreateRoomIntent,
+    applySuccess: (nextRoom: PublicRoom) => void,
+  ) {
+    const retryingExistingIntent = createIntentRef.current?.kind === "uncertain"
+      && createIntentRef.current.intent === intent;
+    createIntentRef.current = { kind: "pending", intent };
+    if (!retryingExistingIntent) {
+      setRetryableCreateIntent(undefined);
+    }
+
+    await runAction(pendingStatus, async () => {
+      let nextRoom: PublicRoom;
+      try {
+        nextRoom = await createGameRoom(intent);
+      } catch (error) {
+        if (!mountedOwnerRef.current) {
+          return;
+        }
+        if (isRetryableCreateRoomError(error)) {
+          createIntentRef.current = { kind: "uncertain", intent };
+          setRetryableCreateIntent(intent);
+        } else {
+          createIntentRef.current = undefined;
+          setRetryableCreateIntent(undefined);
+        }
+        throw error;
+      }
+
+      if (!mountedOwnerRef.current) {
+        return;
+      }
+      createIntentRef.current = undefined;
+      setRetryableCreateIntent(undefined);
+      applySuccess(nextRoom);
+    });
+  }
+
+  function reportCreatePreparationFailure(error: unknown) {
+    if (mountedOwnerRef.current) {
+      setStatus(error instanceof Error ? error.message : "操作失败。");
+    }
+  }
+
   async function handleCreateRoom() {
-    await runAction("正在创建房间...", async () => {
-      const nextRoom = await createGameRoom(gameRank);
+    if (createIntentRef.current !== undefined) {
+      return;
+    }
+
+    let intent: CreateRoomIntent;
+    try {
+      intent = createRoomIntent(gameRank);
+    } catch (error) {
+      reportCreatePreparationFailure(error);
+      return;
+    }
+
+    await runCreateIntent("正在创建房间...", intent, (nextRoom) => {
       setRoom(nextRoom);
       setGameRank(nextRoom.rank);
       setSelectedCardIds([]);
@@ -271,15 +342,41 @@ export function App() {
   }
 
   async function handleNextRoom() {
+    if (createIntentRef.current !== undefined) {
+      return;
+    }
+
     const nextRank = room?.settlement?.nextRank ?? gameRank;
     const pendingTributeItems = room?.settlement?.tribute.status === "pending" ? room.settlement.tribute.items : [];
+    let intent: CreateRoomIntent;
+    try {
+      intent = createRoomIntent(nextRank, pendingTributeItems);
+    } catch (error) {
+      reportCreatePreparationFailure(error);
+      return;
+    }
+
     setGameRank(nextRank);
-    await runAction("正在创建下一局...", async () => {
-      const nextRoom = await createGameRoom(nextRank, pendingTributeItems);
+    await runCreateIntent("正在创建下一局...", intent, (nextRoom) => {
       setRoom(nextRoom);
       setSelectedCardIds([]);
       setShowSettlementDialog(false);
       setStatus(openingTributeText(nextRoom) ?? `下一局开始，当前打 ${nextRank}。`);
+    });
+  }
+
+  async function handleRetryCreate() {
+    const runtime = createIntentRef.current;
+    if (runtime?.kind !== "uncertain") {
+      return;
+    }
+
+    await runCreateIntent("正在重试创建...", runtime.intent, (nextRoom) => {
+      setRoom(nextRoom);
+      setGameRank(nextRoom.rank);
+      setSelectedCardIds([]);
+      setShowSettlementDialog(nextRoom.status === "finished");
+      setStatus(openingTributeText(nextRoom) ?? "房间已创建，轮到你先出。");
     });
   }
 
@@ -312,15 +409,22 @@ export function App() {
   }
 
   async function runAction(pendingStatus: string, action: () => Promise<void>) {
+    if (!mountedOwnerRef.current) {
+      return;
+    }
     setLoading(true);
     setStatus(pendingStatus);
 
     try {
       await action();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "操作失败。");
+      if (mountedOwnerRef.current) {
+        setStatus(error instanceof Error ? error.message : "操作失败。");
+      }
     } finally {
-      setLoading(false);
+      if (mountedOwnerRef.current) {
+        setLoading(false);
+      }
     }
   }
 
@@ -406,10 +510,15 @@ export function App() {
                   </option>
                 ))}
               </select>
-              <button type="button" onClick={handleCreateRoom} disabled={loading}>
+              <button type="button" onClick={handleCreateRoom} disabled={loading || createIntentRef.current !== undefined}>
                 <DoorOpen aria-hidden="true" size={18} />
                 开房
               </button>
+              {retryableCreateIntent !== undefined && (
+                <button type="button" onClick={handleRetryCreate} disabled={loading}>
+                  重试创建
+                </button>
+              )}
               <button
                 className={`replay-button${replayAvailable ? " ready" : ""}`}
                 data-testid="replay-button"
@@ -527,7 +636,7 @@ export function App() {
                   <span>胜方：{room.settlement.winningTeam === 0 ? "南北队" : "东西队"}</span>
                   <span>升级：{room.settlement.levelStep}，下一局打 {room.settlement.nextRank}</span>
                   <span>{tributeText(room)}</span>
-                  <button type="button" onClick={handleNextRoom} disabled={loading}>
+                  <button type="button" onClick={handleNextRoom} disabled={loading || createIntentRef.current !== undefined}>
                     下一局
                   </button>
                 </div>
@@ -567,7 +676,7 @@ export function App() {
             <p>{finishRankingText(room)}</p>
             <p>{nextRoundTributeText(room)}</p>
             <div className="dialog-actions">
-              <button className="primary-button" type="button" onClick={handleNextRoom} disabled={loading}>
+              <button className="primary-button" type="button" onClick={handleNextRoom} disabled={loading || createIntentRef.current !== undefined}>
                 进行下一局
               </button>
               <button type="button" onClick={() => setShowSettlementDialog(false)} disabled={loading}>
