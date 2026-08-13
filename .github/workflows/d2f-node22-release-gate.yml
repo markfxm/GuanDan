@@ -39,7 +39,7 @@ jobs:
           $npmVersion = npm --version
           $head = git rev-parse HEAD
           $initialNode22WorkflowHead = '2c78fb3040714b3547a2cd18ca30ca7a40ed7260'
-          $prerequisiteHead = '7e0d9ea133e4c4dd41402f652b52a881d880d829'
+          $prerequisiteHead = '91816126cbc5e97df45a7360dcd6b67c4e35352e'
           Write-Host "head=$head"
           Write-Host "node=$nodeVersion"
           Write-Host "npm=$npmVersion"
@@ -58,12 +58,19 @@ jobs:
           @(
             '.github/workflows/ci.yml',
             '.github/workflows/d2f-node22-release-gate.yml',
+            'scripts/replayD1TopKBenchmark.ts',
+            'scripts/runAiBenchmark.ts',
+            'src/ai/particles/constrainedParticleSampler.ts',
+            'src/game/room.ts',
+            'tests/ai/publicLedgerTributeReset.test.ts',
             'tests/benchmark/cli.test.ts',
             'tests/benchmark/d0FixtureSourceWorktree.ts',
             'tests/benchmark/d1CalibrationReview.test.ts',
+            'tests/benchmark/d1ReplayCli.test.ts',
             'tests/benchmark/keepCurrentLock.test.ts',
             'tests/benchmark/legacyD1Compatibility.test.ts',
-            'tests/benchmark/reproducibility.test.ts'
+            'tests/benchmark/reproducibility.test.ts',
+            'tests/benchmark/workerStartupFailure.test.ts'
           ) | ForEach-Object { [void]$allowedChangedPaths.Add($_) }
           $changed = @(git diff --name-only "$env:D2F_PRODUCTION_HEAD..HEAD")
           $unexpected = @($changed | Where-Object { -not $allowedChangedPaths.Contains($_) })
