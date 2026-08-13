@@ -3387,10 +3387,10 @@ tests/engine/planner.test.ts remains included. It is assigned to its own slow sh
 
 The fresh tracked test manifest is:
 
-tracked=145
-included=103
+tracked=147
+included=105
 excluded=42
-union=145
+union=147
 missing=0
 duplicate=0
 overlap=0
@@ -3469,6 +3469,8 @@ tests/ai/rollout/rolloutOrchestrator.test.ts
 tests/ai/rollout/rolloutPrivacyAst.test.ts
 tests/ai/rollout/teamUtility.test.ts
 tests/ai/strategicHistory.test.ts
+tests/benchmark/d1ReplayCli.test.ts
+tests/benchmark/workerStartupFailure.test.ts
 tests/engine/cards.test.ts
 tests/engine/groups.test.ts
 tests/engine/planQuality.test.ts
@@ -3724,11 +3726,13 @@ tests/server/publicIdentityConcurrency.test.ts
 tests/server/publicIdentityDescriptor.test.ts
 tests/server/publicIdentityProvider.test.ts
 tests/server/publicRoomLegacyResponse.test.ts
+tests/benchmark/workerStartupFailure.test.ts
 ~~~
 
 ### full-15
 ~~~text
 tests/tooling/npmTestCollectionContract.test.ts
+tests/benchmark/d1ReplayCli.test.ts
 tests/ui/handStackStyles.test.ts
 tests/ui/manualGrouping.test.ts
 ~~~
@@ -3744,7 +3748,7 @@ Command:
 npx vitest run tests/ui/app.test.tsx tests/ui/handLayout.test.tsx tests/ui/productionIdentityLifecycle.test.tsx --exclude "**/.worktrees/**" --reporter=dot
 ~~~
 
-The next run must execute full-01 through full-16, prove assigned=103, unique=103, missing=0, duplicate=0, overlap=0, extra=0, and record each shard exit code. The previous partial evidence of 69 unique files / 842 passed tests is historical evidence only; it is not a Task 9 pass.
+The next run must execute full-01 through full-16, prove assigned=105, unique=105, missing=0, duplicate=0, overlap=0, extra=0, and record each shard exit code. The previous partial evidence of 69 unique files / 842 passed tests is historical evidence only; it is not a Task 9 pass.
 
 
 
