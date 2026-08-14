@@ -1,0 +1,402 @@
+# One-time D2F Shadow release gate for codex/d2f-crn-rollout-source; its locks are intentionally not a permanent main regression gate.
+name: D2F Node 22.22.2 Release Gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - codex/d2f-crn-rollout-source
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    name: Windows Node 22.22.2 final gate
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      D2F_PRODUCTION_HEAD: c1300c3130c934b087b30fd76571e40823618c23
+
+    steps:
+      - name: Check out exact branch commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Node.js 22.22.2
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.2
+          cache: npm
+
+      - name: Verify source and runner locks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nodeVersion = node --version
+          $npmVersion = npm --version
+          $head = git rev-parse HEAD
+          $initialNode22WorkflowHead = '2c78fb3040714b3547a2cd18ca30ca7a40ed7260'
+          $prerequisiteHead = '91816126cbc5e97df45a7360dcd6b67c4e35352e'
+          Write-Host "head=$head"
+          Write-Host "node=$nodeVersion"
+          Write-Host "npm=$npmVersion"
+          if ($nodeVersion -ne 'v22.22.2') { throw "Expected Node v22.22.2, got $nodeVersion" }
+          $requiredAncestors = [ordered]@{
+            production = $env:D2F_PRODUCTION_HEAD
+            initialNode22Workflow = $initialNode22WorkflowHead
+            prerequisite = $prerequisiteHead
+          }
+          foreach ($entry in $requiredAncestors.GetEnumerator()) {
+            git merge-base --is-ancestor $entry.Value HEAD
+            if ($LASTEXITCODE -ne 0) { throw "Expected $($entry.Key) commit $($entry.Value) to be an ancestor of HEAD" }
+            Write-Host "$($entry.Key)Ancestor=$($entry.Value)"
+          }
+          $allowedChangedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+          @(
+            '.github/workflows/ci.yml',
+            '.github/workflows/d2f-node22-release-gate.yml',
+            'docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md',
+            'docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md',
+            'docs/superpowers/specs/2026-08-02-d2f-design-spec.md',
+            'scripts/replayD1TopKBenchmark.ts',
+            'scripts/runAiBenchmark.ts',
+            'scripts/benchmarks/d2f-rollout-budget-calibration.ts',
+            'src/ai/particles/constrainedParticleSampler.ts',
+            'src/ai/rollout/aggregation.ts',
+            'src/ai/rollout/contracts.ts',
+            'src/ai/rollout/evidenceGate.ts',
+            'src/ai/rollout/kernel.ts',
+            'src/ai/rollout/leafEvaluation.ts',
+            'src/ai/rollout/particleScenarioSource.ts',
+            'src/ai/rollout/plainData.ts',
+            'src/ai/rollout/stateConservation.ts',
+            'src/ai/rollout/teamUtility.ts',
+            'src/game/room.ts',
+            'tests/ai/publicLedgerTributeReset.test.ts',
+            'tests/ai/rollout/aggregation.test.ts',
+            'tests/ai/rollout/crnIdentity.test.ts',
+            'tests/ai/rollout/crnInvariance.test.ts',
+            'tests/ai/rollout/d2fBenchmarkContract.test.ts',
+            'tests/ai/rollout/d2fShadowObserverIntegration.test.ts',
+            'tests/ai/rollout/evidenceGate.test.ts',
+            'tests/ai/rollout/particleScenarioSource.test.ts',
+            'tests/ai/rollout/teamUtility.test.ts',
+            'tests/benchmark/cli.test.ts',
+            'tests/benchmark/d0FixtureSourceWorktree.ts',
+            'tests/benchmark/d1CalibrationReview.test.ts',
+            'tests/benchmark/d1ReplayCli.test.ts',
+            'tests/benchmark/keepCurrentLock.test.ts',
+            'tests/benchmark/legacyD1Compatibility.test.ts',
+            'tests/benchmark/reproducibility.test.ts',
+            'tests/benchmark/workerStartupFailure.test.ts'
+          ) | ForEach-Object { [void]$allowedChangedPaths.Add($_) }
+          $changed = @(git diff --name-only "$env:D2F_PRODUCTION_HEAD..HEAD")
+          $unexpected = @($changed | Where-Object { -not $allowedChangedPaths.Contains($_) })
+          Write-Host "changedPaths=$($changed -join ', ')"
+          if ($unexpected.Count) { throw "Unexpected paths after D2F production HEAD: $($unexpected -join ', ')" }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Report tool versions
+        run: |
+          node --version
+          npm --version
+          npx vitest --version
+
+      - name: Audit canonical Task 9 manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $documents = @(
+            'docs/superpowers/specs/2026-08-02-d2f-design-spec.md',
+            'docs/superpowers/plans/2026-08-02-d2f-implementation-plan.md',
+            'docs/superpowers/plans/2026-08-02-d2f-test-gate-matrix.md'
+          )
+          $blocks = foreach ($document in $documents) {
+            $text = (Get-Content -Raw -LiteralPath $document) -replace "`r`n", "`n"
+            $match = [regex]::Match($text, '(?s)D2F_TASK9_FULL_REGRESSION_GATE_ACTIVE_BEGIN\n(.*?)\nD2F_TASK9_FULL_REGRESSION_GATE_ACTIVE_END')
+            if (-not $match.Success) { throw "Missing Task 9 active block in $document" }
+            $match.Groups[1].Value
+          }
+          if (($blocks | Select-Object -Unique).Count -ne 1) { throw 'Canonical Task 9 active blocks differ' }
+          $block = $blocks[0]
+          $pathPattern = 'tests/[A-Za-z0-9_./-]+\.test\.tsx?'
+          $includedText = [regex]::Match($block, '(?s)### Included files\n(.*?)\n### Excluded files and reasons').Groups[1].Value
+          $excludedText = [regex]::Match($block, '(?s)### Excluded files and reasons\n(.*?)\n## Explicit full-permitted shards').Groups[1].Value
+          $shardText = [regex]::Match($block, '(?s)## Explicit full-permitted shards\n(.*?)\nThe next run must execute full-01 through full-16').Groups[1].Value
+          $shardManifestText = [regex]::Replace($shardText, '(?s)Command:\n~~~text\n.*?\n~~~', '')
+          $shardHeadings = @([regex]::Matches($shardText, '(?m)^### full-\d+(?:-[A-Za-z0-9-]+)?$'))
+          $included = @([regex]::Matches($includedText, $pathPattern) | ForEach-Object Value)
+          $excluded = @([regex]::Matches($excludedText, $pathPattern) | ForEach-Object Value)
+          $assigned = @([regex]::Matches($shardManifestText, $pathPattern) | ForEach-Object Value)
+          $tracked = @(git ls-files tests | Where-Object { $_ -match '^tests/.+\.test\.tsx?$' })
+          $includedUnique = @($included | Sort-Object -Unique)
+          $excludedUnique = @($excluded | Sort-Object -Unique)
+          $assignedUnique = @($assigned | Sort-Object -Unique)
+          $union = @($includedUnique + $excludedUnique | Sort-Object -Unique)
+          $manifestMissing = @($tracked | Where-Object { $_ -notin $union })
+          $manifestUntracked = @($union | Where-Object { $_ -notin $tracked })
+          $manifestOverlap = @($includedUnique | Where-Object { $_ -in $excludedUnique })
+          $executionMissing = @($includedUnique | Where-Object { $_ -notin $assignedUnique })
+          $executionExtra = @($assignedUnique | Where-Object { $_ -notin $includedUnique })
+          $requiredUi = @('tests/ui/app.test.tsx', 'tests/ui/handLayout.test.tsx', 'tests/ui/productionIdentityLifecycle.test.tsx')
+          Write-Host "tracked=$($tracked.Count)"
+          Write-Host "included=$($included.Count)"
+          Write-Host "excluded=$($excluded.Count)"
+          Write-Host "union=$($union.Count)"
+          Write-Host "missing=$($manifestMissing.Count)"
+          Write-Host "duplicate=$(($included.Count - $includedUnique.Count) + ($excluded.Count - $excludedUnique.Count))"
+          Write-Host "overlap=$($manifestOverlap.Count)"
+          Write-Host "untracked=$($manifestUntracked.Count)"
+          Write-Host "shards=$($shardHeadings.Count)"
+          Write-Host "assigned=$($assigned.Count)"
+          Write-Host "unique=$($assignedUnique.Count)"
+          Write-Host "executionMissing=$($executionMissing.Count)"
+          Write-Host "executionDuplicate=$($assigned.Count - $assignedUnique.Count)"
+          Write-Host "executionExtra=$($executionExtra.Count)"
+          if ($tracked.Count -ne 147 -or $included.Count -ne 105 -or $excluded.Count -ne 42 -or $union.Count -ne 147) { throw 'Manifest count mismatch' }
+          if ($manifestMissing.Count -or $manifestUntracked.Count -or $manifestOverlap.Count) { throw 'Manifest set mismatch' }
+          if ($shardHeadings.Count -ne 16 -or $assigned.Count -ne 105 -or $assignedUnique.Count -ne 105 -or $executionMissing.Count -or $executionExtra.Count) { throw 'Shard assignment mismatch' }
+          foreach ($uiPath in $requiredUi) {
+            if ($uiPath -notin $includedUnique -or $uiPath -notin $assignedUnique) { throw "Missing required UI test: $uiPath" }
+          }
+
+      - name: Full shard 01
+        id: full_01
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/ai/actionEvaluator.test.ts tests/ai/actionGenerationDiagnostics.test.ts tests/ai/actionGenerator.test.ts tests/ai/aiDecisionEngine.test.ts tests/ai/aiDecisionMigration.test.ts tests/ai/aiDecisionShadow.test.ts tests/ai/aiPlanningDiagnostics.test.ts tests/ai/beliefGuidedPlanPolicy.test.ts tests/ai/d1DiagnosticsAggregation.test.ts tests/ai/d1DiagnosticsPrivacy.test.ts tests/ai/dynamicPlanEvaluator.test.ts tests/ai/dynamicPlanEvaluatorBoundaries.test.ts tests/ai/handAnalyzer.test.ts tests/ai/handPlannerMigration.test.ts tests/ai/keepCurrentByteLock.test.ts tests/ai/keepCurrentCharacterization.test.ts tests/ai/keepCurrentRuntimeShape.test.ts tests/ai/lightweightPublicEvidence.test.ts tests/ai/particles/actionSupportLikelihood.test.ts tests/ai/particles/constrainedParticleSampler.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 02
+        id: full_02
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/ai/particles/effectiveSampleSize.test.ts tests/ai/particles/logWeightNormalization.test.ts tests/ai/particles/particleBankBuilder.test.ts tests/ai/particles/particleConservation.test.ts tests/ai/particles/particleContracts.test.ts tests/ai/particles/particleDetachedCharacterization.test.ts tests/ai/particles/particlePrivacyAst.test.ts tests/ai/particles/publicEventDealReplay.test.ts tests/ai/planIdentity.test.ts tests/ai/planManager.test.ts tests/ai/planManagerD1.test.ts tests/ai/planSelectionContracts.test.ts tests/ai/planSelectionMode.test.ts tests/ai/planSelector.test.ts tests/ai/powerGroupPolicyCache.test.ts tests/ai/publicEvent.test.ts tests/ai/publicEventHash.test.ts tests/ai/publicLedger.test.ts tests/ai/publicLedgerDependency.test.ts tests/ai/publicLedgerKeepCurrent.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 03
+        id: full_03
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/ai/publicLedgerPrivacy.test.ts tests/ai/publicLedgerReplay.test.ts tests/ai/publicLedgerTributeReset.test.ts tests/ai/publicLedgerTrickFinish.test.ts tests/ai/representativeActionReducer.test.ts tests/ai/representativeActionReducerDetached.test.ts tests/ai/representativeActionShadowByteLock.test.ts tests/ai/representativeActionShadowIntegration.test.ts tests/ai/roleEvaluator.test.ts tests/ai/rollout/aggregation.test.ts tests/ai/rollout/crnIdentity.test.ts tests/ai/rollout/crnInvariance.test.ts tests/ai/rollout/d2fShadowByteLock.test.ts tests/ai/rollout/d2fShadowObserver.test.ts tests/ai/rollout/d2fShadowObserverIntegration.test.ts tests/ai/rollout/evidenceGate.test.ts tests/ai/rollout/failureAtomicity.test.ts tests/ai/rollout/kernel.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 04 AST
+        id: full_04
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/ai/representativeActionShadowAst.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 05 Room
+        id: full_05
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/ai/representativeActionShadowRoom.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 06
+        id: full_06
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/ai/rollout/leafEvaluation.test.ts tests/ai/rollout/particleBankRolloutBoundary.test.ts tests/ai/rollout/particleScenarioSource.test.ts tests/ai/rollout/policy.test.ts tests/ai/rollout/ranking.test.ts tests/ai/rollout/rolloutOrchestrator.test.ts tests/ai/rollout/rolloutPrivacyAst.test.ts tests/ai/rollout/teamUtility.test.ts tests/ai/strategicHistory.test.ts tests/engine/cards.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 07 Planner slow
+        id: full_07
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/engine/planner.test.ts --exclude "**/.worktrees/**" --reporter=verbose
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 08
+        id: full_08
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/engine/groups.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 09
+        id: full_09
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/engine/planQuality.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 10
+        id: full_10
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/engine/scorer.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 11
+        id: full_11
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/engine/validation.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 12
+        id: full_12
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/game/ai.test.ts tests/game/aiBaseline.test.ts tests/game/aiCompatibilityAdapter.test.ts tests/game/legacyRoomCallerIsolation.test.ts tests/game/legacyRoomIsolation.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 13
+        id: full_13
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/game/playRules.test.ts tests/game/protectedGroups.test.ts tests/game/publicEventIdentity.test.ts tests/game/publicEventReplayIdentity.test.ts tests/game/publicEventRoomAdapter.test.ts tests/game/room.test.ts tests/game/roomPlanningArchitecture.test.ts tests/game/roomUnifiedAdapter.test.ts tests/game/settlement.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 14
+        id: full_14
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/server/api.test.ts tests/server/apiCanonicalIdentity.test.ts tests/server/apiIdempotency.test.ts tests/server/apiShutdown.test.ts tests/server/publicIdentityConcurrency.test.ts tests/server/publicIdentityDescriptor.test.ts tests/server/publicIdentityProvider.test.ts tests/server/publicRoomLegacyResponse.test.ts tests/benchmark/workerStartupFailure.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 15
+        id: full_15
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/tooling/npmTestCollectionContract.test.ts tests/benchmark/d1ReplayCli.test.ts tests/ui/handStackStyles.test.ts tests/ui/manualGrouping.test.ts --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Full shard 16 UI
+        id: full_16
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npx vitest run tests/ui/app.test.tsx tests/ui/handLayout.test.tsx tests/ui/productionIdentityLifecycle.test.tsx --exclude "**/.worktrees/**" --reporter=dot
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Aggregate full shard exit codes
+        if: always()
+        shell: pwsh
+        env:
+          FULL_01: ${{ steps.full_01.outputs.exit_code }}
+          FULL_02: ${{ steps.full_02.outputs.exit_code }}
+          FULL_03: ${{ steps.full_03.outputs.exit_code }}
+          FULL_04: ${{ steps.full_04.outputs.exit_code }}
+          FULL_05: ${{ steps.full_05.outputs.exit_code }}
+          FULL_06: ${{ steps.full_06.outputs.exit_code }}
+          FULL_07: ${{ steps.full_07.outputs.exit_code }}
+          FULL_08: ${{ steps.full_08.outputs.exit_code }}
+          FULL_09: ${{ steps.full_09.outputs.exit_code }}
+          FULL_10: ${{ steps.full_10.outputs.exit_code }}
+          FULL_11: ${{ steps.full_11.outputs.exit_code }}
+          FULL_12: ${{ steps.full_12.outputs.exit_code }}
+          FULL_13: ${{ steps.full_13.outputs.exit_code }}
+          FULL_14: ${{ steps.full_14.outputs.exit_code }}
+          FULL_15: ${{ steps.full_15.outputs.exit_code }}
+          FULL_16: ${{ steps.full_16.outputs.exit_code }}
+        run: |
+          $failed = $false
+          1..16 | ForEach-Object {
+            $key = 'FULL_{0:D2}' -f $_
+            $exitCode = [Environment]::GetEnvironmentVariable($key)
+            if ([string]::IsNullOrWhiteSpace($exitCode)) {
+              Write-Host ("full-{0:D2} exitCode=NOT_RUN" -f $_)
+              $failed = $true
+            } else {
+              Write-Host ("full-{0:D2} exitCode=$exitCode" -f $_)
+              if ([int]$exitCode -ne 0) { $failed = $true }
+            }
+          }
+          if ($failed) { throw 'One or more full-permitted shards failed or did not run' }
+
+      - name: Task 1-8 focused core gate
+        run: >-
+          npx vitest run tests/ai/particles/particleBankBuilder.test.ts tests/ai/rollout/particleBankRolloutBoundary.test.ts tests/ai/rollout/particleScenarioSource.test.ts tests/ai/rollout/teamUtility.test.ts tests/ai/rollout/leafEvaluation.test.ts tests/ai/rollout/crnIdentity.test.ts tests/ai/rollout/crnInvariance.test.ts tests/ai/rollout/policy.test.ts tests/ai/rollout/kernel.test.ts tests/ai/rollout/rolloutPrivacyAst.test.ts tests/ai/rollout/evidenceGate.test.ts tests/ai/rollout/aggregation.test.ts tests/ai/rollout/ranking.test.ts tests/ai/rollout/rolloutOrchestrator.test.ts tests/ai/rollout/failureAtomicity.test.ts tests/ai/rollout/d2fBenchmarkContract.test.ts tests/ai/rollout/d2fShadowObserver.test.ts tests/ai/rollout/d2fShadowObserverIntegration.test.ts tests/ai/rollout/d2fShadowByteLock.test.ts --exclude "**/.worktrees/**" --reporter=dot
+
+      - name: Particle regression
+        run: npx vitest run tests/ai/particles --exclude "**/.worktrees/**" --reporter=dot
+
+      - name: D2 shard 01 public ledger
+        run: >-
+          npx vitest run tests/ai/lightweightPublicEvidence.test.ts tests/ai/publicEvent.test.ts tests/ai/publicEventHash.test.ts tests/ai/publicLedger.test.ts tests/ai/publicLedgerDependency.test.ts tests/ai/publicLedgerPrivacy.test.ts tests/ai/publicLedgerReplay.test.ts tests/ai/publicLedgerTributeReset.test.ts tests/ai/publicLedgerTrickFinish.test.ts tests/game/publicEventIdentity.test.ts tests/game/publicEventReplayIdentity.test.ts tests/game/publicEventRoomAdapter.test.ts --exclude "**/.worktrees/**" --reporter=dot
+
+      - name: D2 shard 02 policy and reducer
+        run: >-
+          npx vitest run tests/ai/beliefGuidedPlanPolicy.test.ts tests/ai/representativeActionReducer.test.ts tests/ai/representativeActionReducerDetached.test.ts tests/ai/representativeActionShadowByteLock.test.ts tests/ai/representativeActionShadowIntegration.test.ts --exclude "**/.worktrees/**" --reporter=dot
+
+      - name: D2 shard 03 AST
+        run: npx vitest run tests/ai/representativeActionShadowAst.test.ts --exclude "**/.worktrees/**" --reporter=dot
+
+      - name: D2 shard 04 Room
+        run: npx vitest run tests/ai/representativeActionShadowRoom.test.ts --exclude "**/.worktrees/**" --reporter=dot
+
+      - name: Fixed benchmark
+        run: npm exec --offline -- tsx scripts/benchmarks/d2f-rollout-budget-calibration.ts --fixture tests/fixtures/ai/d2f-public-rollout-fixture.json --warmup 3 --iterations 10 --json
+
+      - name: TypeScript
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+      - name: Final Git gate
+        shell: pwsh
+        run: |
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $status = git status --short
+          if ($status) { Write-Error "Worktree is not clean:`n$status"; exit 1 }
+          git rev-parse HEAD

@@ -97,6 +97,7 @@ export function decideAiAction(observation: AiObservation, runtime: AiRuntimeSta
     score: selected.score,
     scoreBreakdown: selected.score,
     candidateCount: candidates.length,
+    evaluatedCandidates: scored,
     consideredActions: candidates.length,
     elapsedMs,
     reasonCodes: reasonCodes.filter((code): code is AiDecision["reasonCodes"][number] => isBreakReason(code)),

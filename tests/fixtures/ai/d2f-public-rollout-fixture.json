@@ -1,0 +1,235 @@
+{
+  "schemaVersion": "d2f-rollout-benchmark-fixture-v1",
+  "fixtureId": "d2f-public-rollout-calibration-v1",
+  "replay": {
+    "publicIdentity": {
+      "schemaVersion": "d2-public-game-identity-v1",
+      "gameId": "d2f-task6-real-builder",
+      "roundIdentity": "d2f-task6-real-builder:round:0",
+      "handIdentity": "d2f-task6-real-builder:round:0:hand:0",
+      "roundSequence": 0,
+      "handSequence": 0,
+      "source": "benchmark-scenario"
+    },
+    "initialLedger": {
+      "schemaVersion": "d2-public-ledger-v1",
+      "gameId": "d2f-task6-real-builder",
+      "roundIdentity": "d2f-task6-real-builder:round:0",
+      "handIdentity": "d2f-task6-real-builder:round:0:hand:0",
+      "nextEventIndex": 0,
+      "lastAppliedEventIndex": -1,
+      "seenEventHashes": {},
+      "playedCardIds": [],
+      "revealedTransferEvents": [],
+      "handCounts": { "0": 27, "1": 27, "2": 27, "3": 27 },
+      "currentTrick": { "trickIndex": 0, "leadSeat": 0, "passSeats": [] },
+      "finishOrder": [],
+      "publicTributeEvents": ["phase=initial"],
+      "recentActionSummaries": []
+    },
+    "baseLedger": {
+      "schemaVersion": "d2-public-ledger-v1",
+      "gameId": "d2f-task6-real-builder",
+      "roundIdentity": "d2f-task6-real-builder:round:0",
+      "handIdentity": "d2f-task6-real-builder:round:0:hand:0",
+      "nextEventIndex": 0,
+      "lastAppliedEventIndex": -1,
+      "seenEventHashes": {},
+      "playedCardIds": [],
+      "revealedTransferEvents": [],
+      "handCounts": { "0": 27, "1": 27, "2": 27, "3": 27 },
+      "currentTrick": { "trickIndex": 0, "leadSeat": 0, "passSeats": [] },
+      "finishOrder": [],
+      "publicTributeEvents": ["phase=initial"],
+      "recentActionSummaries": []
+    },
+    "finalLedger": {
+      "schemaVersion": "d2-public-ledger-v1",
+      "gameId": "d2f-task6-real-builder",
+      "roundIdentity": "d2f-task6-real-builder:round:0",
+      "handIdentity": "d2f-task6-real-builder:round:0:hand:0",
+      "nextEventIndex": 1,
+      "lastAppliedEventIndex": 0,
+      "seenEventHashes": { "0": "4f0d289b50fa645033ba1d642b0fabc3cef33a54e72790233f1c10b7b24d5323" },
+      "playedCardIds": ["SA-1"],
+      "revealedTransferEvents": [],
+      "handCounts": { "0": 26, "1": 27, "2": 27, "3": 27 },
+      "currentTrick": { "trickIndex": 0, "leadSeat": 0, "passSeats": [], "lastPlaySeat": 0, "lastPlayStableKey": "play:SA-1" },
+      "finishOrder": [],
+      "publicTributeEvents": ["phase=initial"],
+      "recentActionSummaries": [{ "eventIndex": 0, "kind": "play", "seat": 0, "trickIndex": 0, "publicStableKey": "play:SA-1" }]
+    },
+    "publicHistoryEvents": [
+      {
+        "schemaVersion": "d2-public-event-v2",
+        "gameId": "d2f-task6-real-builder",
+        "roundIdentity": "d2f-task6-real-builder:round:0",
+        "handIdentity": "d2f-task6-real-builder:round:0:hand:0",
+        "eventIndex": 0,
+        "kind": "play",
+        "seat": 0,
+        "publicStableKey": "play:SA-1",
+        "trickIndex": 0,
+        "patternType": "single",
+        "groupType": "single",
+        "handCountBefore": 27,
+        "handCountAfter": 26,
+        "publicCardIds": ["SA-1"],
+        "publicPayloadHash": "4f0d289b50fa645033ba1d642b0fabc3cef33a54e72790233f1c10b7b24d5323"
+      }
+    ],
+    "pendingPublicEvents": [
+      {
+        "schemaVersion": "d2-public-event-v2",
+        "gameId": "d2f-task6-real-builder",
+        "roundIdentity": "d2f-task6-real-builder:round:0",
+        "handIdentity": "d2f-task6-real-builder:round:0:hand:0",
+        "eventIndex": 0,
+        "kind": "play",
+        "seat": 0,
+        "publicStableKey": "play:SA-1",
+        "trickIndex": 0,
+        "patternType": "single",
+        "groupType": "single",
+        "handCountBefore": 27,
+        "handCountAfter": 26,
+        "publicCardIds": ["SA-1"],
+        "publicPayloadHash": "4f0d289b50fa645033ba1d642b0fabc3cef33a54e72790233f1c10b7b24d5323"
+      }
+    ],
+    "expectedFinalEventIndex": 0,
+    "expectedFinalPublicLedgerHash": "3bdebd5cfec3a295c033858322496a504ab5daa00dc065da948d5a178919a303",
+    "gameRank": "2",
+    "perspectiveSeat": 0,
+    "ownCurrentHand": [
+      { "id": "SK-1", "kind": "suited", "rank": "K", "suit": "spades", "copy": 1 },
+      { "id": "SQ-1", "kind": "suited", "rank": "Q", "suit": "spades", "copy": 1 },
+      { "id": "SJ-1", "kind": "suited", "rank": "J", "suit": "spades", "copy": 1 },
+      { "id": "S10-1", "kind": "suited", "rank": "10", "suit": "spades", "copy": 1 },
+      { "id": "S9-1", "kind": "suited", "rank": "9", "suit": "spades", "copy": 1 },
+      { "id": "S8-1", "kind": "suited", "rank": "8", "suit": "spades", "copy": 1 },
+      { "id": "S7-1", "kind": "suited", "rank": "7", "suit": "spades", "copy": 1 },
+      { "id": "S6-1", "kind": "suited", "rank": "6", "suit": "spades", "copy": 1 },
+      { "id": "S5-1", "kind": "suited", "rank": "5", "suit": "spades", "copy": 1 },
+      { "id": "S4-1", "kind": "suited", "rank": "4", "suit": "spades", "copy": 1 },
+      { "id": "S3-1", "kind": "suited", "rank": "3", "suit": "spades", "copy": 1 },
+      { "id": "S2-1", "kind": "suited", "rank": "2", "suit": "spades", "copy": 1 },
+      { "id": "CA-1", "kind": "suited", "rank": "A", "suit": "clubs", "copy": 1 },
+      { "id": "CK-1", "kind": "suited", "rank": "K", "suit": "clubs", "copy": 1 },
+      { "id": "CQ-1", "kind": "suited", "rank": "Q", "suit": "clubs", "copy": 1 },
+      { "id": "CJ-1", "kind": "suited", "rank": "J", "suit": "clubs", "copy": 1 },
+      { "id": "C10-1", "kind": "suited", "rank": "10", "suit": "clubs", "copy": 1 },
+      { "id": "C9-1", "kind": "suited", "rank": "9", "suit": "clubs", "copy": 1 },
+      { "id": "C8-1", "kind": "suited", "rank": "8", "suit": "clubs", "copy": 1 },
+      { "id": "C7-1", "kind": "suited", "rank": "7", "suit": "clubs", "copy": 1 },
+      { "id": "C6-1", "kind": "suited", "rank": "6", "suit": "clubs", "copy": 1 },
+      { "id": "C5-1", "kind": "suited", "rank": "5", "suit": "clubs", "copy": 1 },
+      { "id": "C4-1", "kind": "suited", "rank": "4", "suit": "clubs", "copy": 1 },
+      { "id": "C3-1", "kind": "suited", "rank": "3", "suit": "clubs", "copy": 1 },
+      { "id": "C2-1", "kind": "suited", "rank": "2", "suit": "clubs", "copy": 1 },
+      { "id": "HA-1", "kind": "suited", "rank": "A", "suit": "hearts", "copy": 1 }
+    ],
+    "publicState": {
+      "gameRank": "2",
+      "actingSeat": 3,
+      "perspectiveSeat": 0,
+      "partnerSeat": 2,
+      "handCounts": { "0": 26, "1": 27, "2": 27, "3": 27 },
+      "finishOrder": [],
+      "publicPlayedCardIds": ["SA-1"],
+      "currentLastPlay": {
+        "id": "single:SA-1",
+        "type": "single",
+        "label": "single (♠A#1)",
+        "purpose": "risk",
+        "cards": [{ "id": "SA-1", "kind": "suited", "rank": "A", "suit": "spades", "copy": 1 }],
+        "wildcards": [],
+        "strength": 12
+      },
+      "currentLastPlaySeat": 0
+    }
+  },
+  "particleBank": {
+    "schemaVersion": "d2-particle-bank-build-input-v1",
+    "particleCount": 1,
+    "maxSamplingAttempts": 1,
+    "maxIndexDraws": 1,
+    "samplerConfigVersion": "d2-particle-sampler-v1",
+    "likelihoodConfig": {
+      "schemaVersion": "d2-particle-likelihood-v1",
+      "forcedPassLogFactor": -1,
+      "couldBeatButPassedLogFactor": -0.25,
+      "observedLeadPlayLogFactor": -0.1,
+      "observedFollowPlayLogFactor": -0.2,
+      "degradedEssThreshold": 1,
+      "normalizationTolerance": 0.000001,
+      "essTolerance": 0.000001
+    }
+  },
+  "request": {
+    "policyId": "d2f-lightweight-v1",
+    "candidates": [{
+      "candidateId": "ac2e6d8bb212ac36220745e6ccb47aa6483b130b266dba71ee93fea242ac76d2",
+      "action": { "type": "pass" },
+      "baselineEvaluatorScore": 0
+    }],
+    "budget": {
+      "replicateCountPerScenario": 1,
+      "maxPliesPerReplicate": 1,
+      "maxPolicyActionEvaluationsPerPly": 256,
+      "maxWorkUnits": 256
+    },
+    "evidenceRequirements": {
+      "schemaVersion": "d2f-rollout-evidence-requirements-v1",
+      "minimumEffectiveSampleSize": 1,
+      "minimumAcceptedScenarioCount": 1,
+      "minimumCompletedReplicateCount": 1,
+      "requireCompleteCoverage": true
+    },
+    "aggregationPolicy": {
+      "schemaVersion": "d2f-rollout-risk-policy-v1",
+      "variancePenalty": 0,
+      "downsideRiskPenalty": 0
+    }
+  },
+  "expected": {
+    "ranking": ["ac2e6d8bb212ac36220745e6ccb47aa6483b130b266dba71ee93fea242ac76d2"],
+    "candidateIds": ["ac2e6d8bb212ac36220745e6ccb47aa6483b130b266dba71ee93fea242ac76d2"],
+    "scenarioCount": 1,
+    "replicateCountPerScenario": 1,
+    "policyId": "d2f-lightweight-v1",
+    "formalExecutionAllowed": false,
+    "coverage": "complete",
+    "result": {
+      "schemaVersion": "d2f-rollout-result-v2",
+      "mode": "detached",
+      "formalExecutionAllowed": false,
+      "policyId": "d2f-lightweight-v1",
+      "rootDigest": "ede5390a79f408d4c2a7fc538a3f5c32383ee1c92582697782d6e85d5b98a5c8",
+      "candidateSummaries": [{
+        "candidateId": "ac2e6d8bb212ac36220745e6ccb47aa6483b130b266dba71ee93fea242ac76d2",
+        "riskAdjustedUtility": 3,
+        "expectedUtility": 3,
+        "variance": 0,
+        "risk": 0,
+        "baselineEvaluatorScore": 0,
+        "acceptedScenarioCount": 1,
+        "replicateCountPerScenario": 1,
+        "expectedReplicateCount": 1,
+        "completedReplicateCount": 1,
+        "workUnitCount": 24
+      }],
+      "ranking": ["ac2e6d8bb212ac36220745e6ccb47aa6483b130b266dba71ee93fea242ac76d2"],
+      "aggregateDiagnostics": {
+        "effectiveSampleSize": 1,
+        "acceptedScenarioCount": 1,
+        "replicateCountPerScenario": 1,
+        "completedReplicateCount": 1,
+        "expectedCompletedReplicateCount": 1,
+        "candidateCount": 1,
+        "workUnitCount": 24,
+        "coverage": "complete"
+      }
+    }
+  }
+}

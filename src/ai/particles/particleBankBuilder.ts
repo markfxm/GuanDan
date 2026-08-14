@@ -232,7 +232,7 @@ function build(input: ParticleBankBuildInput): ParticleBankBuildResult {
       config,
       particleCount: input.particleCount,
       effectiveSampleSize: ess.ess,
-      status: ess.ess <= input.likelihoodConfig.degradedEssThreshold ? "degraded" : ess.status,
+      status: ess.status,
       summary,
     }, internals),
   };

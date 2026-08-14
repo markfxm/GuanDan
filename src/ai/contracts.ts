@@ -118,6 +118,10 @@ export type AiDecision = {
   score: ActionScore;
   scoreBreakdown?: ActionScore;
   candidateCount: number;
+  evaluatedCandidates: readonly Readonly<{
+    candidate: ActionCandidate;
+    score: ActionScore;
+  }>[];
   consideredActions?: number;
   elapsedMs: number;
   reasonCodes: BreakReason[];
