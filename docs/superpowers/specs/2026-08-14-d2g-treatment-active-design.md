@@ -75,8 +75,9 @@ Frozen invariants:
 2. Candidate evaluator and planner are unchanged between baseline and treatment.
 3. Rollout ranks only the current production legal evaluated candidates.
 4. The rollout top identity maps to one and only one current `evaluatedCandidates` member.
-5. Treatment execution is benchmark-only during G1; it does not use a production active-mode flag.
-6. D2F remains detached/shadow evaluation. `RolloutRequest.formalExecutionAllowed` and `RolloutResult.formalExecutionAllowed` remain `false`.
+5. The selector choice is the only intended AI-policy variable; candidate generation, evaluator, planner, and legal candidate universe are unchanged.
+6. Treatment execution is benchmark-only during G1; it does not use a production active-mode flag.
+7. D2F remains detached/shadow evaluation. `RolloutRequest.formalExecutionAllowed` and `RolloutResult.formalExecutionAllowed` remain `false`.
 
 The benchmark adapter may expose a benchmark-only seam around `AiDecision`; it must not turn D2F into a second production decision engine.
 
@@ -98,39 +99,43 @@ The comparison is between two selectors over the same production-generated candi
 
 Before execution, treatment validates that its identity is still present in the decision candidate set and is legal for that state. Mapping, evidence, state-identity, or legality failure returns a typed fallback to the saved baseline candidate.
 
-### 4.2 Full-game pairing
+### 4.2 Formal G1 head-to-head game
 
-Each paired baseline/treatment game starts from the same:
+The primary formal experiment is one canonical Room trajectory containing both partnerships:
 
-- the same seed;
-- the same deal;
-- the same rank and team mapping;
-- the same seating;
-- the same rotation and AB/BA placement;
-- the same initial canonical Room gameplay state and ledger contents, with identity namespace excluded from gameplay equality;
-- benchmark profile and execution provenance.
+- `AB`: canonical Team A is baseline-controlled; canonical Team B is treatment-controlled.
+- `BA`: canonical Team A is treatment-controlled; canonical Team B is baseline-controlled.
 
-Identity metadata, arm-qualified `gameId`, ledger namespace, replay path, and artifact IDs are intentionally excluded from the shared gameplay-state equality. They are distinct per arm so public ledgers and replays cannot collide; the shared `pairId` and normalized gameplay-state hash prove that the two games began from the same gameplay inputs and ledger contents.
+The assignment uses existing D0/D1 allocation semantics: Team A is seats `0/2` and Team B is seats `1/3`. `AB` and `BA` are strategy-partnership assignment swaps, not arm execution-order tokens. Every head-to-head game starts from the same seed, deal, rank, seating, rotation, initial canonical rules/state, and frozen profile for its matched `(baseSeed, rotation)` swap pair. AB and BA have separate `gameId` values and separate Room trajectories; after their first action difference they naturally evolve independently. No candidate list or action is copied between already-diverged games.
 
-Before the first action divergence, the adapter creates one immutable production decision snapshot from the shared normalized pre-action state: one `decideAiAction` call, one `AiDecision`, and one `evaluatedCandidates` collection. It clones that decision/runtime boundary for the two arm executions, gives baseline the saved production selection, and gives treatment the rollout-ranked candidate mapped to that same immutable collection. The adapter requires equal normalized gameplay-state hashes and equal candidate-universe hashes before accepting the paired comparison; a mismatch marks the pair unresolved and executes no stale cross-arm action.
+All four seats participate in the same game, but the acting seat's partnership determines which candidate is executed. Pure-policy self-play is outside the Formal G1 primary evidence set.
 
-Once actions differ, states may and should diverge. Each arm then calls production `decideAiAction` on its own current canonical state and receives its own current `evaluatedCandidates`. A candidate list from an already-diverged arm is never forced onto the other arm. This post-disagreement independent re-decision is the intended treatment effect, not a benchmark failure.
+### 4.3 One decision, one candidate universe, one executed action
 
-Post-disagreement arms may naturally evolve independently; this is the intended treatment effect, not a pairing failure.
+For every AI action turn in a head-to-head Room:
 
-This is the intended treatment effect: initial conditions and decision-level candidate generation are paired, while later trajectories reflect the selected actions.
+```text
+current canonical Room state
+        |
+        v
+one decideAiAction call
+        |
+        v
+one AiDecision.evaluatedCandidates collection
+        |                         |
+        v                         v
+baselineCandidateId          treatmentCandidateId
+AiDecision.action             D2F rollout ranking over
+                              the same evaluatedCandidates
+        |                         |
+        +------------+------------+
+                     v
+     execute the candidate for the acting seat's partnership
+```
 
-### 4.3 Arm assignment and AB/BA semantics
+The decision records both counterfactual candidate IDs and agreement/disagreement. Baseline-controlled seats execute `AiDecision.action`. Treatment-controlled seats use D2F ranking over the same current `evaluatedCandidates` and execute the mapped treatment candidate. The Room executes exactly one action. No second `decideAiAction`, evaluator, planner, candidate generator, or candidate reconstruction is allowed for the treatment counterfactual.
 
-G1 uses the approved whole-game arm interpretation:
-
-- Each paired unit contains two independent complete games: one baseline arm and one treatment arm.
-- All four AI seats in the baseline arm use the production selected action. All four AI seats in the treatment arm use the rollout-ranked candidate mapped from that arm's current production decision. Baseline and treatment are not mixed between teams inside one arm game.
-- `allocation: "AB" | "BA"` is a shared paired-placement token inherited from D0/D1. `AB` places the baseline game in paired slot A and the treatment game in paired slot B; `BA` reverses those arm slots. The token is part of IDs, provenance, deterministic execution order, and reporting, but does not change seat rotation, candidate generation, or which selector the arm uses.
-- A base seed therefore yields eight paired units across four rotations and two allocations, with sixteen arm-qualified game records. D0/D1 block/bootstrap machinery is reused with this D2G pair-unit schema; legacy eight-game records are not reinterpreted as D2G paired units.
-- Outcome reports retain canonical team labels for each arm. They report baseline and treatment team win rate, team score, finish order, and paired deltas side by side; they do not relabel a winning team as a "treatment team" inside a single game.
-
-Each pair has a stable `pairId`. Each arm has its own arm-qualified `gameId`, public identity, ledger namespace, replay path, and final-state hash. The two arm records share gameplay inputs and public state values, but never reuse one `gameId` or append both ledgers to one event stream. This prevents replay and artifact collisions while preserving the same initial canonical gameplay state.
+After each game diverges from its matched AB/BA game, that Room continues from its own canonical state and calls production `decideAiAction` once for each subsequent acting-seat turn. The two games' candidate lists remain independent after divergence; this is the intended treatment effect, not a pairing failure.
 
 ## 5. Canonical benchmark adapter
 
@@ -138,19 +143,19 @@ The D2G authority is a canonical Room created with `createRoom`, `buildPublicGam
 
 The future adapter will:
 
-1. Derive a stable match ID from benchmark version, matchup, seed, rotation, allocation, and frozen configuration hash.
-2. Create a deterministic `benchmark-scenario` public identity.
-3. Create a canonical Room from the seeded deal and identity, with all benchmark seats controlled by the benchmark-only harness.
-4. Preserve finalized public events and ledger transitions through play, pass, trick-clear, finish, tribute, and return. When opening tribute/return is pending, both arms use the canonical `advanceOpeningTribute` path with the same deterministic Room rules; this is a shared non-candidate transition, not a D2G disagreement or `decideAiAction` call.
-5. At each aligned pre-disagreement AI action turn, call `decideAiAction` exactly once for the pair and share its immutable decision snapshot; after the first action divergence, call it once per arm from that arm's own state. Pending tribute/return transitions are excluded from this count.
-6. Give baseline the returned production selection and treatment the same returned candidate collection.
-7. Execute one selected legal action through canonical `playCards` or `passTurn`, then update runtime from the actual result. A pending tribute/return transition uses `advanceOpeningTribute` and updates the public ledger through its canonical transaction path.
-8. Emit public-only replay, trace/final-state hashes, safety counters, decision telemetry, and performance telemetry.
+1. Derive a stable game ID from benchmark version, matchup, seed, rotation, allocation, and frozen configuration hash, using the existing D0/D1 allocation semantics.
+2. Create a deterministic `benchmark-scenario` public identity and canonical Room for one AB or BA head-to-head assignment.
+3. Assign Team A/Team B strategy descriptors according to `AB` or `BA`; keep the formal comparison as one mixed-strategy head-to-head Room trajectory.
+4. Preserve finalized public events and ledger transitions through play, pass, trick-clear, finish, tribute, and return. When opening tribute/return is pending, the canonical `advanceOpeningTribute` path is used; it is a shared non-candidate Room transition and not a `decideAiAction` call.
+5. At every AI action turn, call production `decideAiAction` exactly once for the acting seat and retain its immutable `evaluatedCandidates` collection.
+6. Record both baseline and treatment candidate identities from that same decision. Execute `AiDecision.action` for baseline-controlled seats; rank and map the same candidates for treatment-controlled seats.
+7. Execute exactly one selected legal action through canonical `playCards` or `passTurn`, then update runtime/plan from the actual result. Tribute/return transitions update the public ledger through their canonical transaction path.
+8. Emit public-only replay, trace/final-state hashes, safety counters, counterfactual decision telemetry, and separate deterministic/performance telemetry.
 
 D0/D1 facilities are reused rather than duplicated:
 
 - seeded tasks, seat-local seed derivation, four rotations, and AB/BA placement;
-- paired base-seed grouping and bootstrap statistics;
+- four rotations and AB/BA assignment swaps per base seed, with base-seed grouping and bootstrap statistics;
 - manifests, expected match IDs, replay documents, and public hashes;
 - source/engine/Room/profile provenance;
 - resumable and atomic artifact writing;
@@ -164,10 +169,10 @@ The adapter may add D2G-specific fields and validation, but may not create a sep
 
 ```typescript
 type D2GDecisionContext = {
-  pairId: string;
-  comparisonScope: "paired-same-decision" | "arm-independent";
+  gameId: string;
   decisionIndex: number;
   actingSeat: Seat;
+  actingStrategy: "baseline" | "treatment";
   preActionGameplayStateHash: string;
   privateOwnHandFingerprint: string;
   candidateUniverseHash: string;
@@ -175,7 +180,7 @@ type D2GDecisionContext = {
 };
 ```
 
-`preActionGameplayStateHash` is the canonical hash of gameplay state and ledger contents with arm identity namespace removed. `privateOwnHandFingerprint` covers only the acting seat's own hand and is retained for internal current-state validation; it never enters public projection, public events, replay payloads, or human-readable reports. `candidateUniverseHash` is a canonical hash of the ordered current `evaluatedCandidates`, using existing D2F candidate/action identities and action bytes without re-evaluating them. `decisionIdentity` is a versioned canonical hash over pair, comparison scope, decision index, acting seat, normalized gameplay-state hash, private hand fingerprint, and candidate-universe hash; it is an association token, not a new candidate source.
+`preActionGameplayStateHash` is the canonical hash of gameplay state and ledger contents for this Room. `privateOwnHandFingerprint` covers only the acting seat's own hand and is retained for internal current-state validation; it never enters public projection, public events, replay payloads, or human-readable reports. `candidateUniverseHash` is a canonical hash of the ordered current `evaluatedCandidates`, using existing D2F candidate/action identities and action bytes without re-evaluating them. `decisionIdentity` is a versioned canonical hash over game ID, decision index, acting seat, acting strategy, gameplay-state hash, private hand fingerprint, and candidate-universe hash; it is an association token, not a new candidate source.
 
 Before treatment selection or any future active selection, the adapter recomputes the current normalized gameplay-state hash, acting seat/turn, own-hand fingerprint, and candidate-universe hash. Any mismatch is a typed stale-decision fallback; no saved action is executed. Candidate mapping and legality are checked separately against the current `evaluatedCandidates` member. Public arm artifacts retain their own arm-specific public-ledger hash plus opaque provenance/verification results; they never serialize the private fingerprint or raw candidate/card payload.
 
@@ -196,19 +201,22 @@ type D2GFallbackReason =
   | "unexpected-failure";
 
 type D2GDecisionTelemetry = {
-  pairId: string;
-  arm: "baseline" | "treatment";
   gameId: string;
+  rotationPairKey: string;
+  allocation: "AB" | "BA";
+  actingSeat: Seat;
+  actingStrategy: "baseline" | "treatment";
   decisionIdentity: string;
   candidateUniverseHash: string;
   preActionGameplayStateHash: string;
-  preActionArmLedgerHash: string;
   stateValidation: "current" | "stale";
   baselineCandidateId: string;
+  treatmentCandidateId: string;
   selectedCandidateId: string;
   selection: "baseline" | "treatment";
   fallbackReason: D2GFallbackReason | "none";
   disagreement: boolean;
+  rankingHash: string;
   rolloutWorkUnits: number;
   elapsedMs: number;
 };
@@ -227,13 +235,14 @@ The exact implementation source is a G1 task, not a Phase 0B change. It must pre
 
 ## 7. G1 outcomes and attribution
 
-Disagreement is an attribution dimension, not proof of improvement. Reports must contain at least:
+Disagreement is an attribution dimension, not proof of improvement. Formal primary outcomes are normalized to the treatment partnership:
 
-- team win rate and delta;
-- canonical team score/level-step and delta;
-- finish-order distribution and paired finish difference;
-- paired outcome delta;
-- disagreement count/rate and disagreement-subset outcome;
+- treatment partnership win rate;
+- treatment-minus-baseline team-score delta;
+- treatment-minus-baseline level-step delta;
+- treatment-minus-baseline finish utility delta;
+- AB/BA paired delta and confidence interval;
+- disagreement-subset outcome, with disagreement rate remaining descriptive only;
 - fallback rates and typed reasons;
 - runtime, unhandled exception, illegal-action, invalid-pass, and conservation counters;
 - replay, provenance, and manifest failures;
@@ -241,7 +250,7 @@ Disagreement is an attribution dimension, not proof of improvement. Reports must
 - rollout work units, particle count, replicate count, max plies, and profile values used;
 - completed, failed, and incomplete game counts.
 
-Raw game outcomes and paired differences are both retained. Reports distinguish all games, correctness-clean completed games, and disagreement subsets. Failed or incomplete games are never silently converted into wins, losses, or neutral results.
+For `AB`, treatment is canonical Team B; for `BA`, treatment is canonical Team A. Every quality statistic is transformed to `treatment minus baseline`, so positive means treatment better, zero neutral, and negative means baseline better. Raw canonical Team A/B outcomes remain available for audit but are not the primary improvement estimand. Failed or incomplete games are never silently converted into wins, losses, or neutral results.
 
 ## 8. Calibration/formal boundary
 
@@ -258,9 +267,9 @@ smoke
 
 Calibration and formal seed sets are disjoint. Once formal evaluation starts, profile, seed manifest, source commit, Room rules fingerprint, descriptors, statistics configuration, and report schema are immutable. Formal results cannot be used to tune the profile and then be relabeled as evidence for the tuned profile.
 
-Existing D0/D1 paired bootstrap is the default statistical foundation. The D2G report states its block unit, iteration count, bootstrap seed, confidence intervals, neutral values, and failed/unresolved-game policy.
+Existing D0/D1 paired bootstrap is the default statistical foundation. The formal game result is one head-to-head record with top-level `(baseSeed, rank, seating, rotation, allocation, profileHash, gameId, treatmentTeam, baselineTeam)` fields. `rotationPairKey = (baseSeed, rotation, rank, seating, profileHash)` groups the AB/BA strategy-swap games for audit; it is not the bootstrap unit. The hierarchy is `base seed -> four rotations -> AB/BA assignment swaps`; each base-seed block contains exactly eight head-to-head games. Bootstrap resamples complete base-seed blocks, preserving all rotation and strategy-swap dependence within a seed. The formal block is therefore defined directly by its eight head-to-head game records.
 
-The D2G statistical unit is explicit: one `D2GPairUnit` contains one baseline arm record and one treatment arm record for the same `(baseSeed, rotation, allocation, rank, seating, profileHash)` and the same `pairId`. The primary paired delta is treatment minus baseline for the corresponding canonical team outcome vector; raw arm summaries remain separate. A base-seed block contains its eight pair units (four rotations × AB/BA), so bootstrap resampling occurs at the base-seed block, not at individual decisions or arm records. Any missing, failed, incomplete, or correctness-unclean arm makes its pair unit unresolved for quality inference; it remains in failure/completeness counters and is never coerced into a win, loss, or neutral delta.
+The report states the treatment perspective transformation, block unit, iteration count, bootstrap seed, confidence intervals, neutral values, and failed/unresolved-game policy. A missing, failed, incomplete, or correctness-unclean game remains explicit in failure/completeness counters and is excluded from quality inference according to the frozen formal policy; it is never coerced into a win, loss, or neutral delta.
 
 ## 9. G1 Go / No-Go
 
@@ -294,6 +303,12 @@ INCONCLUSIVE
 ### Performance
 
 Phase 0B requires p50/p95/p99 latency and work-unit/profile telemetry, but invents no millisecond ceiling. Calibration selects the profile and formal evaluation freezes it.
+
+### Deterministic evidence versus performance telemetry
+
+Deterministic evidence includes decision identity, candidate-universe hash, baseline/treatment candidate IDs, ranking, agreement/disagreement, fallback reason, work units, semantic/public outcomes, replay hashes, manifest identity, and provenance. Identical inputs must reproduce these values, excluding wall-clock telemetry.
+
+`elapsedMs`, p50, p95, and p99 are performance observations. They are not required to be byte-identical across runs. `elapsedMs` must not participate in canonical decision identity, candidate-universe/config hashes, replay hashes, deterministic artifact equality, or same-seed determinism assertions. The determinism gate compares semantic/public outcome, selection, ranking, fallback, work units, and replay/provenance hashes while explicitly excluding wall-clock fields.
 
 ## 10. G2 boundary, not implementation
 
@@ -340,8 +355,8 @@ Phase 0B does not implement G1 or G2, change Room/evaluator/planner/rollout kern
 
 ```text
 G1-1 contracts/profile
-  -> G1-2 pure treatment evaluator
-  -> G1-3 canonical paired adapter
+  -> G1-2 pure treatment selector
+  -> G1-3 canonical head-to-head adapter
   -> G1-4 report/manifest/provenance
   -> G1-5 smoke/calibration
   -> G1-6 formal verdict
@@ -355,8 +370,11 @@ G1-1 contracts/profile
 | Baseline | current production selected action |
 | Treatment | D2F ranking mapped to current evaluated candidates |
 | Decision pairing | same state, one decision, one candidate collection |
-| Game pairing | same seed/deal/seating/rotation/AB-BA/initial canonical state |
-| Post-divergence | arms evolve independently in their own canonical states |
+| Formal matchup | direct baseline-vs-treatment head-to-head in one canonical Room |
+| AB/BA | Team A/B partnership assignment swap; AB baseline A/treatment B, BA treatment A/baseline B |
+| Formal game count | four rotations × AB/BA = eight head-to-head games per base seed |
+| Quality sign | treatment-minus-baseline; positive treatment better |
+| Post-divergence | AB and BA games evolve independently in their own canonical Rooms |
 | Benchmark authority | canonical Room, public identity, public ledger |
 | Statistics | reuse D0/D1 paired/replay/manifest/provenance/resume/report facilities |
 | Formal active execution | independent D2G selector only after G1 `GO` |

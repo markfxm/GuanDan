@@ -49,16 +49,18 @@ The independent design reviewer verifies:
 
 - Option A is identical in all three documents.
 - `decideAiAction` is the sole candidate source.
+- Rollout selection is the only intended AI-policy variable; evaluator, planner, and candidate universe are unchanged.
 - Decision-level same-state/same-decision/same-candidate pairing is explicit.
-- Before first divergence, both selectors consume one immutable decision snapshot from one production `decideAiAction` call; after divergence, each arm re-decides independently.
-- Full-game same-seed/deal/seating/rotation/AB-BA pairing is explicit.
-- Post-divergence arms independently call production `decideAiAction`.
+- Each head-to-head game has one canonical Room trajectory; every acting-seat decision consumes one current production `decideAiAction` result and one `evaluatedCandidates` universe.
+- Formal AB/BA is a strategy-partnership assignment swap: AB = Team A baseline / Team B treatment; BA = Team A treatment / Team B baseline.
+- Full-game head-to-head games share seed/deal/rank/seating/rotation/rules/profile at initialization; after an action differs, AB and BA games re-decide independently on their own states.
+- Four rotations × AB/BA produce exactly eight head-to-head games per base seed; the base seed is the statistical block.
 - Canonical Room/public identity/public ledger are the D2G authority.
 - Legacy benchmark Room is compatibility infrastructure, not the D2G authority.
 - D0/D1 reuse names seeds, rotations, AB/BA, bootstrap, manifest, replay, provenance, resume, report, and atomic artifacts.
 - G1 benchmark treatment execution is isolated from production formal action.
-- G1 uses whole-game arms: one baseline game and one treatment game per pair, with all four AI seats using that arm's selector; baseline/treatment are not mixed within one game.
-- Each pair has one `pairId` and distinct arm-qualified `gameId`/public-ledger namespaces; `AB`/`BA` is shared paired-slot placement, not a second candidate or seat-policy assignment.
+- Formal G1 directly pits baseline-controlled and treatment-controlled partnerships in one canonical Room; it does not use all-baseline versus all-treatment self-play as primary superiority evidence.
+- Each game has one `gameId`; `rotationPairKey` groups the AB/BA strategy-swap games for audit only, not as a second Room trajectory or candidate-sharing mechanism.
 - G1 `GO` is the only dependency that unlocks G2 implementation.
 - Numeric profile thresholds are not invented in Phase 0B.
 - Correctness, quality, performance, privacy, replay, and provenance vocabulary agrees across documents.
@@ -71,8 +73,8 @@ The independent design reviewer verifies:
 | --- | --- | --- | --- | --- |
 | G1-1 Contracts/profile | D2F contracts and production decision types | Typed treatment/fallback/profile schema | treatment contract/profile tests | none |
 | G1-2 Pure selector | One `AiDecision`, snapshot, decision context, frozen profile | Same-candidate ranking/mapping/fallback | selector/mapping tests | G1-1 |
-| G1-3 Canonical adapter | canonical Room, identity, ledger, D0/D1 task matrix | Paired baseline/treatment games | adapter/pairing/ledger tests | G1-2 |
-| G1-4 Statistics/report | paired games and D0/D1 infrastructure | outcome, telemetry, manifest, replay, provenance | report/manifest tests | G1-3 |
+| G1-3 Canonical adapter | canonical Room, identity, ledger, D0/D1 task matrix | Eight direct head-to-head games per base seed | adapter/assignment/ledger tests | G1-2 |
+| G1-4 Statistics/report | head-to-head games and D0/D1 infrastructure | treatment-perspective outcome, telemetry, manifest, replay, provenance | report/manifest tests | G1-3 |
 | G1-5 Smoke/calibration | G1-4 runner/report | calibration profile and disjoint formal manifest | runner/calibration tests | G1-4 |
 | G1-6 Formal verdict | frozen profile, formal manifest, approval | `GO`, `NO-GO`, or `INCONCLUSIVE` | formal gate/verdict tests | G1-5 |
 
@@ -119,9 +121,10 @@ npx vitest run tests/ai/rollout/contracts.test.ts tests/ai/rollout/ranking.test.
 
 ### Determinism cases
 
-- identical state, profile, and seed produce identical mapping, ranking, fallback, telemetry, and work-unit count;
+- identical state, profile, and seed produce identical semantic selection, ranking, fallback, deterministic telemetry, and work-unit count;
 - changing only production scores/order changes only the expected mapping/ranking result;
-- replay identity includes decision identity and selected candidate identity.
+- replay identity includes decision identity and selected candidate identity;
+- `elapsedMs` is performance telemetry only: it is not required to be byte-identical and is excluded from decision identity, candidate/config hashes, replay hashes, deterministic artifact equality, and same-seed determinism assertions.
 - private own-hand fingerprints and raw candidate/card payloads never enter public projection, replay, or human-readable reports.
 
 ### Commands
@@ -135,9 +138,9 @@ npx vitest run tests/ai/rollout/ranking.test.ts tests/ai/rollout/aggregation.tes
 
 ### Canonical Room and privacy
 
-- every arm uses `createRoom` with `buildPublicGameIdentity` source `benchmark-scenario`;
+- every head-to-head game uses `createRoom` with `buildPublicGameIdentity` source `benchmark-scenario`;
 - every action goes through canonical `playCards`/`passTurn` and ledger validation;
-- pending opening tribute/return uses canonical `advanceOpeningTribute` in both arms, with finalized public transfer events and no `decideAiAction` or disagreement count;
+- pending opening tribute/return uses canonical `advanceOpeningTribute`, with finalized public transfer events and no `decideAiAction` or disagreement count;
 - public event and ledger hashes are deterministic;
 - observations exclude other seats' hands, initial hands, private runtime, and private plans;
 - the acting AI receives only its own hand plus permitted public state;
@@ -145,21 +148,22 @@ npx vitest run tests/ai/rollout/ranking.test.ts tests/ai/rollout/aggregation.tes
 
 ### Decision-level pairing
 
-- one pre-disagreement pair decision calls production `decideAiAction` exactly once;
-- baseline and treatment consume that same immutable `AiDecision.evaluatedCandidates` snapshot;
+- each acting-seat decision calls production `decideAiAction` exactly once;
+- baseline and treatment candidate IDs are counterfactual views of that same `AiDecision.evaluatedCandidates` snapshot;
+- baseline-controlled seats execute `AiDecision.action`; treatment-controlled seats rank and map a candidate from that same current collection;
 - treatment does not call `generateActionCandidates` independently;
-- telemetry records the same decision identity and candidate-universe hash, plus current/stale state validation;
-- telemetry is explicitly nested/qualified by `pairId`, `arm`, and arm-qualified `gameId`, and records the arm-specific pre-action ledger hash;
+- telemetry records one decision identity and candidate-universe hash, baseline/treatment candidate IDs, agreement/disagreement, ranking, fallback, and state validation;
+- `elapsedMs` is excluded from deterministic telemetry identity and comparison;
 - one and only one selected action is executed.
 
 ### Game-level pairing and divergence
 
-- paired tasks share the same seed, same deal, same rank, same seating, same rotation, same AB/BA allocation, same initial canonical gameplay state, and same profile hash;
-- the pair shares a stable `pairId`, while baseline/treatment use distinct arm-qualified public identities, ledger namespaces, game IDs, replay paths, and final-state hashes;
+- each AB/BA matched pair shares the same base seed, deal, rank, seating, rotation, initial canonical rules/state, and frozen profile hash;
+- `AB` assigns Team A (seats 0/2) to baseline and Team B (seats 1/3) to treatment; `BA` swaps those strategy-partnership assignments;
 - four rotations and both AB/BA placements exist for each base seed;
-- after the first differing action, post-disagreement arms diverge naturally;
-- each arm calls production `decideAiAction` on its own current state;
-- no post-divergence candidate list is copied between arms.
+- this is 4 rotations × AB/BA = 8 head-to-head games per base seed;
+- after the first differing action, the AB and BA games diverge naturally and each canonical Room calls production `decideAiAction` on its own current state;
+- no post-divergence candidate list or action is copied between games.
 
 ### Commands
 
@@ -172,24 +176,25 @@ npx vitest run tests/game/publicEventIdentity.test.ts tests/game/publicEventRepl
 
 ### Required outcome fields
 
-Every completed paired unit supports:
+Every completed head-to-head game supports:
 
-- baseline/treatment team win/loss;
-- canonical team score/level-step;
-- finish order and team finish difference;
-- paired outcome and score differences;
+- treatment partnership win/loss and treatment-versus-baseline team-score delta;
+- treatment-versus-baseline level-step delta;
+- treatment-perspective finish utility and finish order;
+- AB/BA paired delta and confidence interval inputs;
 - disagreement count/rate and disagreement-subset outcome;
 - fallback counts/reasons;
 - illegal action, invalid pass, conservation, runtime, crash, and engine errors;
-- baseline/treatment latency p50/p95/p99;
+- latency p50/p95/p99 as performance observations;
 - rollout work units, particles, replicates, plies, and profile hash;
-- public trace/final-state hashes for both arms;
-- pair ID, arm-qualified game IDs, and artifact namespace collision checks;
+- public trace/final-state hash, game identity, and `rotationPairKey`;
 - source, engine, Room, benchmark, profile, statistics, and replay provenance.
+
+All quality outcomes are normalized to the treatment perspective: positive means treatment is better, zero is neutral, and negative means baseline is better. Raw canonical Team A/Team B values remain audit fields only because the treatment team changes between AB and BA.
 
 ### Manifest/replay rules
 
-- expected IDs derive from matchup, seed, rotation, allocation, config hash, and benchmark version;
+- expected game IDs derive from matchup, base seed, rotation, allocation, config hash, and benchmark version;
 - duplicate, missing, unknown, or incomplete IDs are never silently aggregated;
 - resume accepts only identical config/profile/provenance/schema and reuses only complete correctness-clean games;
 - atomic writers publish game output and manifest together;
@@ -198,11 +203,12 @@ Every completed paired unit supports:
 
 ### Statistics rules
 
-- reuse D0/D1 paired bootstrap and base-seed block unit with an explicit D2G `D2GPairUnit` containing one baseline and one treatment arm record;
-- each base-seed block contains eight D2G pair units (four rotations × AB/BA), or sixteen arm-qualified game records; do not feed them into the legacy eight-game validator without the D2G adapter;
-- report raw and paired results separately;
-- calculate paired deltas treatment minus baseline for the same canonical team slots; missing, failed, incomplete, or correctness-unclean pairs remain unresolved and are never coerced into wins/losses/neutral deltas;
-- `D2GPairUnit` top-level identity fields are `pairId`, `baseSeed`, `rank`, `seating`, `rotation`, `allocation`, and `profileHash`, with arm records and arm-qualified IDs nested below;
+- reuse D0/D1 paired/bootstrap infrastructure with the base seed as the block unit;
+- statistical hierarchy is `base seed -> four rotations -> AB/BA strategy-partnership assignment swaps`;
+- each base-seed block contains exactly eight D2G head-to-head games: four rotations × AB/BA;
+- retain the AB/BA games within a base-seed block so strategy-swap and rotation dependence is preserved; do not create a new bootstrap algorithm;
+- calculate all formal quality deltas as treatment minus baseline; positive means treatment better, zero neutral, negative baseline better;
+- missing, failed, incomplete, or correctness-unclean games remain unresolved and are never coerced into wins/losses/neutral deltas;
 - state interval method, iterations, bootstrap seed, neutral values, and unresolved-game policy;
 - disagreement rate is descriptive only;
 - point estimates do not automatically produce `GO`.
@@ -256,11 +262,11 @@ Any nonzero value is `NO-GO`.
 
 ### Quality verdict
 
-The formal report includes confidence intervals and paired results for team win rate, team score, finish order, all-game outcome, and disagreement subset. `GO` requires correctness-clean execution and credible repeatable positive evidence under frozen analysis. `NO-GO` covers correctness failure or frozen negative evidence. `INCONCLUSIVE` covers correctness-clean but insufficient, neutral, or uncertain evidence.
+The formal report includes confidence intervals and head-to-head results for treatment partnership win rate, treatment-minus-baseline team-score delta, treatment-minus-baseline level-step delta, treatment-perspective finish utility, AB/BA paired delta, and disagreement-subset outcome. Positive means treatment better, zero neutral, and negative means baseline better; canonical Team A raw win rate is audit-only. `GO` requires correctness-clean execution and credible repeatable positive treatment-perspective evidence under frozen analysis. `NO-GO` covers correctness failure or frozen negative evidence. `INCONCLUSIVE` covers correctness-clean but insufficient, neutral, or uncertain evidence.
 
 ### Performance and immutability
 
-The report records p50/p95/p99 and work-unit/profile values. The ceiling is the calibration-approved frozen profile, not a Phase 0B number. Once formal execution begins, profile hash, formal seeds, statistics, and report schema cannot change; calibration seeds cannot appear in formal data; failed artifacts cannot be silently replaced under the same identity.
+The report records p50/p95/p99 and work-unit/profile values. The ceiling is the calibration-approved frozen profile, not a Phase 0B number. `elapsedMs` and its quantiles are observational performance telemetry and need not be byte-identical across runs. They must not participate in decision identity, config/candidate/replay hashes, deterministic artifact equality, or same-seed determinism assertions. Determinism compares semantic/public outcome, selected candidate, ranking, fallback, work units, and replay/provenance hashes while excluding wall-clock fields. Once formal execution begins, profile hash, formal seeds, statistics, and report schema cannot change; calibration seeds cannot appear in formal data; failed artifacts cannot be silently replaced under the same identity.
 
 ## 10. G2 conditional matrix
 
