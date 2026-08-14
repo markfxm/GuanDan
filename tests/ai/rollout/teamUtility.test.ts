@@ -1,4 +1,6 @@
 import { describe, expect, test } from "vitest";
+import { evaluateNonTerminalLeaf } from "../../../src/ai/rollout/leafEvaluation";
+import { isPlainDataArray } from "../../../src/ai/rollout/plainData";
 import { evaluateTeamUtility } from "../../../src/ai/rollout/teamUtility";
 
 const truthTable = [
@@ -113,6 +115,51 @@ describe("evaluateTeamUtility", () => {
     });
 
     expect(evaluateTeamUtility({ perspectiveSeat: 0, finishOrder: finishOrder as never })).toEqual({ ok: true, utility: 3 });
+  });
+
+  test("does not read a validated leaf finish-order iterator", () => {
+    let iteratorReads = 0;
+    const finishOrder = new Proxy([2], {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator) {
+          iteratorReads += 1;
+          throw new Error("finishOrder Symbol.iterator accessed");
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(evaluateNonTerminalLeaf({
+      perspectiveSeat: 0,
+      actingSeat: 1,
+      finishOrder: finishOrder as never,
+      handCounts: { 0: 3, 1: 1, 2: 0, 3: 2 },
+    })).toEqual({ ok: true, predictedFinishOrder: [2, 1, 3, 0], utility: 1 });
+    expect(iteratorReads).toBe(0);
+  });
+
+  test("uses set membership for dense plain-data array keys", () => {
+    const values = Array.from({ length: 32 }, (_, index) => index);
+    const originalIncludes = Array.prototype.includes;
+    let ownKeyScanCalls = 0;
+    Object.defineProperty(Array.prototype, "includes", {
+      configurable: true,
+      writable: true,
+      value: function (this: unknown[], searchElement: unknown, fromIndex?: number): boolean {
+        if (this.length === values.length + 1 && this[this.length - 1] === "length") ownKeyScanCalls += 1;
+        return originalIncludes.call(this, searchElement, fromIndex);
+      },
+    });
+    try {
+      expect(isPlainDataArray(values)).toBe(true);
+    } finally {
+      Object.defineProperty(Array.prototype, "includes", {
+        configurable: true,
+        writable: true,
+        value: originalIncludes,
+      });
+    }
+    expect(ownKeyScanCalls).toBe(0);
   });
 
   test("rejects malformed envelopes and never invokes hostile getters or callbacks", () => {

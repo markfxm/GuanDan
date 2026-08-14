@@ -23,10 +23,11 @@ export function isPlainDataArray(value: unknown): value is readonly unknown[] {
     if (!isDataDescriptor(lengthDescriptor) || !isNonNegativeSafeInteger(lengthDescriptor.value)) return false;
     const length = lengthDescriptor.value;
     const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.length !== length + 1 || !ownKeys.includes("length")) return false;
+    const ownKeySet = new Set(ownKeys);
+    if (ownKeys.length !== length + 1 || !ownKeySet.has("length")) return false;
     for (let index = 0; index < length; index += 1) {
       const key = String(index);
-      if (!ownKeys.includes(key) || !isDataDescriptor(Object.getOwnPropertyDescriptor(value, key))) return false;
+      if (!ownKeySet.has(key) || !isDataDescriptor(Object.getOwnPropertyDescriptor(value, key))) return false;
     }
     return ownKeys.every((key) => key === "length" || (typeof key === "string" && /^(?:0|[1-9]\d*)$/.test(key) && Number(key) < length));
   } catch {

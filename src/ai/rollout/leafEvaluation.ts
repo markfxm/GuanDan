@@ -32,11 +32,13 @@ export function evaluateNonTerminalLeaf(input: LeafEvaluationInput): LeafEvaluat
     if (finishOrderLength > 4) return failure({ kind: "invalid-leaf-state", reason: "duplicate-finish" });
 
     const seen = new Set<PublicSeat>();
+    const canonicalFinishOrder: PublicSeat[] = [];
     for (let index = 0; index < finishOrderLength; index += 1) {
       const value = getOwnDataProperty(finishOrder, String(index));
       if (!isCanonicalSeat(value)) return failure({ kind: "invalid-leaf-state", reason: "unknown-seat" });
       if (seen.has(value)) return failure({ kind: "invalid-leaf-state", reason: "duplicate-finish" });
       seen.add(value);
+      canonicalFinishOrder.push(value);
     }
     const canonicalActingSeat = actingSeat as PublicSeat;
     if (seen.has(canonicalActingSeat)) return failure({ kind: "invalid-acting-seat", reason: "finished-seat" });
@@ -60,7 +62,7 @@ export function evaluateNonTerminalLeaf(input: LeafEvaluationInput): LeafEvaluat
       return clockwiseDistance(left, canonicalActingSeat) - clockwiseDistance(right, canonicalActingSeat);
     });
 
-    const predictedFinishOrder = Object.freeze([...finishOrder, ...unfinished]) as readonly PublicSeat[];
+    const predictedFinishOrder = Object.freeze([...canonicalFinishOrder, ...unfinished]) as readonly PublicSeat[];
     const utilityResult = evaluateTeamUtility({ perspectiveSeat: perspectiveSeat as PublicSeat, finishOrder: predictedFinishOrder });
     if (!utilityResult.ok) return failure(mapUtilityFailure(utilityResult.failure));
     return Object.freeze({ ok: true, predictedFinishOrder, utility: utilityResult.utility });
