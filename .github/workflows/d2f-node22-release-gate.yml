@@ -3,10 +3,6 @@ name: D2F Node 22.22.2 Release Gate
 
 on:
   workflow_dispatch:
-  pull_request:
-  push:
-    branches:
-      - codex/d2f-crn-rollout-source
 
 permissions:
   contents: read
