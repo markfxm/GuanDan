@@ -43,7 +43,7 @@ export interface GameMetrics extends GameSummary {
 export function summarizeGame(game: SimulationSummary | GameSummary & Partial<SimulationSummary>): GameMetrics {
   const events = Array.isArray(game.publicEvents) ? game.publicEvents : [];
   const finishOrder = [...(game.finishOrder ?? [])];
-  const placementByTeam = placementScores(finishOrder);
+  const placementByTeam = teamPlacementScores(finishOrder);
   const placementScore = placementByTeam[0] - placementByTeam[1];
   const counts = countActions(events);
   const bombCount = countBombs(events, game.rank);
@@ -91,7 +91,7 @@ export function summarizeGame(game: SimulationSummary | GameSummary & Partial<Si
   };
 }
 
-function placementScores(finishOrder: Seat[]): Record<0 | 1, number> {
+export function teamPlacementScores(finishOrder: Seat[]): Record<0 | 1, number> {
   const scores: Record<0 | 1, number> = { 0: 0, 1: 0 };
   finishOrder.forEach((seat, index) => {
     scores[(seat % 2) as 0 | 1] += Math.max(0, 4 - index);

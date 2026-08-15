@@ -1,5 +1,6 @@
 import type { PublicActionEvent } from "../../src/game/publicEvent";
 import { verifyPublicActionEventHash, sha256Bytes } from "../../src/game/publicEventHash";
+import { rebuildPublicLedger, type PublicLedgerReplayInitialState } from "../../src/game/publicEventReplay";
 import { RANKS } from "../../src/engine/cards";
 import { canonicalJson } from "./contracts";
 import type { D2GProvenance } from "./d2gManifest";
@@ -53,6 +54,7 @@ export interface D2GPublicReplay {
   rotationPairKey: string;
   baselineTeam: D2GHeadToHeadGameResult["baselineTeam"];
   treatmentTeam: D2GHeadToHeadGameResult["treatmentTeam"];
+  initialPublicReplayState: PublicLedgerReplayInitialState;
   publicEvents: readonly PublicActionEvent[];
   finishOrder: readonly (0 | 1 | 2 | 3)[];
   winnerTeam: 0 | 1 | null;
@@ -111,6 +113,7 @@ export function buildD2GPublicReplay(game: D2GHeadToHeadGameResult, provenance: 
     rotationPairKey: game.rotationPairKey,
     baselineTeam: game.baselineTeam,
     treatmentTeam: game.treatmentTeam,
+    initialPublicReplayState: game.initialPublicReplayState,
     publicEvents: game.publicEvents,
     finishOrder: game.finishOrder,
     winnerTeam: game.winnerTeam,
@@ -131,6 +134,13 @@ export function validateD2GPublicReplay(value: unknown, expected?: D2GProvenance
     verifyPublicActionEventHash(event);
     if (event.gameId !== value.gameId || event.eventIndex !== index) throw new Error("REPLAY_EVENT_SEQUENCE_MISMATCH");
   }
+  const rebuilt = rebuildPublicLedger({
+    schemaVersion: "d2-public-ledger-replay-v1",
+    initialState: value.initialPublicReplayState,
+    events: value.publicEvents,
+    finalLedgerHash: value.finalPublicLedgerHash,
+  });
+  if (rebuilt.hash !== value.finalPublicLedgerHash) throw new Error("REPLAY_FINAL_HASH_MISMATCH");
   const expectedTraceHash = hashCanonical({ schemaVersion: "d2g-public-trace-v1", publicEvents: value.publicEvents });
   if (expectedTraceHash !== value.publicTraceHash) throw new Error("REPLAY_TRACE_HASH_MISMATCH");
   if (!/^[a-f0-9]{64}$/.test(value.finalPublicLedgerHash) || !/^[a-f0-9]{64}$/.test(value.semanticHash)) throw new Error("REPLAY_HASH_MISSING");
@@ -173,6 +183,8 @@ function assertPublicReplay(value: unknown): asserts value is D2GPublicReplay {
   if (containsPrivateKey(value)) throw new Error("REPLAY_PRIVATE_STATE");
   const replay = value as Partial<D2GPublicReplay>;
   if (replay.schemaVersion !== "d2g-replay-v1" || replay.replayVersion !== "d2g-replay-v1" || typeof replay.benchmarkVersion !== "string" || typeof replay.sourceCommit !== "string" || typeof replay.engineVersion !== "string" || typeof replay.roomRulesFingerprint !== "string" || typeof replay.profileConfigurationHash !== "string" || typeof replay.configHash !== "string" || typeof replay.gameId !== "string" || typeof replay.baseSeed !== "number" || !Number.isSafeInteger(replay.baseSeed) || typeof replay.rank !== "string" || !(RANKS as readonly string[]).includes(replay.rank) || replay.rotation !== 0 && replay.rotation !== 1 && replay.rotation !== 2 && replay.rotation !== 3 || replay.allocation !== "AB" && replay.allocation !== "BA" || replay.baselineTeam !== "A" && replay.baselineTeam !== "B" || replay.treatmentTeam !== "A" && replay.treatmentTeam !== "B" || typeof replay.rotationPairKey !== "string" || !Array.isArray(replay.publicEvents) || !Array.isArray(replay.finishOrder) || replay.finishOrder.some((seat) => seat !== 0 && seat !== 1 && seat !== 2 && seat !== 3) || replay.winnerTeam !== 0 && replay.winnerTeam !== 1 && replay.winnerTeam !== null || replay.winningPartnership !== "baseline" && replay.winningPartnership !== "treatment" && replay.winningPartnership !== null || typeof replay.publicTraceHash !== "string" || typeof replay.finalPublicLedgerHash !== "string" || typeof replay.semanticHash !== "string" || typeof replay.replayIdentity !== "string") throw new Error("REPLAY_INVALID");
+  if (replay.initialPublicReplayState === undefined) throw new Error("REPLAY_INITIAL_STATE_MISSING");
+  if (replay.initialPublicReplayState.identity.gameId !== replay.gameId) throw new Error("REPLAY_INITIAL_STATE_MISMATCH");
 }
 
 function containsPrivateKey(value: unknown): boolean {

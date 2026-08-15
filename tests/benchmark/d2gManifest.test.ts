@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { sha256Bytes } from "../../src/game/publicEventHash";
+import { canonicalPublicLedgerHash } from "../../src/game/publicLedger";
 import { createD2GTreatmentProfile, type D2GTreatmentProfile } from "../../src/ai/d2g/treatmentContracts";
 import { buildD2GCanonicalHeadToHeadTasks, type D2GCanonicalHeadToHeadTask } from "./d2gCanonicalAdapter";
 import type { D2GHeadToHeadGameResult } from "./d2gHeadToHeadSimulator";
@@ -76,8 +77,15 @@ function makeTaskResults(tasks: readonly D2GCanonicalHeadToHeadTask[]): D2GHeadT
     baselineTeam: task.baselineTeam,
     treatmentTeam: task.treatmentTeam,
     strategyAssignment: task.strategyAssignment,
+    initialPublicReplayState: {
+      identity: task.publicIdentity,
+      initialHandCounts: task.room.initialPublicLedger!.handCounts,
+      openingLeader: task.room.initialPublicLedger!.currentTrick.leadSeat,
+      initialTrickIndex: task.room.initialPublicLedger!.currentTrick.trickIndex,
+      openingTributePublicState: { status: task.room.openingTribute?.status ?? "none" },
+    },
     initialPublicLedgerHash: task.initialPublicLedgerHash,
-    finalPublicLedgerHash: "1".repeat(64),
+    finalPublicLedgerHash: canonicalPublicLedgerHash(task.room.initialPublicLedger!),
     publicTraceHash: EMPTY_PUBLIC_TRACE_HASH,
     semanticHash: "3".repeat(64),
     publicEvents: [],
@@ -180,6 +188,10 @@ describe("D2G manifest and provenance", () => {
     expect(canResumeD2GGame({ ...game, rank: "A" }, manifest, replay)).toBe(false);
     expect(canResumeD2GGame(game, manifest, { ...replay, publicTraceHash: "2".repeat(64) })).toBe(false);
     expect(canResumeD2GGame(game, manifest, { ...replay, finalPublicLedgerHash: "4".repeat(64) })).toBe(false);
+    const forgedBody = { ...replay, finalPublicLedgerHash: "4".repeat(64) };
+    const { replayIdentity: _replayIdentity, ...forgedReplayBody } = forgedBody;
+    const forgedReplay = { ...forgedBody, replayIdentity: sha256Bytes(new TextEncoder().encode(canonicalJson(forgedReplayBody))) };
+    expect(canResumeD2GGame(game, manifest, forgedReplay)).toBe(false);
   });
 
   it("rejects resume manifest drift in source, profile, config, or expected IDs", () => {

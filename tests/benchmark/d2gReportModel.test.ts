@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { sha256Bytes } from "../../src/game/publicEventHash";
+import { buildPublicGameIdentity } from "../../src/game/publicEvent";
+import { finalizePublicActionEvent, sha256Bytes } from "../../src/game/publicEventHash";
+import { canonicalPublicLedgerHash, createInitialPublicLedger } from "../../src/game/publicLedger";
 import { createD2GTreatmentProfile, type D2GTreatmentProfile } from "../../src/ai/d2g/treatmentContracts";
+import type { PublicLedgerReplayInitialState } from "../../src/game/publicEventReplay";
+import { rebuildPublicLedger } from "../../src/game/publicEventReplay";
 import type { D2GDecisionTelemetryRecord, D2GHeadToHeadGameResult } from "./d2gHeadToHeadSimulator";
 import {
   buildD2GReportModel,
@@ -14,6 +18,8 @@ import { canonicalJson } from "./contracts";
 import { computeD2GSemanticHash } from "./d2gStatistics";
 
 const EMPTY_PUBLIC_TRACE_HASH = sha256Bytes(new TextEncoder().encode(canonicalJson({ schemaVersion: "d2g-public-trace-v1", publicEvents: [] })));
+
+type TestGameOverrides = Partial<D2GHeadToHeadGameResult> & { initialPublicReplayState?: PublicLedgerReplayInitialState };
 
 function makeProfile(): D2GTreatmentProfile {
   return createD2GTreatmentProfile({
@@ -80,7 +86,7 @@ function finishForTeam(team: 0 | 1): [0 | 1 | 2 | 3, 0 | 1 | 2 | 3, 0 | 1 | 2 | 
   return team === 0 ? [0, 2, 1, 3] : [1, 3, 0, 2];
 }
 
-function makeGame(overrides: Partial<D2GHeadToHeadGameResult> = {}): D2GHeadToHeadGameResult {
+function makeGame(overrides: TestGameOverrides = {}): D2GHeadToHeadGameResult {
   const allocation = overrides.allocation ?? "AB";
   const treatmentTeam = allocation === "AB" ? "B" : "A";
   const baselineTeam = treatmentTeam === "A" ? "B" : "A";
@@ -91,9 +97,12 @@ function makeGame(overrides: Partial<D2GHeadToHeadGameResult> = {}): D2GHeadToHe
     : overrides.winningPartnership;
   const seed = overrides.baseSeed ?? 11;
   const rotation = overrides.rotation ?? 0;
-  const game: D2GHeadToHeadGameResult = {
+  const gameId = overrides.gameId ?? `d2g:${seed}:${rotation}:${allocation}`;
+  const initialPublicReplayState = overrides.initialPublicReplayState ?? makeInitialPublicReplayState(gameId);
+  const initialPublicLedgerHash = canonicalPublicLedgerHash(createInitialPublicLedger(initialPublicReplayState));
+  const game = {
     schemaVersion: "d2g-head-to-head-game-v1",
-    gameId: overrides.gameId ?? `d2g:${seed}:${rotation}:${allocation}`,
+    gameId,
     rotationPairKey: overrides.rotationPairKey ?? `pair:${seed}:${rotation}`,
     baseSeed: seed,
     rank: "10",
@@ -107,11 +116,12 @@ function makeGame(overrides: Partial<D2GHeadToHeadGameResult> = {}): D2GHeadToHe
     strategyAssignment: allocation === "AB"
       ? { 0: "baseline", 1: "treatment", 2: "baseline", 3: "treatment" }
       : { 0: "treatment", 1: "baseline", 2: "treatment", 3: "baseline" },
-    initialPublicLedgerHash: "0".repeat(64),
-    finalPublicLedgerHash: "1".repeat(64),
+    initialPublicLedgerHash,
+    finalPublicLedgerHash: initialPublicLedgerHash,
     publicTraceHash: EMPTY_PUBLIC_TRACE_HASH,
     semanticHash: "3".repeat(64),
     publicEvents: [],
+    initialPublicReplayState,
     finishOrder,
     winnerTeam,
     winningPartnership,
@@ -132,8 +142,67 @@ function makeGame(overrides: Partial<D2GHeadToHeadGameResult> = {}): D2GHeadToHe
     errors: [],
     elapsedMs: overrides.elapsedMs ?? 20,
     ...overrides,
-  };
+  } as unknown as D2GHeadToHeadGameResult;
   return overrides.semanticHash === undefined ? { ...game, semanticHash: computeD2GSemanticHash(game) } : game;
+}
+
+function makeInitialPublicReplayState(gameId: string): PublicLedgerReplayInitialState {
+  return {
+    identity: buildPublicGameIdentity(gameId, 0, 0, "benchmark-scenario"),
+    initialHandCounts: { 0: 27, 1: 27, 2: 27, 3: 27 },
+    openingLeader: 0,
+    initialTrickIndex: 0,
+    openingTributePublicState: { status: "none" },
+  };
+}
+
+function makeReplayWithPass(provenance: D2GProvenance) {
+  const gameId = "d2g:replay-pass";
+  const initialPublicReplayState = makeInitialPublicReplayState(gameId);
+  const play = finalizePublicActionEvent({
+    schemaVersion: "d2-public-event-v2",
+    gameId,
+    roundIdentity: initialPublicReplayState.identity.roundIdentity,
+    handIdentity: initialPublicReplayState.identity.handIdentity,
+    eventIndex: 0,
+    kind: "play",
+    seat: 0,
+    publicCardIds: ["C2-1"],
+    patternType: "single",
+    groupType: "single",
+    publicStableKey: "play:C2-1",
+    handCountBefore: 27,
+    handCountAfter: 26,
+    trickIndex: 0,
+  });
+  const pass = finalizePublicActionEvent({
+    schemaVersion: "d2-public-event-v2",
+    gameId,
+    roundIdentity: initialPublicReplayState.identity.roundIdentity,
+    handIdentity: initialPublicReplayState.identity.handIdentity,
+    eventIndex: 1,
+    kind: "pass",
+    seat: 1,
+    publicStableKey: "pass:v2",
+    handCountBefore: 27,
+    handCountAfter: 27,
+    trickIndex: 0,
+  });
+  const publicEvents = [play, pass];
+  const publicTraceHash = sha256Bytes(new TextEncoder().encode(canonicalJson({ schemaVersion: "d2g-public-trace-v1", publicEvents })));
+  const finalPublicLedgerHash = rebuildPublicLedger({ schemaVersion: "d2-public-ledger-replay-v1", initialState: initialPublicReplayState, events: publicEvents }).hash;
+  return buildD2GPublicReplay(makeGame({
+    gameId,
+    publicEvents,
+    publicTraceHash,
+    finalPublicLedgerHash,
+    initialPublicReplayState,
+  }), provenance);
+}
+
+function reidentifyReplay(replay: Record<string, unknown>): Record<string, unknown> {
+  const { replayIdentity: _replayIdentity, ...body } = replay;
+  return { ...body, replayIdentity: sha256Bytes(new TextEncoder().encode(canonicalJson(body))) };
 }
 
 function makeBlock(seed: number): D2GHeadToHeadGameResult[] {
@@ -147,8 +216,8 @@ describe("D2G report model", () => {
 
     expect(ab.treatmentWinIndicator).toBe(1);
     expect(ba.treatmentWinIndicator).toBe(1);
-    expect(ab.scoreDelta).toBe(1);
-    expect(ba.scoreDelta).toBe(1);
+    expect(ab.scoreDelta).toBe(4);
+    expect(ba.scoreDelta).toBe(4);
     expect(ab.levelStepDelta).toBe(3);
     expect(ba.levelStepDelta).toBe(3);
     expect(ab.finishUtilityDelta).toBeGreaterThan(0);
@@ -161,10 +230,33 @@ describe("D2G report model", () => {
 
     expect(treatmentWin.levelStep).toBe(3);
     expect(treatmentWin.levelStepDelta).toBe(3);
-    expect(treatmentWin.scoreDelta).toBe(1);
+    expect(treatmentWin.scoreDelta).toBe(4);
     expect(baselineWin.levelStep).toBe(3);
     expect(baselineWin.levelStepDelta).toBe(-3);
-    expect(baselineWin.scoreDelta).toBe(-1);
+    expect(baselineWin.scoreDelta).toBe(-4);
+  });
+
+  it("keeps team placement score distinct from the treatment win indicator", () => {
+    const strongTreatmentWin = normalizeD2GGameResult(makeGame({ allocation: "AB", winnerTeam: 1, finishOrder: [1, 3, 0, 2] }));
+    const weakerTreatmentWin = normalizeD2GGameResult(makeGame({ allocation: "AB", winnerTeam: 1, finishOrder: [1, 0, 3, 2] }));
+
+    expect(strongTreatmentWin.treatmentWinIndicator).toBe(1);
+    expect(weakerTreatmentWin.treatmentWinIndicator).toBe(1);
+    expect(strongTreatmentWin.treatmentTeamScore).not.toBe(weakerTreatmentWin.treatmentTeamScore);
+    expect(strongTreatmentWin.scoreDelta).toBe(4);
+    expect(weakerTreatmentWin.scoreDelta).toBe(2);
+    expect(strongTreatmentWin.levelStep).toBe(3);
+    expect(weakerTreatmentWin.levelStep).toBe(2);
+  });
+
+  it("keeps treatment score sign correct when AB and BA swap labels", () => {
+    const ab = normalizeD2GGameResult(makeGame({ allocation: "AB", winnerTeam: 1, finishOrder: [1, 0, 3, 2] }));
+    const ba = normalizeD2GGameResult(makeGame({ allocation: "BA", winnerTeam: 0, finishOrder: [0, 1, 2, 3] }));
+
+    expect(ab.treatmentWinIndicator).toBe(1);
+    expect(ba.treatmentWinIndicator).toBe(1);
+    expect(ab.scoreDelta).toBeGreaterThan(0);
+    expect(ba.scoreDelta).toBeGreaterThan(0);
   });
 
   it("keeps incomplete games unresolved instead of assigning a neutral outcome", () => {
@@ -259,8 +351,38 @@ describe("D2G report model", () => {
     const replay = buildD2GPublicReplay(makeGame(), provenance);
 
     expect(validateD2GPublicReplay(replay, provenance)).toBe(true);
-    expect(JSON.stringify(replay)).not.toMatch(/(hands|initialHands|privateOwnHandFingerprint|aiRuntime|aiPlans|particle)/i);
+    expect(JSON.stringify(replay)).not.toMatch(/"(hands|initialHands|privateOwnHandFingerprint|aiRuntime|aiPlans|privateState|hiddenState|particleState|opponentHands)"/i);
     expect(replay).not.toHaveProperty("decisionTelemetry");
+  });
+
+  it("rejects a replay without canonical initial public replay state", () => {
+    const provenance = makeProvenance();
+    const replay = buildD2GPublicReplay(makeGame(), provenance) as unknown as Record<string, unknown>;
+    delete replay.initialPublicReplayState;
+
+    expect(() => validateD2GPublicReplay(replay, provenance)).toThrow("REPLAY_INITIAL_STATE_MISSING");
+  });
+
+  it("rejects a forged final ledger hash even when the replay envelope is internally reidentified", () => {
+    const provenance = makeProvenance();
+    const replay = buildD2GPublicReplay(makeGame(), provenance) as unknown as Record<string, unknown>;
+    const forged = reidentifyReplay({ ...replay, finalPublicLedgerHash: "2".repeat(64) });
+
+    expect(() => validateD2GPublicReplay(forged, provenance)).toThrow("REPLAY_FINAL_HASH_MISMATCH");
+  });
+
+  it("rejects missing, reordered, and hash-invalid public events", () => {
+    const provenance = makeProvenance();
+    const replay = makeReplayWithPass(provenance) as unknown as Record<string, unknown>;
+    const missingEvent = reidentifyReplay({ ...replay, publicEvents: [], publicTraceHash: EMPTY_PUBLIC_TRACE_HASH });
+    const events = replay.publicEvents as Array<Record<string, unknown>>;
+    const reorderedEvents = [...events].reverse();
+    const reordered = reidentifyReplay({ ...replay, publicEvents: reorderedEvents, publicTraceHash: sha256Bytes(new TextEncoder().encode(canonicalJson({ schemaVersion: "d2g-public-trace-v1", publicEvents: reorderedEvents }))) });
+    const invalidHash = reidentifyReplay({ ...replay, publicEvents: [{ ...events[0], publicPayloadHash: "3".repeat(64) }, events[1]] });
+
+    expect(() => validateD2GPublicReplay(missingEvent, provenance)).toThrow();
+    expect(() => validateD2GPublicReplay(reordered, provenance)).toThrow("REPLAY_EVENT_SEQUENCE_MISMATCH");
+    expect(() => validateD2GPublicReplay(invalidHash, provenance)).toThrow("EVENT_HASH_INVALID");
   });
 
   it("defines correctness cleanliness from completion, conservation, lifecycle, and error evidence", () => {

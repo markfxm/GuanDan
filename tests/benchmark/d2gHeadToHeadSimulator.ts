@@ -20,6 +20,7 @@ import { canonicalPublicLedgerHash } from "../../src/game/publicLedger";
 import * as roomModule from "../../src/game/room";
 import type { AiPlanState, RoomState } from "../../src/game/room";
 import type { PublicActionEvent } from "../../src/game/publicEvent";
+import type { PublicLedgerReplayInitialState } from "../../src/game/publicEventReplay";
 import { sha256Bytes } from "../../src/game/publicEventHash";
 import type { GameRank } from "../../src/engine/cards";
 import { createBenchmarkObservation, toProductionObservation } from "./observation";
@@ -116,6 +117,7 @@ export type D2GHeadToHeadGameResult = Readonly<{
   baselineTeam: "A" | "B";
   treatmentTeam: "A" | "B";
   strategyAssignment: D2GCanonicalHeadToHeadTask["strategyAssignment"];
+  initialPublicReplayState: PublicLedgerReplayInitialState;
   initialPublicLedgerHash: string;
   finalPublicLedgerHash: string;
   publicTraceHash: string;
@@ -155,6 +157,7 @@ export function simulateD2GHeadToHeadGame(
 ): D2GHeadToHeadGameResult {
   const startedAt = performance.now();
   const room = structuredClone(task.room);
+  const initialPublicReplayState = createInitialPublicReplayState(room);
   const maxTurns = options.maxTurns ?? 5000;
   const candidateReuseTracker = options.candidateReuseTracker ?? createD2GCandidateReuseTracker();
   const decisionTelemetry: D2GDecisionTelemetryRecord[] = [];
@@ -369,6 +372,7 @@ export function simulateD2GHeadToHeadGame(
     baselineTeam: task.baselineTeam,
     treatmentTeam: task.treatmentTeam,
     strategyAssignment: task.strategyAssignment,
+    initialPublicReplayState,
     initialPublicLedgerHash: task.initialPublicLedgerHash,
     finalPublicLedgerHash,
     publicTraceHash,
@@ -393,6 +397,17 @@ export function simulateD2GHeadToHeadGame(
     errorCounters: Object.freeze({ ...errorCounters, total: errors.length }),
     errors: Object.freeze([...errors]),
     elapsedMs: performance.now() - startedAt,
+  });
+}
+
+function createInitialPublicReplayState(room: RoomStateLike): PublicLedgerReplayInitialState {
+  if (room.publicIdentity === undefined || room.initialPublicLedger === null) throw new Error("D2G_CANONICAL_PUBLIC_STATE_MISSING");
+  return Object.freeze({
+    identity: room.publicIdentity,
+    initialHandCounts: { ...room.initialPublicLedger.handCounts },
+    openingLeader: room.initialPublicLedger.currentTrick.leadSeat,
+    initialTrickIndex: room.initialPublicLedger.currentTrick.trickIndex,
+    openingTributePublicState: { status: room.openingTribute?.status ?? "none" },
   });
 }
 

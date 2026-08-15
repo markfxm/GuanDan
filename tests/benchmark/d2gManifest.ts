@@ -181,6 +181,7 @@ export function canResumeD2GGame(game: D2GHeadToHeadGameResult, manifest: D2GMan
     && replay.baselineTeam === game.baselineTeam
     && replay.treatmentTeam === game.treatmentTeam
     && canonicalJson(replay.publicEvents) === canonicalJson(game.publicEvents)
+    && canonicalJson(replay.initialPublicReplayState) === canonicalJson(game.initialPublicReplayState)
     && canonicalJson(replay.finishOrder) === canonicalJson(game.finishOrder)
     && replay.winnerTeam === game.winnerTeam
     && replay.winningPartnership === game.winningPartnership

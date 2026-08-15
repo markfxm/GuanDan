@@ -5,6 +5,7 @@ import { createD2GTreatmentProfile, type D2GTreatmentProfile } from "../../src/a
 import { decideAiAction } from "../../src/ai/aiDecisionEngine";
 import * as aiDecisionEngine from "../../src/ai/aiDecisionEngine";
 import * as roomModule from "../../src/game/room";
+import { rebuildPublicLedger } from "../../src/game/publicEventReplay";
 import { createBenchmarkObservation, toProductionObservation } from "./observation";
 import {
   createD2GCanonicalHeadToHeadTask,
@@ -302,6 +303,7 @@ describe("D2G canonical head-to-head adapter", () => {
     expect(result.decisionTelemetry[0]!.rolloutEvaluationCostMs).toBeGreaterThanOrEqual(0);
     expect(result.publicTraceHash).toMatch(/^[0-9a-f]{64}$/);
     expect(result.finalPublicLedgerHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(rebuildPublicLedger({ schemaVersion: "d2-public-ledger-replay-v1", initialState: result.initialPublicReplayState, events: result.publicEvents, finalLedgerHash: result.finalPublicLedgerHash }).hash).toBe(result.finalPublicLedgerHash);
   });
 
   it("completes a canonical game with conserved physical cards", () => {

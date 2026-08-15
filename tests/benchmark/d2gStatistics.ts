@@ -1,8 +1,10 @@
 import { settleRound, type RoundOutcome } from "../../src/game/settlement";
 import { sha256Bytes, verifyPublicActionEventHash } from "../../src/game/publicEventHash";
+import { rebuildPublicLedger } from "../../src/game/publicEventReplay";
 import type { GameSummary } from "./contracts";
 import { canonicalJson } from "./contracts";
 import { pairedBootstrap, type BootstrapResult } from "./statistics";
+import { teamPlacementScores } from "./metrics";
 import type { D2GDecisionTelemetryRecord, D2GHeadToHeadGameResult } from "./d2gHeadToHeadSimulator";
 import type { D2GProvenance } from "./d2gManifest";
 
@@ -182,7 +184,6 @@ export function normalizeD2GGameResult(game: D2GHeadToHeadGameResult, provenance
   const resolved = unresolvedReason === null;
   const treatmentTeamNumber = game.treatmentTeam === "A" ? 0 : 1;
   const treatmentWon = resolved && game.winnerTeam === treatmentTeamNumber;
-  const baselineWon = resolved && game.winnerTeam !== null && game.winnerTeam !== treatmentTeamNumber;
   const settlement = resolved ? settleRound([...game.finishOrder], game.rank) : undefined;
   const treatmentPlaces = resolved ? game.finishOrder.filter((seat) => seat % 2 === treatmentTeamNumber).map((seat) => game.finishOrder.indexOf(seat) + 1) : [];
   const baselinePlaces = resolved ? game.finishOrder.filter((seat) => seat % 2 !== treatmentTeamNumber).map((seat) => game.finishOrder.indexOf(seat) + 1) : [];
@@ -195,8 +196,9 @@ export function normalizeD2GGameResult(game: D2GHeadToHeadGameResult, provenance
   const treatmentRolloutCosts = treatmentControlled.map((record) => record.rolloutEvaluationCostMs);
   const counterfactualRolloutCosts = baselineControlled.map((record) => record.rolloutEvaluationCostMs);
   const workUnits = game.decisionTelemetry.map((record) => record.rolloutWorkUnits);
-  const treatmentScore = resolved ? (treatmentWon ? 1 : 0) : null;
-  const baselineScore = resolved ? (baselineWon ? 1 : 0) : null;
+  const placementByTeam = resolved ? teamPlacementScores([...game.finishOrder]) : null;
+  const treatmentScore = resolved ? placementByTeam![treatmentTeamNumber] : null;
+  const baselineScore = resolved ? placementByTeam![treatmentTeamNumber === 0 ? 1 : 0] : null;
   return {
     schemaVersion: "d2g-treatment-perspective-outcome-v1",
     gameId: game.gameId,
@@ -267,6 +269,20 @@ export function isCorrectnessCleanGame(game: D2GHeadToHeadGameResult, provenance
       return false;
     }
   })();
+  const publicLedgerRoundTripValid = (() => {
+    try {
+      if (game.initialPublicReplayState.identity.gameId !== game.gameId) return false;
+      const rebuilt = rebuildPublicLedger({
+        schemaVersion: "d2-public-ledger-replay-v1",
+        initialState: game.initialPublicReplayState,
+        events: game.publicEvents,
+        finalLedgerHash: game.finalPublicLedgerHash,
+      });
+      return rebuilt.hash === game.finalPublicLedgerHash;
+    } catch {
+      return false;
+    }
+  })();
   const errorEvidence = hasD2GErrorEvidence(game.errorCounters);
   const settlementValid = (() => {
     if (!finishOrderValid || game.winnerTeam === null) return false;
@@ -284,6 +300,7 @@ export function isCorrectnessCleanGame(game: D2GHeadToHeadGameResult, provenance
     && !errorEvidence
     && game.errors.length === 0
     && publicTraceValid
+    && publicLedgerRoundTripValid
     && /^[0-9a-f]{64}$/.test(game.finalPublicLedgerHash)
     && /^[0-9a-f]{64}$/.test(game.semanticHash)
     && computeD2GSemanticHash(game) === game.semanticHash
