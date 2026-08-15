@@ -77,6 +77,13 @@ function telemetry(actingStrategy: "baseline" | "treatment", fallbackReason: D2G
     disagreement,
     rankingHash: "1".repeat(64),
     rolloutWorkUnits: 10,
+    rolloutEvidence: {
+      effectiveSampleSize: actingStrategy === "baseline" ? 1 : 2,
+      acceptedScenarioCount: actingStrategy === "baseline" ? 1 : 2,
+      completedReplicateCount: actingStrategy === "baseline" ? 1 : 4,
+      expectedCompletedReplicateCount: actingStrategy === "baseline" ? 1 : 4,
+      coverage: "complete",
+    },
     productionDecisionCostMs: actingStrategy === "baseline" ? 2 : 3,
     rolloutEvaluationCostMs: actingStrategy === "baseline" ? 11 : 7,
   };
@@ -324,6 +331,21 @@ describe("D2G report model", () => {
     expect(statistics.latency.counterfactualRolloutCostMs.count).toBe(8);
     expect(statistics.latency.actualTreatmentRolloutCostMs.p50).toBe(7);
     expect(statistics.latency.counterfactualRolloutCostMs.p50).toBe(11);
+  });
+
+  it("reports treatment and counterfactual aggregate rollout evidence separately", () => {
+    const statistics = buildD2GReportModel({ provenance: makeProvenance(), games: makeBlock(11) }).statistics;
+
+    expect(statistics.evidence.treatment.evaluationCount).toBe(16);
+    expect(statistics.evidence.treatment.evidenceCount).toBe(16);
+    expect(statistics.evidence.treatment.effectiveSampleSize?.p50).toBe(2);
+    expect(statistics.evidence.treatment.acceptedScenarioCount?.p50).toBe(2);
+    expect(statistics.evidence.treatment.completedReplicateCount?.p50).toBe(4);
+    expect(statistics.evidence.treatment.expectedCompletedReplicateCount?.p50).toBe(4);
+    expect(statistics.evidence.treatment.coverage.completeCount).toBe(16);
+    expect(statistics.evidence.counterfactual.evaluationCount).toBe(8);
+    expect(statistics.evidence.counterfactual.effectiveSampleSize?.p50).toBe(1);
+    expect(statistics.evidence.counterfactual.coverage.completeCount).toBe(8);
   });
 
   it("excludes wall-clock fields from deterministic report identity", () => {

@@ -6,6 +6,7 @@ import { canonicalJson } from "./contracts";
 import { pairedBootstrap, type BootstrapResult } from "./statistics";
 import { teamPlacementScores } from "./metrics";
 import type { D2GDecisionTelemetryRecord, D2GHeadToHeadGameResult } from "./d2gHeadToHeadSimulator";
+import type { D2GRolloutEvidence } from "../../src/ai/d2g/treatmentSelector";
 import type { D2GProvenance } from "./d2gManifest";
 
 export type D2GUnresolvedReason = "missing" | "failed" | "incomplete" | "correctness-unclean";
@@ -76,6 +77,31 @@ export interface D2GLatencySummary {
   p99: number;
 }
 
+export interface D2GNumericEvidenceSummary {
+  count: number;
+  min: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  max: number;
+}
+
+export interface D2GEvidencePopulationSummary {
+  evaluationCount: number;
+  evidenceCount: number;
+  unavailableCount: number;
+  effectiveSampleSize: D2GNumericEvidenceSummary | null;
+  acceptedScenarioCount: D2GNumericEvidenceSummary | null;
+  completedReplicateCount: D2GNumericEvidenceSummary | null;
+  expectedCompletedReplicateCount: D2GNumericEvidenceSummary | null;
+  coverage: {
+    completeCount: number;
+    incompleteCount: number;
+    unavailableCount: number;
+    completeRate: number | null;
+  };
+}
+
 export interface D2GStatistics {
   schemaVersion: "d2g-statistics-v1";
   rawGameCount: number;
@@ -119,6 +145,10 @@ export interface D2GStatistics {
     executionErrors: number;
     transitionErrors: number;
     guardErrors: number;
+  };
+  evidence: {
+    treatment: D2GEvidencePopulationSummary;
+    counterfactual: D2GEvidencePopulationSummary;
   };
   latency: {
     productionDecisionCostMs: D2GLatencySummary;
@@ -324,6 +354,7 @@ export function buildD2GStatistics(games: readonly D2GHeadToHeadGameResult[], op
   const bootstrapOrigins = new Map(completeBlocks.flatMap((block) => block.games.map((game) => [bootstrapKey(game), game] as const)));
   const bootstrapValues = bootstrap === undefined ? undefined : bootstrapMetrics(bootstrap, bootstrapOrigins);
   const paired = pairedOutcomes(resolved);
+  const decisionRecords = games.flatMap((game) => game.decisionTelemetry);
   return {
     schemaVersion: "d2g-statistics-v1",
     rawGameCount: games.length,
@@ -361,6 +392,10 @@ export function buildD2GStatistics(games: readonly D2GHeadToHeadGameResult[], op
     counterfactualFallbackCount: normalized.reduce((sumValue, game) => sumValue + game.counterfactualFallbackCount, 0),
     allTreatmentEvaluationFallbackCount: normalized.reduce((sumValue, game) => sumValue + game.allTreatmentEvaluationFallbackCount, 0),
     errorCounters,
+    evidence: {
+      treatment: summarizeEvidencePopulation(decisionRecords.filter((record) => record.actingStrategy === "treatment")),
+      counterfactual: summarizeEvidencePopulation(decisionRecords.filter((record) => record.actingStrategy === "baseline")),
+    },
     latency: {
       productionDecisionCostMs: latency(normalized.flatMap((game) => game.productionDecisionCostMs)),
       actualTreatmentRolloutCostMs: latency(normalized.flatMap((game) => game.actualTreatmentRolloutCostMs)),
@@ -501,6 +536,40 @@ function countFallbacks(records: readonly D2GDecisionTelemetryRecord[]): Record<
     if (record.fallbackReason !== "none") counts[record.fallbackReason] = (counts[record.fallbackReason] ?? 0) + 1;
     return counts;
   }, {});
+}
+
+function summarizeEvidencePopulation(records: readonly D2GDecisionTelemetryRecord[]): D2GEvidencePopulationSummary {
+  const evidence = records
+    .map((record) => record.rolloutEvidence)
+    .filter((value): value is D2GRolloutEvidence => value !== null && value !== undefined);
+  const coverageCompleteCount = evidence.filter((value) => value.coverage === "complete").length;
+  return {
+    evaluationCount: records.length,
+    evidenceCount: evidence.length,
+    unavailableCount: records.length - evidence.length,
+    effectiveSampleSize: evidenceSummary(evidence.map((value) => value.effectiveSampleSize)),
+    acceptedScenarioCount: evidenceSummary(evidence.map((value) => value.acceptedScenarioCount)),
+    completedReplicateCount: evidenceSummary(evidence.map((value) => value.completedReplicateCount)),
+    expectedCompletedReplicateCount: evidenceSummary(evidence.map((value) => value.expectedCompletedReplicateCount)),
+    coverage: {
+      completeCount: coverageCompleteCount,
+      incompleteCount: evidence.length - coverageCompleteCount,
+      unavailableCount: records.length - evidence.length,
+      completeRate: evidence.length === 0 ? null : coverageCompleteCount / evidence.length,
+    },
+  };
+}
+
+function evidenceSummary(values: readonly number[]): D2GNumericEvidenceSummary | null {
+  if (values.length === 0) return null;
+  return {
+    count: values.length,
+    min: Math.min(...values),
+    p50: quantile(values, 0.5),
+    p95: quantile(values, 0.95),
+    p99: quantile(values, 0.99),
+    max: Math.max(...values),
+  };
 }
 
 function latency(values: readonly number[]): D2GLatencySummary {

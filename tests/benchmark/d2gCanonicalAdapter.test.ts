@@ -164,6 +164,10 @@ describe("D2G canonical head-to-head adapter", () => {
     expect(requests[0]!.candidates.map(({ baselineEvaluatorScore }) => baselineEvaluatorScore)).toEqual(
       matchedDecision!.evaluatedCandidates.map(({ score }) => score.total),
     );
+    const evidence = result.decisionTelemetry.find((record) => record.rolloutEvidence !== null)?.rolloutEvidence;
+    expect(evidence).toMatchObject({ effectiveSampleSize: 1, acceptedScenarioCount: 1, coverage: "complete" });
+    expect(evidence?.completedReplicateCount).toBeGreaterThan(0);
+    expect(evidence?.expectedCompletedReplicateCount).toBe(evidence?.completedReplicateCount);
     decide.mockRestore();
     runner.mockRestore();
   });

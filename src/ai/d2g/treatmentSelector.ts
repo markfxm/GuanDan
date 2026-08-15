@@ -5,6 +5,7 @@ import {
   type RolloutBudget,
   type RolloutExecutionResult,
   type RolloutFailure,
+  type RolloutAggregateDiagnostics,
 } from "../rollout/contracts";
 import type { D2FShadowPreActionSnapshot, RolloutCandidate } from "../rollout/contracts";
 import { buildParticleBank } from "../particles/particleBankBuilder";
@@ -23,6 +24,15 @@ import * as rolloutOrchestrator from "../rollout/rolloutOrchestrator";
 export type D2GPreActionState = D2FShadowPreActionSnapshot;
 export type D2GEvaluatedCandidate = AiDecision["evaluatedCandidates"][number];
 
+export type D2GRolloutEvidence = Readonly<Pick<
+  RolloutAggregateDiagnostics,
+  | "effectiveSampleSize"
+  | "acceptedScenarioCount"
+  | "completedReplicateCount"
+  | "expectedCompletedReplicateCount"
+  | "coverage"
+>>;
+
 export type D2GTreatmentTelemetry = Readonly<{
   gameId: string;
   actingSeat: D2GDecisionContext["actingSeat"];
@@ -39,6 +49,7 @@ export type D2GTreatmentTelemetry = Readonly<{
   disagreement: boolean;
   rankingHash: string;
   rolloutWorkUnits: number;
+  rolloutEvidence: D2GRolloutEvidence | null;
 }>;
 
 export type D2GTreatmentSelection = Readonly<{
@@ -55,6 +66,7 @@ export type D2GTreatmentSelection = Readonly<{
   ranking: readonly string[];
   rankingHash: string;
   rolloutWorkUnits: number;
+  rolloutEvidence: D2GRolloutEvidence | null;
   profileConfigurationHash: string;
   telemetry: D2GTreatmentTelemetry;
   elapsedMs: number;
@@ -180,6 +192,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
       ranking,
       rankingHash,
       rolloutWorkUnits: attempt.result.aggregateDiagnostics.workUnitCount,
+      rolloutEvidence: toD2GRolloutEvidence(attempt.result.aggregateDiagnostics),
       elapsedMs: attempt.elapsedMs,
     });
   }
@@ -192,6 +205,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
       ranking,
       rankingHash,
       rolloutWorkUnits: attempt.result.aggregateDiagnostics.workUnitCount,
+      rolloutEvidence: toD2GRolloutEvidence(attempt.result.aggregateDiagnostics),
       elapsedMs: attempt.elapsedMs,
     });
   }
@@ -204,6 +218,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
       ranking,
       rankingHash,
       rolloutWorkUnits: attempt.result.aggregateDiagnostics.workUnitCount,
+      rolloutEvidence: toD2GRolloutEvidence(attempt.result.aggregateDiagnostics),
       elapsedMs: attempt.elapsedMs,
     });
   }
@@ -214,6 +229,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
     ranking,
     rankingHash,
     rolloutWorkUnits: attempt.result.aggregateDiagnostics.workUnitCount,
+    rolloutEvidence: toD2GRolloutEvidence(attempt.result.aggregateDiagnostics),
     elapsedMs: attempt.elapsedMs,
     treatmentCandidate,
   });
@@ -392,6 +408,7 @@ function makeSelection(
     ranking: readonly string[];
     rankingHash: string;
     rolloutWorkUnits: number;
+    rolloutEvidence?: D2GRolloutEvidence | null;
     elapsedMs: number;
     treatmentCandidate?: D2GEvaluatedCandidate;
   }>,
@@ -419,6 +436,7 @@ function makeSelection(
     disagreement,
     rankingHash: outcome.rankingHash,
     rolloutWorkUnits: outcome.rolloutWorkUnits,
+    rolloutEvidence: outcome.rolloutEvidence ?? null,
   });
   return Object.freeze({
     baselineCandidateId: baseline.baselineCandidateId,
@@ -434,10 +452,21 @@ function makeSelection(
     ranking: Object.freeze([...outcome.ranking]),
     rankingHash: outcome.rankingHash,
     rolloutWorkUnits: outcome.rolloutWorkUnits,
+    rolloutEvidence: outcome.rolloutEvidence ?? null,
     profileConfigurationHash: input.profile.configurationHash,
     telemetry,
     elapsedMs: outcome.elapsedMs,
     rolloutEvaluationCostMs: outcome.elapsedMs,
+  });
+}
+
+function toD2GRolloutEvidence(diagnostics: RolloutAggregateDiagnostics): D2GRolloutEvidence {
+  return Object.freeze({
+    effectiveSampleSize: diagnostics.effectiveSampleSize,
+    acceptedScenarioCount: diagnostics.acceptedScenarioCount,
+    completedReplicateCount: diagnostics.completedReplicateCount,
+    expectedCompletedReplicateCount: diagnostics.expectedCompletedReplicateCount,
+    coverage: diagnostics.coverage,
   });
 }
 
