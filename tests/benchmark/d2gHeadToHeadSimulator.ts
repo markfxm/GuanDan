@@ -66,6 +66,7 @@ type D2GTreatmentOutcome = Pick<
 type D2GTreatmentInputFailure = Readonly<{
   kind: "treatment-input-failure";
   fallbackReason: Exclude<D2GTreatmentSelection["fallbackReason"], "none">;
+  countsAsError: boolean;
   elapsedMs: number;
 }>;
 
@@ -231,8 +232,11 @@ export function simulateD2GHeadToHeadGame(
       const selectorInput = createSelectorInput(task, room, decision, decisionIndex, actingStrategy);
       treatment = selectD2GTreatment(selectorInput);
     } catch (cause) {
-      recordError(errors, errorCounters, "treatmentErrors", cause);
       treatmentInputFailure = makeTreatmentInputFailure(cause, performance.now() - treatmentStartedAt);
+      if (treatmentInputFailure.countsAsError) recordError(errors, errorCounters, "treatmentErrors", cause);
+    }
+    if (treatment?.fallbackReason === "unexpected-failure") {
+      recordError(errors, errorCounters, "treatmentErrors", new Error("D2G_UNEXPECTED_TREATMENT_FAILURE"));
     }
 
     const actualAction = actingStrategy === "baseline" || treatmentInputFailure !== undefined
@@ -469,9 +473,17 @@ function makeTreatmentInputFailure(
 ): D2GTreatmentInputFailure {
   return Object.freeze({
     kind: "treatment-input-failure",
-    fallbackReason: cause instanceof Error && cause.message.startsWith("D2G_SNAPSHOT_FAILED") ? "rollout-unusable" : "unexpected-failure",
+    fallbackReason: treatmentPreparationFailureReason(cause),
+    countsAsError: treatmentPreparationFailureReason(cause) === "unexpected-failure",
     elapsedMs,
   });
+}
+
+function treatmentPreparationFailureReason(cause: unknown): D2GTreatmentInputFailure["fallbackReason"] {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  if (message.startsWith("D2G_SNAPSHOT_FAILED") || message === "D2G_CANONICAL_PUBLIC_STATE_MISSING") return "rollout-unusable";
+  if (message.startsWith("D2G_CANDIDATE_PROJECTION_FAILED")) return "candidate-mapping-failed";
+  return "unexpected-failure";
 }
 
 function executeCanonicalAction(room: RoomStateLike, seat: 0 | 1 | 2 | 3, action: AiAction): void {

@@ -5,6 +5,7 @@ import { createD2GTreatmentProfile, type D2GTreatmentProfile } from "../../src/a
 import { decideAiAction } from "../../src/ai/aiDecisionEngine";
 import * as aiDecisionEngine from "../../src/ai/aiDecisionEngine";
 import * as roomModule from "../../src/game/room";
+import { createBenchmarkObservation, toProductionObservation } from "./observation";
 import {
   createD2GCanonicalHeadToHeadTask,
   type D2GCanonicalHeadToHeadTaskInput,
@@ -211,6 +212,82 @@ describe("D2G canonical head-to-head adapter", () => {
     expect(decision!.executedCandidateId).toBe(decision!.baselineCandidateId);
     expect(result.runtimePlanMismatchCount).toBe(0);
     runner.mockRestore();
+  });
+
+  it("does not count recoverable rollout failure as a treatment error", () => {
+    const task = makeTask({ allocation: "BA" });
+    const runner = vi.spyOn(rolloutOrchestrator, "runDetachedRollout").mockReturnValue({
+      ok: false,
+      failure: { kind: "kernel-failed", failure: { kind: "budget-exhausted", workUnits: 1, maximumWorkUnits: 1 } },
+    });
+
+    const result = simulateD2GHeadToHeadGame(task, { maxTurns: 3 });
+    const treatmentFallback = result.decisionTelemetry.find(({ actingStrategy, fallbackReason }) => actingStrategy === "treatment" && fallbackReason === "rollout-failed");
+
+    expect(treatmentFallback).toBeDefined();
+    expect(result.fallbackCounts["rollout-failed"]).toBeGreaterThan(0);
+    expect(result.errorCounters.total).toBe(0);
+    expect(result.errorCounters.treatmentErrors).toBe(0);
+    runner.mockRestore();
+  });
+
+  it("counts an unexpected treatment exception while still falling back to baseline", () => {
+    const task = makeTask({ allocation: "BA" });
+    const runner = vi.spyOn(rolloutOrchestrator, "runDetachedRollout").mockImplementation(() => {
+      throw new Error("D2G_TEST_UNEXPECTED_TREATMENT_EXCEPTION");
+    });
+
+    const result = simulateD2GHeadToHeadGame(task, { maxTurns: 3 });
+    const treatmentFallback = result.decisionTelemetry.find(({ actingStrategy, fallbackReason }) => actingStrategy === "treatment" && fallbackReason === "unexpected-failure");
+
+    expect(treatmentFallback).toBeDefined();
+    expect(treatmentFallback!.selection).toBe("baseline");
+    expect(treatmentFallback!.executedCandidateId).toBe(treatmentFallback!.baselineCandidateId);
+    expect(result.errorCounters.treatmentErrors).toBeGreaterThan(0);
+    expect(result.errorCounters.total).toBeGreaterThan(0);
+    runner.mockRestore();
+  });
+
+  it("does not count canonical snapshot unusable fallback as a treatment error", () => {
+    const task = makeTask({ pendingTributeItems: [{ payer: 0, receiver: 2 }] });
+    const result = simulateD2GHeadToHeadGame(task, { maxTurns: 3 });
+
+    expect(result.decisionTelemetry[0]!.fallbackReason).toBe("rollout-unusable");
+    expect(result.errorCounters.total).toBe(0);
+    expect(result.errorCounters.treatmentErrors).toBe(0);
+    expect(result.actionExecutionCount).toBe(1);
+  });
+
+  it("keeps production Room and benchmark observation decision fields equivalent", () => {
+    const task = makeTask();
+    const productionRoom = structuredClone(task.room);
+    const benchmarkRoom = structuredClone(task.room);
+    const seat = productionRoom.currentTurn;
+    const expected = toProductionObservation(createBenchmarkObservation(benchmarkRoom, seat));
+    let actual: unknown;
+    const original = aiDecisionEngine.decideAiAction;
+    const decide = vi.spyOn(aiDecisionEngine, "decideAiAction").mockImplementation((observation, ...rest) => {
+      actual = structuredClone(observation);
+      return original(observation, ...rest);
+    });
+
+    roomModule.runAiStep(productionRoom);
+
+    expect(actual).toEqual(expected);
+    decide.mockRestore();
+  });
+
+  it("keeps canonical action execution errors as correctness errors", () => {
+    const task = makeTask();
+    const play = vi.spyOn(roomModule, "playCards").mockImplementation(() => {
+      throw new Error("D2G_TEST_EXECUTION_EXCEPTION");
+    });
+
+    const result = simulateD2GHeadToHeadGame(task, { maxTurns: 1 });
+
+    expect(result.errorCounters.executionErrors).toBeGreaterThan(0);
+    expect(result.termination).toBe("error");
+    play.mockRestore();
   });
 
   it("uses the real production and detached D2F path for a canonical first turn", () => {
