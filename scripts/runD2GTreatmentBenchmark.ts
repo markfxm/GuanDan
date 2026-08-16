@@ -10,6 +10,7 @@ import {
   createD2GTreatmentProfile,
   type D2GProfilePhase,
   type D2GSeedManifest,
+  type D2GTreatmentBudget,
   type D2GTreatmentProfile,
 } from "../src/ai/d2g/treatmentContracts";
 import { sha256Bytes } from "../src/game/publicEventHash";
@@ -66,12 +67,94 @@ export const D2G_SEED_INVENTORY = Object.freeze({
   formalReserved: Object.freeze([9201, 9202, 9203, 9204]),
 } as const);
 
+export type D2GCalibrationProfilePlan = Readonly<{
+  planId: string;
+  budget: D2GTreatmentBudget;
+  planHash: string;
+  primaryHypothesis: string;
+  rationale: string;
+  estimatedRelativeCost: number;
+}>;
+
+function createCalibrationProfilePlan(
+  planId: string,
+  budget: D2GTreatmentBudget,
+  primaryHypothesis: string,
+  rationale: string,
+  estimatedRelativeCost: number,
+): D2GCalibrationProfilePlan {
+  const planDefinition = {
+    schemaVersion: "d2g-calibration-plan-v2",
+    planId,
+    budget,
+    primaryHypothesis,
+    rationale,
+    estimatedRelativeCost,
+  } as const;
+  return Object.freeze({
+    planId,
+    budget: Object.freeze({ ...budget }),
+    planHash: hashCanonical(planDefinition),
+    primaryHypothesis,
+    rationale,
+    estimatedRelativeCost,
+  });
+}
+
+export const D2G_CALIBRATION_MATRIX = Object.freeze([
+  createCalibrationProfilePlan(
+    "d2g-calibration-p0-reference-v1",
+    { particleCount: 1, replicateCountPerScenario: 1, maxPliesPerReplicate: 1, maxPolicyActionEvaluationsPerPly: 32, maxWorkUnits: 32 },
+    "Reference smoke-scale budget establishes the calibration comparison baseline.",
+    "Retains the accepted Task 5A reference budget; it is the control for evidence availability, fallback mix, discrimination, and cost.",
+    1,
+  ),
+  createCalibrationProfilePlan(
+    "d2g-calibration-p1-particles-v1",
+    { particleCount: 2, replicateCountPerScenario: 1, maxPliesPerReplicate: 1, maxPolicyActionEvaluationsPerPly: 32, maxWorkUnits: 32 },
+    "Additional particles improve belief-scenario diversity and effective-sample-size stability.",
+    "Only particleCount changes; particleCount does not participate in budget validation, so maxWorkUnits remains at the P0 value.",
+    2,
+  ),
+  createCalibrationProfilePlan(
+    "d2g-calibration-p2-replicates-v1",
+    { particleCount: 1, replicateCountPerScenario: 2, maxPliesPerReplicate: 1, maxPolicyActionEvaluationsPerPly: 32, maxWorkUnits: 32 },
+    "Additional common-random-number replicates improve rollout ranking stability.",
+    "Only replicateCountPerScenario changes; each independently scheduled replicate retains the P0 validated work cap of 32.",
+    2,
+  ),
+  createCalibrationProfilePlan(
+    "d2g-calibration-p3-depth-v1",
+    { particleCount: 1, replicateCountPerScenario: 1, maxPliesPerReplicate: 2, maxPolicyActionEvaluationsPerPly: 32, maxWorkUnits: 64 },
+    "A deeper rollout tests whether one-ply lookahead is the primary source of weak or unusable evidence.",
+    "Depth 2 raises the validated work envelope to 64 through the current budget product; the companion maxWorkUnits increase is mechanically tied to the added ply, not independently tuned.",
+    2,
+  ),
+] as const);
+
+export const D2G_CALIBRATION_PLAN = Object.freeze({
+  schemaVersion: "d2g-calibration-plan-v1",
+  stageA: Object.freeze({
+    seeds: Object.freeze([9101]),
+    planIds: Object.freeze(D2G_CALIBRATION_MATRIX.map((plan) => plan.planId)),
+    expectedGames: 4 * 8,
+  }),
+  stageB: Object.freeze({
+    seeds: Object.freeze([9102, 9103, 9104]),
+    selectionRule: "Select at most two profiles using the joint descriptive tradeoff of correctness, usable evidence, fallback-kind mix, ESS/coverage, disagreement, quality signal, latency, and work; do not select by tiny-sample win rate alone.",
+    maximumProfileCount: 2,
+    maximumGames: 3 * 2 * 8,
+  }),
+  seedsExecuted: false,
+} as const);
+
 export function isD2GSeedInRange(seed: number, range: D2GSeedRange): boolean {
   return Number.isSafeInteger(seed) && range.start <= seed && seed <= range.end;
 }
 
 const ENGINE_VERSION = "d2g-engine-v1";
-const BENCHMARK_VERSION = "d2g-task5a-v1";
+const SMOKE_BENCHMARK_VERSION = "d2g-task5a-v1";
+const CALIBRATION_BENCHMARK_VERSION = "d2g-task5b-calibration-v1";
 const CANDIDATE_ORDERING_VERSION = "production-decideAiAction-evaluatedCandidates-v1";
 const STATISTICS_SCHEMA_VERSION = "d2g-statistics-v1";
 const REPORT_SCHEMA_VERSION = "d2g-report-v1";
@@ -80,6 +163,62 @@ const DEFAULT_RANK: GameRank = "10";
 const DEFAULT_MATCHUP = "baseline-vs-treatment";
 const DEFAULT_BOOTSTRAP_ITERATIONS = 200;
 const DEFAULT_BOOTSTRAP_SEED = 1;
+
+export type D2GCalibrationProfileBuildInput = Readonly<{
+  plan: D2GCalibrationProfilePlan;
+  sourceCommit: string;
+  roomRulesFingerprint: string;
+}>;
+
+export function createD2GCalibrationTreatmentProfile(input: D2GCalibrationProfileBuildInput): D2GTreatmentProfile {
+  return createD2GBenchmarkTreatmentProfile({
+    profileId: "d2g-calibration-v1",
+    phase: "calibration",
+    budget: input.plan.budget,
+    sourceCommit: input.sourceCommit,
+    roomRulesFingerprint: input.roomRulesFingerprint,
+    benchmarkVersion: CALIBRATION_BENCHMARK_VERSION,
+  });
+}
+
+function createD2GBenchmarkTreatmentProfile(input: Readonly<{
+  profileId: "d2g-smoke-v1" | "d2g-calibration-v1";
+  phase: "smoke" | "calibration";
+  budget: D2GTreatmentBudget;
+  sourceCommit: string;
+  roomRulesFingerprint: string;
+  benchmarkVersion: string;
+}>): D2GTreatmentProfile {
+  return createD2GTreatmentProfile({
+    schemaVersion: D2G_PROFILE_SCHEMA_VERSION,
+    profileVersion: D2G_PROFILE_VERSION,
+    profileId: input.profileId,
+    phase: input.phase,
+    budget: input.budget,
+    evidenceRequirements: {
+      schemaVersion: "d2f-rollout-evidence-requirements-v1",
+      minimumEffectiveSampleSize: 1,
+      minimumAcceptedScenarioCount: 1,
+      minimumCompletedReplicateCount: 1,
+      requireCompleteCoverage: true,
+    },
+    riskPolicy: {
+      schemaVersion: "d2f-rollout-risk-policy-v1",
+      variancePenalty: 0,
+      downsideRiskPenalty: 0,
+    },
+    rolloutPolicyId: "d2f-lightweight-v1",
+    benchmarkMetadata: {
+      benchmarkVersion: input.benchmarkVersion,
+      sourceCommit: input.sourceCommit,
+      engineVersion: ENGINE_VERSION,
+      roomRulesFingerprint: input.roomRulesFingerprint,
+      candidateOrderingVersion: CANDIDATE_ORDERING_VERSION,
+      statisticsSchemaVersion: STATISTICS_SCHEMA_VERSION,
+      reportSchemaVersion: REPORT_SCHEMA_VERSION,
+    },
+  });
+}
 
 export type D2GRunnerPhase = "smoke" | "calibration-ready" | "formal";
 
@@ -230,43 +369,24 @@ export function createD2GRunnerConfig(
     settlementModule: "src/game/settlement.ts",
     engineVersion: ENGINE_VERSION,
   });
-  const profile = createD2GTreatmentProfile({
-    schemaVersion: D2G_PROFILE_SCHEMA_VERSION,
-    profileVersion: D2G_PROFILE_VERSION,
-    profileId: `d2g-${profilePhase}-v1`,
-    phase: profilePhase,
-    budget: {
-      particleCount: 1,
-      replicateCountPerScenario: 1,
-      maxPliesPerReplicate: 1,
-      maxPolicyActionEvaluationsPerPly: 32,
-      maxWorkUnits: 32,
-    },
-    evidenceRequirements: {
-      schemaVersion: "d2f-rollout-evidence-requirements-v1",
-      minimumEffectiveSampleSize: 1,
-      minimumAcceptedScenarioCount: 1,
-      minimumCompletedReplicateCount: 1,
-      requireCompleteCoverage: true,
-    },
-    riskPolicy: {
-      schemaVersion: "d2f-rollout-risk-policy-v1",
-      variancePenalty: 0,
-      downsideRiskPenalty: 0,
-    },
-    rolloutPolicyId: "d2f-lightweight-v1",
-    benchmarkMetadata: {
-      benchmarkVersion: BENCHMARK_VERSION,
+  const profile = phase === "smoke"
+    ? createD2GBenchmarkTreatmentProfile({
+      profileId: "d2g-smoke-v1",
+      phase: "smoke",
+      budget: D2G_CALIBRATION_MATRIX[0]!.budget,
       sourceCommit,
-      engineVersion: ENGINE_VERSION,
       roomRulesFingerprint,
-      candidateOrderingVersion: CANDIDATE_ORDERING_VERSION,
-      statisticsSchemaVersion: STATISTICS_SCHEMA_VERSION,
-      reportSchemaVersion: REPORT_SCHEMA_VERSION,
-    },
-  });
+      benchmarkVersion: SMOKE_BENCHMARK_VERSION,
+    })
+    : createD2GCalibrationTreatmentProfile({
+      plan: D2G_CALIBRATION_MATRIX[0]!,
+      sourceCommit,
+      roomRulesFingerprint,
+    });
   const configHash = hashCanonical({
-    schemaVersion: "d2g-task5a-runner-config-v1",
+    schemaVersion: phase === "smoke"
+      ? "d2g-task5a-runner-config-v1"
+      : "d2g-task5b-calibration-ready-config-v1",
     phase,
     rank,
     matchup,
@@ -280,13 +400,15 @@ export function createD2GRunnerConfig(
   const seedManifest = createD2GSeedManifest({
     schemaVersion: "d2g-seed-manifest-v1",
     phase: profilePhase,
-    manifestId: `d2g-task5a-${phase}-seeds-v1`,
+    manifestId: phase === "smoke"
+      ? "d2g-task5a-smoke-seeds-v1"
+      : "d2g-task5b-calibration-ready-seeds-v1",
     profileId: profile.profileId,
     profileConfigurationHash: profile.configurationHash,
     seeds: baseSeeds,
   });
   const provenance = buildD2GProvenance({
-    benchmarkVersion: BENCHMARK_VERSION,
+    benchmarkVersion: profile.benchmarkMetadata.benchmarkVersion,
     sourceCommit,
     engineVersion: ENGINE_VERSION,
     roomRulesFingerprint,

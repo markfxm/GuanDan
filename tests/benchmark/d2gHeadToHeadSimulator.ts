@@ -12,6 +12,7 @@ import {
   computeD2GPrivateOwnHandFingerprint,
   selectD2GTreatment,
   type D2GRolloutEvidence,
+  type D2GRolloutFailureKind,
   type D2GPreActionState,
   type D2GTreatmentSelection,
 } from "../../src/ai/d2g/treatmentSelector";
@@ -48,6 +49,7 @@ export type D2GDecisionTelemetryRecord = Readonly<{
   rankingHash: string | null;
   rolloutWorkUnits: number;
   rolloutEvidence: D2GRolloutEvidence | null;
+  rolloutFailureKind: D2GRolloutFailureKind | null;
   productionDecisionCostMs: number;
   rolloutEvaluationCostMs: number;
 }>;
@@ -63,6 +65,7 @@ type D2GTreatmentOutcome = Pick<
   | "rankingHash"
   | "rolloutWorkUnits"
   | "rolloutEvidence"
+  | "rolloutFailureKind"
   | "telemetry"
   | "rolloutEvaluationCostMs"
 >;
@@ -292,6 +295,7 @@ export function simulateD2GHeadToHeadGame(
         rankingHash: treatment!.rankingHash,
         rolloutWorkUnits: treatment!.rolloutWorkUnits,
         rolloutEvidence: treatment!.rolloutEvidence,
+        rolloutFailureKind: treatment!.rolloutFailureKind,
         productionDecisionCostMs,
         rolloutEvaluationCostMs: treatment!.rolloutEvaluationCostMs,
       }
@@ -312,6 +316,7 @@ export function simulateD2GHeadToHeadGame(
         rankingHash: null,
         rolloutWorkUnits: 0,
         rolloutEvidence: null,
+        rolloutFailureKind: null,
         productionDecisionCostMs,
         rolloutEvaluationCostMs: treatmentInputFailure.elapsedMs,
       } satisfies D2GDecisionTelemetryRecord;

@@ -77,6 +77,7 @@ function telemetry(actingStrategy: "baseline" | "treatment", fallbackReason: D2G
     disagreement,
     rankingHash: "1".repeat(64),
     rolloutWorkUnits: 10,
+    rolloutFailureKind: null,
     rolloutEvidence: {
       effectiveSampleSize: actingStrategy === "baseline" ? 1 : 2,
       acceptedScenarioCount: actingStrategy === "baseline" ? 1 : 2,
@@ -348,6 +349,25 @@ describe("D2G report model", () => {
     expect(statistics.evidence.counterfactual.coverage.completeCount).toBe(8);
   });
 
+  it("counts typed rollout failure kinds separately for treatment and counterfactual evidence", () => {
+    const games = makeBlock(11).map((game, index) => {
+      if (index !== 0) return game;
+      const updated = {
+        ...game,
+        decisionTelemetry: game.decisionTelemetry.map((record, recordIndex) => {
+        if (recordIndex === 1) return { ...record, rolloutFailureKind: "budget-exhausted" } as D2GDecisionTelemetryRecord;
+        if (recordIndex === 0) return { ...record, rolloutFailureKind: "simulation-failed" } as D2GDecisionTelemetryRecord;
+        return record;
+        }),
+      };
+      return { ...updated, semanticHash: computeD2GSemanticHash(updated) };
+    });
+    const statistics = buildD2GReportModel({ provenance: makeProvenance(), games }).statistics;
+
+    expect((statistics.evidence.treatment as unknown as { rolloutFailureKinds: Record<string, number> }).rolloutFailureKinds["budget-exhausted"]).toBe(1);
+    expect((statistics.evidence.counterfactual as unknown as { rolloutFailureKinds: Record<string, number> }).rolloutFailureKinds["simulation-failed"]).toBe(1);
+  });
+
   it("excludes wall-clock fields from deterministic report identity", () => {
     const provenance = makeProvenance();
     const first = buildD2GReportModel({ provenance, games: makeBlock(11) });
@@ -360,6 +380,24 @@ describe("D2G report model", () => {
     expect(second.deterministicIdentity).toBe(first.deterministicIdentity);
   });
 
+  it("includes typed rollout failure kind in deterministic report identity", () => {
+    const provenance = makeProvenance();
+    const first = buildD2GReportModel({ provenance, games: makeBlock(11) });
+    const changedGames = makeBlock(11).map((game, gameIndex) => {
+      if (gameIndex !== 0) return game;
+      const updated = {
+        ...game,
+        decisionTelemetry: game.decisionTelemetry.map((record, recordIndex) => recordIndex === 1
+          ? { ...record, rolloutFailureKind: "budget-exhausted" } as D2GDecisionTelemetryRecord
+          : record),
+      };
+      return { ...updated, semanticHash: computeD2GSemanticHash(updated) };
+    });
+    const second = buildD2GReportModel({ provenance, games: changedGames });
+
+    expect(second.deterministicIdentity).not.toBe(first.deterministicIdentity);
+  });
+
   it("binds bootstrap configuration into deterministic report identity", () => {
     const games = makeBlock(11);
     const first = buildD2GReportModel({ provenance: makeProvenance(makeProfile(), [11], 3, 9), games, bootstrapIterations: 3, bootstrapSeed: 9 });
@@ -370,10 +408,14 @@ describe("D2G report model", () => {
 
   it("builds and validates public-only replay without private benchmark state", () => {
     const provenance = makeProvenance();
-    const replay = buildD2GPublicReplay(makeGame(), provenance);
+    const game = makeGame();
+    const replay = buildD2GPublicReplay(game, provenance);
+    const report = buildD2GReportModel({ provenance, games: [game] });
 
     expect(validateD2GPublicReplay(replay, provenance)).toBe(true);
+    expect(JSON.stringify(report)).not.toMatch(/"(hands|initialHands|privateOwnHandFingerprint|aiRuntime|aiPlans|privateState|hiddenState|particleState|opponentHands)"/i);
     expect(JSON.stringify(replay)).not.toMatch(/"(hands|initialHands|privateOwnHandFingerprint|aiRuntime|aiPlans|privateState|hiddenState|particleState|opponentHands)"/i);
+    expect(JSON.stringify(replay)).not.toMatch(/"(rolloutFailure|failureKind|particle|hidden)"/i);
     expect(replay).not.toHaveProperty("decisionTelemetry");
   });
 

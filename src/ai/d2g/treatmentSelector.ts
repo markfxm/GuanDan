@@ -5,6 +5,8 @@ import {
   type RolloutBudget,
   type RolloutExecutionResult,
   type RolloutFailure,
+  type RolloutKernelFailure,
+  type RolloutAggregationFailure,
   type RolloutAggregateDiagnostics,
 } from "../rollout/contracts";
 import type { D2FShadowPreActionSnapshot, RolloutCandidate } from "../rollout/contracts";
@@ -33,6 +35,29 @@ export type D2GRolloutEvidence = Readonly<Pick<
   | "coverage"
 >>;
 
+export type D2GRolloutFailureKind = Exclude<RolloutFailure["kind"], "kernel-failed" | "aggregation-failed">
+  | RolloutKernelFailure["kind"]
+  | RolloutAggregationFailure["kind"];
+
+export const D2G_ROLLOUT_FAILURE_KIND_KEYS = [
+  "invalid-request",
+  "invalid-budget",
+  "invalid-risk-policy",
+  "invalid-evidence-requirements",
+  "fake-or-unknown-particle-bank",
+  "scenario-source-failed",
+  "effective-sample-size-too-low",
+  "insufficient-scenarios",
+  "insufficient-replicates",
+  "coverage-mismatch",
+  "simulation-failed",
+  "policy-failed",
+  "budget-exhausted",
+  "non-finite-aggregate",
+  "empty-replicate-set",
+  "work-unit-overflow",
+] as const satisfies readonly D2GRolloutFailureKind[];
+
 export type D2GTreatmentTelemetry = Readonly<{
   gameId: string;
   actingSeat: D2GDecisionContext["actingSeat"];
@@ -50,6 +75,7 @@ export type D2GTreatmentTelemetry = Readonly<{
   rankingHash: string;
   rolloutWorkUnits: number;
   rolloutEvidence: D2GRolloutEvidence | null;
+  rolloutFailureKind: D2GRolloutFailureKind | null;
 }>;
 
 export type D2GTreatmentSelection = Readonly<{
@@ -67,6 +93,7 @@ export type D2GTreatmentSelection = Readonly<{
   rankingHash: string;
   rolloutWorkUnits: number;
   rolloutEvidence: D2GRolloutEvidence | null;
+  rolloutFailureKind: D2GRolloutFailureKind | null;
   profileConfigurationHash: string;
   telemetry: D2GTreatmentTelemetry;
   elapsedMs: number;
@@ -87,7 +114,7 @@ type CandidateEntry = Readonly<{
 
 type RolloutAttempt =
   | Readonly<{ ok: true; result: Extract<RolloutExecutionResult, { ok: true }>["result"]; elapsedMs: number }>
-  | Readonly<{ ok: false; reason: D2GFallbackReason; elapsedMs: number }>;
+  | Readonly<{ ok: false; reason: D2GFallbackReason; rolloutFailureKind: D2GRolloutFailureKind | null; elapsedMs: number }>;
 
 export function computeD2GPreActionGameplayStateHash(state: D2GPreActionState): string {
   return hashCanonical({
@@ -132,6 +159,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
       ranking: [],
       rankingHash: hashRanking([]),
       rolloutWorkUnits: 0,
+      rolloutFailureKind: null,
       elapsedMs: 0,
     });
   }
@@ -143,6 +171,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
       ranking: [],
       rankingHash: hashRanking([]),
       rolloutWorkUnits: 0,
+      rolloutFailureKind: null,
       elapsedMs: 0,
     });
   }
@@ -155,6 +184,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
       ranking: [],
       rankingHash: hashRanking([]),
       rolloutWorkUnits: 0,
+      rolloutFailureKind: null,
       elapsedMs: 0,
     });
   }
@@ -166,6 +196,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
       ranking: [],
       rankingHash: hashRanking([]),
       rolloutWorkUnits: 0,
+      rolloutFailureKind: null,
       elapsedMs: 0,
     });
   }
@@ -178,6 +209,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
       ranking: [],
       rankingHash: hashRanking([]),
       rolloutWorkUnits: 0,
+      rolloutFailureKind: attempt.rolloutFailureKind,
       elapsedMs: attempt.elapsedMs,
     });
   }
@@ -193,6 +225,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
       rankingHash,
       rolloutWorkUnits: attempt.result.aggregateDiagnostics.workUnitCount,
       rolloutEvidence: toD2GRolloutEvidence(attempt.result.aggregateDiagnostics),
+      rolloutFailureKind: null,
       elapsedMs: attempt.elapsedMs,
     });
   }
@@ -206,6 +239,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
       rankingHash,
       rolloutWorkUnits: attempt.result.aggregateDiagnostics.workUnitCount,
       rolloutEvidence: toD2GRolloutEvidence(attempt.result.aggregateDiagnostics),
+      rolloutFailureKind: null,
       elapsedMs: attempt.elapsedMs,
     });
   }
@@ -219,6 +253,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
       rankingHash,
       rolloutWorkUnits: attempt.result.aggregateDiagnostics.workUnitCount,
       rolloutEvidence: toD2GRolloutEvidence(attempt.result.aggregateDiagnostics),
+      rolloutFailureKind: null,
       elapsedMs: attempt.elapsedMs,
     });
   }
@@ -230,6 +265,7 @@ export function selectD2GTreatment(input: D2GTreatmentSelectorInput): D2GTreatme
     rankingHash,
     rolloutWorkUnits: attempt.result.aggregateDiagnostics.workUnitCount,
     rolloutEvidence: toD2GRolloutEvidence(attempt.result.aggregateDiagnostics),
+    rolloutFailureKind: null,
     elapsedMs: attempt.elapsedMs,
     treatmentCandidate,
   });
@@ -330,7 +366,7 @@ function runTreatmentRollout(input: D2GTreatmentSelectorInput, candidates: reado
       samplerConfigVersion: particleConfig.samplerConfigVersion,
       likelihoodConfig: particleConfig.likelihoodConfig,
     });
-    if (!bankResult.ok) return { ok: false, reason: "rollout-unusable", elapsedMs: performance.now() - startedAt };
+    if (!bankResult.ok) return { ok: false, reason: "rollout-unusable", rolloutFailureKind: null, elapsedMs: performance.now() - startedAt };
 
     const budget: RolloutBudget = {
       replicateCountPerScenario: input.profile.budget.replicateCountPerScenario,
@@ -371,14 +407,19 @@ function runTreatmentRollout(input: D2GTreatmentSelectorInput, candidates: reado
       policyId: input.profile.rolloutPolicyId,
     };
     const request = createRolloutRequest(requestInput);
-    if (!request.ok) return { ok: false, reason: mapRolloutFailure(request.failure), elapsedMs: performance.now() - startedAt };
+    if (!request.ok) return { ok: false, reason: mapRolloutFailure(request.failure), rolloutFailureKind: normalizeRolloutFailureKind(request.failure), elapsedMs: performance.now() - startedAt };
     const rollout = rolloutOrchestrator.runDetachedRollout(request.value);
-    if (!rollout.ok) return { ok: false, reason: mapRolloutFailure(rollout.failure), elapsedMs: performance.now() - startedAt };
-    if (rollout.result.formalExecutionAllowed !== false) return { ok: false, reason: "rollout-failed", elapsedMs: performance.now() - startedAt };
+    if (!rollout.ok) return { ok: false, reason: mapRolloutFailure(rollout.failure), rolloutFailureKind: normalizeRolloutFailureKind(rollout.failure), elapsedMs: performance.now() - startedAt };
+    if (rollout.result.formalExecutionAllowed !== false) return { ok: false, reason: "rollout-failed", rolloutFailureKind: null, elapsedMs: performance.now() - startedAt };
     return { ok: true, result: rollout.result, elapsedMs: performance.now() - startedAt };
   } catch {
-    return { ok: false, reason: "unexpected-failure", elapsedMs: performance.now() - startedAt };
+    return { ok: false, reason: "unexpected-failure", rolloutFailureKind: null, elapsedMs: performance.now() - startedAt };
   }
+}
+
+function normalizeRolloutFailureKind(failure: RolloutFailure): D2GRolloutFailureKind {
+  if (failure.kind === "kernel-failed" || failure.kind === "aggregation-failed") return failure.failure.kind;
+  return failure.kind;
 }
 
 function mapRolloutFailure(failure: RolloutFailure): D2GFallbackReason {
@@ -409,6 +450,7 @@ function makeSelection(
     rankingHash: string;
     rolloutWorkUnits: number;
     rolloutEvidence?: D2GRolloutEvidence | null;
+    rolloutFailureKind?: D2GRolloutFailureKind | null;
     elapsedMs: number;
     treatmentCandidate?: D2GEvaluatedCandidate;
   }>,
@@ -437,6 +479,7 @@ function makeSelection(
     rankingHash: outcome.rankingHash,
     rolloutWorkUnits: outcome.rolloutWorkUnits,
     rolloutEvidence: outcome.rolloutEvidence ?? null,
+    rolloutFailureKind: outcome.rolloutFailureKind ?? null,
   });
   return Object.freeze({
     baselineCandidateId: baseline.baselineCandidateId,
@@ -453,6 +496,7 @@ function makeSelection(
     rankingHash: outcome.rankingHash,
     rolloutWorkUnits: outcome.rolloutWorkUnits,
     rolloutEvidence: outcome.rolloutEvidence ?? null,
+    rolloutFailureKind: outcome.rolloutFailureKind ?? null,
     profileConfigurationHash: input.profile.configurationHash,
     telemetry,
     elapsedMs: outcome.elapsedMs,

@@ -6,7 +6,7 @@ import { canonicalJson } from "./contracts";
 import { pairedBootstrap, type BootstrapResult } from "./statistics";
 import { teamPlacementScores } from "./metrics";
 import type { D2GDecisionTelemetryRecord, D2GHeadToHeadGameResult } from "./d2gHeadToHeadSimulator";
-import type { D2GRolloutEvidence } from "../../src/ai/d2g/treatmentSelector";
+import { D2G_ROLLOUT_FAILURE_KIND_KEYS, type D2GRolloutEvidence, type D2GRolloutFailureKind } from "../../src/ai/d2g/treatmentSelector";
 import type { D2GProvenance } from "./d2gManifest";
 
 export type D2GUnresolvedReason = "missing" | "failed" | "incomplete" | "correctness-unclean";
@@ -94,6 +94,7 @@ export interface D2GEvidencePopulationSummary {
   acceptedScenarioCount: D2GNumericEvidenceSummary | null;
   completedReplicateCount: D2GNumericEvidenceSummary | null;
   expectedCompletedReplicateCount: D2GNumericEvidenceSummary | null;
+  rolloutFailureKinds: Readonly<Record<D2GRolloutFailureKind, number>>;
   coverage: {
     completeCount: number;
     incompleteCount: number;
@@ -551,6 +552,13 @@ function summarizeEvidencePopulation(records: readonly D2GDecisionTelemetryRecor
     acceptedScenarioCount: evidenceSummary(evidence.map((value) => value.acceptedScenarioCount)),
     completedReplicateCount: evidenceSummary(evidence.map((value) => value.completedReplicateCount)),
     expectedCompletedReplicateCount: evidenceSummary(evidence.map((value) => value.expectedCompletedReplicateCount)),
+    rolloutFailureKinds: records.reduce<Record<D2GRolloutFailureKind, number>>((counts, record) => {
+      if (record.rolloutFailureKind !== null) counts[record.rolloutFailureKind] += 1;
+      return counts;
+    }, D2G_ROLLOUT_FAILURE_KIND_KEYS.reduce<Record<D2GRolloutFailureKind, number>>((counts, kind) => {
+      counts[kind] = 0;
+      return counts;
+    }, {} as Record<D2GRolloutFailureKind, number>)),
     coverage: {
       completeCount: coverageCompleteCount,
       incompleteCount: evidence.length - coverageCompleteCount,

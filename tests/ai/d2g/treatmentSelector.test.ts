@@ -15,7 +15,7 @@ import {
   createD2FShadowCandidates,
   createD2FShadowPreActionSnapshot,
 } from "../../../src/ai/rollout/d2fShadowObserver";
-import { canonicalActionIdentity, type RolloutExecutionResult } from "../../../src/ai/rollout/contracts";
+import { canonicalActionIdentity, type RolloutExecutionResult, type RolloutFailure } from "../../../src/ai/rollout/contracts";
 import { buildPublicGameIdentity } from "../../../src/game/publicEvent";
 import { createInitialPublicLedger } from "../../../src/game/publicLedger";
 import { createRoom, playCards } from "../../../src/game/room";
@@ -186,6 +186,10 @@ function successResult(ranking: readonly string[], workUnitCount = 12): RolloutE
   } as RolloutExecutionResult;
 }
 
+function failureResult(failure: RolloutFailure): RolloutExecutionResult {
+  return { ok: false, failure };
+}
+
 describe("selectD2GTreatment", () => {
   it("saves the production baseline before rollout and returns it without partial treatment on failure", () => {
     const fixture = makeFixture();
@@ -241,6 +245,61 @@ describe("selectD2GTreatment", () => {
     runner.mockRestore();
   });
 
+  it.each([
+    {
+      name: "budget-exhausted",
+      failure: { kind: "kernel-failed", failure: { kind: "budget-exhausted", workUnits: 33, maximumWorkUnits: 32 } },
+      fallbackReason: "rollout-failed",
+      rolloutFailureKind: "budget-exhausted",
+    },
+    {
+      name: "simulation-failed",
+      failure: { kind: "kernel-failed", failure: { kind: "simulation-failed", stage: "root-action", reason: "illegal-action" } },
+      fallbackReason: "rollout-failed",
+      rolloutFailureKind: "simulation-failed",
+    },
+    {
+      name: "effective-sample-size-too-low",
+      failure: { kind: "effective-sample-size-too-low", effectiveSampleSize: 0, minimumEffectiveSampleSize: 1 },
+      fallbackReason: "rollout-unusable",
+      rolloutFailureKind: "effective-sample-size-too-low",
+    },
+  ] as const)("preserves the typed D2F failure kind for $name", ({ failure, fallbackReason, rolloutFailureKind }) => {
+    const fixture = makeFixture();
+    const runner = vi.spyOn(rolloutOrchestrator, "runDetachedRollout").mockReturnValue(failureResult(failure as RolloutFailure));
+
+    const result = selectD2GTreatment({
+      decision: fixture.decision,
+      preActionState: fixture.snapshot,
+      decisionContext: fixture.decisionContext,
+      profile: fixture.profile,
+    });
+
+    expect(result.fallbackReason).toBe(fallbackReason);
+    expect((result as unknown as { rolloutFailureKind: string | null }).rolloutFailureKind).toBe(rolloutFailureKind);
+    expect((result.telemetry as unknown as { rolloutFailureKind: string | null }).rolloutFailureKind).toBe(rolloutFailureKind);
+    runner.mockRestore();
+  });
+
+  it("records null failure kind for a successful rollout", () => {
+    const fixture = makeFixture();
+    const runner = vi.spyOn(rolloutOrchestrator, "runDetachedRollout").mockReturnValue(
+      successResult(fixture.decision.evaluatedCandidates.map(({ candidate }) => canonicalActionIdentity(candidate.action))),
+    );
+
+    const result = selectD2GTreatment({
+      decision: fixture.decision,
+      preActionState: fixture.snapshot,
+      decisionContext: fixture.decisionContext,
+      profile: fixture.profile,
+    });
+
+    expect(result.fallbackReason).toBe("none");
+    expect((result as unknown as { rolloutFailureKind: string | null }).rolloutFailureKind).toBeNull();
+    expect((result.telemetry as unknown as { rolloutFailureKind: string | null }).rolloutFailureKind).toBeNull();
+    runner.mockRestore();
+  });
+
   it("does not call production decideAiAction or any second candidate engine", () => {
     const fixture = makeFixture();
     const decisionSpy = vi.spyOn(decisionEngine, "decideAiAction");
@@ -282,6 +341,8 @@ describe("selectD2GTreatment", () => {
     });
 
     expect(result.fallbackReason).toBe("stale-decision");
+    expect((result as unknown as { rolloutFailureKind: string | null }).rolloutFailureKind).toBeNull();
+    expect((result.telemetry as unknown as { rolloutFailureKind: string | null }).rolloutFailureKind).toBeNull();
     expect(result.selectedCandidateId).toBe(result.baselineCandidateId);
     expect(runner).not.toHaveBeenCalled();
     runner.mockRestore();
