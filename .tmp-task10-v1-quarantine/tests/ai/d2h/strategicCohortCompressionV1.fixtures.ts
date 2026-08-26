@@ -51,6 +51,29 @@ export function makeValidPhaseDAdmissionInput(): StrategicCohortCompressionInput
   return inputOf(components, bind(components));
 }
 
+export function makeInvalidPhaseDEvidenceBudgetFixture(): StrategicCohortCompressionInputV1 {
+  const input = makeValidPhaseDAdmissionInput();
+  return {
+    ...input,
+    evidenceBudget: {
+      ...input.evidenceBudget,
+      maxMemberEnvelopeCount: 0,
+    },
+  };
+}
+
+export function makeCorruptedSourceWithInvalidPhaseDEvidenceBudgetFixture():
+  StrategicCohortCompressionInputV1 {
+  const input = makeMultiComponentHashMismatchFixture();
+  return {
+    ...input,
+    evidenceBudget: {
+      ...input.evidenceBudget,
+      maxMemberEnvelopeCount: 0,
+    },
+  };
+}
+
 export function makeMissingC2ComponentSourceFixture(): StrategicCohortCompressionInputV1 {
   const components = makeComponentSources(2);
   return inputOf(components.slice(0, 1), bind(components));

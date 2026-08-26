@@ -43,10 +43,6 @@ export const compressHierarchicalStrategicCohortsV1: HierarchicalStrategicCohort
     if (suppliedManifest.manifestHash !== expectedManifestHash) {
       return terminal(input, "REJECTED", ["SOURCE_HASH_PAYLOAD_MISMATCH"], 0);
     }
-    if (!validEvidenceBudget(input)) {
-      return terminal(input, "INCONCLUSIVE", ["INVALID_BUDGET"], 0);
-    }
-
     const multiComponentArtifact = suppliedManifest.multiComponentArtifact;
     if (suppliedManifest.multiComponentArtifactHash !== multiComponentArtifact.artifactHash
       || !selfBoundArtifact(multiComponentArtifact)) {
@@ -136,6 +132,10 @@ export const compressHierarchicalStrategicCohortsV1: HierarchicalStrategicCohort
       if (canonicalHash(replayedC2) !== canonicalHash(multiComponentArtifact)) {
         return terminal(input, "REJECTED", ["SOURCE_HASH_PAYLOAD_MISMATCH"], 0);
       }
+    }
+
+    if (!validEvidenceBudget(input)) {
+      return terminal(input, "INCONCLUSIVE", ["INVALID_BUDGET"], 0);
     }
 
     const routeIdentityIndex = routeIdentityIndexOf(componentSources);

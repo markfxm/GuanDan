@@ -10,6 +10,7 @@ import { compressHierarchicalStrategicCohortsV1 } from
   "../../../src/ai/d2h/strategicCohortCompressionV1";
 import {
   makeCommonBindingMismatchFixture,
+  makeCorruptedSourceWithInvalidPhaseDEvidenceBudgetFixture,
   makeCrossPairedC2EndpointFixture,
   makeDamagedEmptyC2BudgetExecutionFixture,
   makeDamagedEmptyRouteUniverseFixture,
@@ -17,6 +18,7 @@ import {
   makeDuplicateRouteIdentityConflictFixture,
   makeEmptyRouteUniverseFixture,
   makeExtraComponentSourceFixture,
+  makeInvalidPhaseDEvidenceBudgetFixture,
   makeManifestHashMismatchFixture,
   makeMissingC2ComponentSourceFixture,
   makeMultiComponentHashMismatchFixture,
@@ -137,6 +139,35 @@ describe("Strategic cohort compression V1 component source admission", () => {
       expect(artifact.compressionStatus).toBe("REJECTED");
       expect(artifact.reasonCodes).toContain("SOURCE_HASH_PAYLOAD_MISMATCH");
     }
+  });
+
+  it("keeps explicit source corruption ahead of an invalid Phase-D evidence budget", () => {
+    const artifact = terminalArtifactOf(
+      compressHierarchicalStrategicCohortsV1(
+        makeCorruptedSourceWithInvalidPhaseDEvidenceBudgetFixture(),
+      ),
+    );
+    expect(artifact.compressionStatus).toBe("REJECTED");
+    expect(artifact.reasonCodes).toContain("SOURCE_HASH_PAYLOAD_MISMATCH");
+    expect(artifact.reasonCodes).not.toContain("INVALID_BUDGET");
+  });
+
+  it("checks an invalid Phase-D evidence budget after complete source admission", () => {
+    const artifact = terminalArtifactOf(
+      compressHierarchicalStrategicCohortsV1(makeInvalidPhaseDEvidenceBudgetFixture()),
+    );
+    expect(artifact).toMatchObject({
+      compressionStatus: "INCONCLUSIVE",
+      reasonCodes: ["INVALID_BUDGET"],
+      cohortCount: 0,
+      cohorts: null,
+      cohortInterfaces: null,
+      routeToCohortMappings: null,
+      memberEnvelopes: null,
+      equivalenceProofs: null,
+      coverageManifest: null,
+      cohortUniverseHash: null,
+    });
   });
 
   it("rejects cross-paired component bindings even when independent C2 sets match", () => {
