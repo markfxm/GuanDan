@@ -109,6 +109,35 @@ export type PhaseDSourceBindingManifestV1 = Readonly<{
   manifestHash: string;
 }>;
 
+export type PhaseDAdmittedComponentSourceV1 = Readonly<{
+  resourceComponentId: string;
+  hierarchyBatchHash: string;
+  reservationArtifactHash: string;
+  routeArtifactHash: string;
+  routeUniverseHash: string;
+  routeIds: readonly string[];
+  routeHashes: readonly string[];
+  componentAdmissionHash: string;
+}>;
+
+export type PhaseDRouteIdentityIndexEntryV1 = Readonly<{
+  routeId: string;
+  routeHash: string;
+  resourceComponentId: string;
+  sourceArtifactHash: string;
+  sourceRouteUniverseHash: string;
+}>;
+
+export type PhaseDSourceAdmissionSuccessV1 = Readonly<{
+  admissionStatus: "ADMITTED";
+  canonicalSourceBindingManifest: PhaseDSourceBindingManifestV1;
+  sourceBindingManifestHash: string;
+  admittedComponents: readonly PhaseDAdmittedComponentSourceV1[];
+  routeIdentityIndex: readonly PhaseDRouteIdentityIndexEntryV1[];
+  inputRouteCount: number;
+  admissionHash: string;
+}>;
+
 export type StrategicCohortBudgetMeasurementV1 = Readonly<{
   dimension: StrategicCohortBudgetDimensionV1;
   limit: number;
@@ -506,7 +535,20 @@ export type HierarchicalStrategicCohortCompressionArtifactV1 = Readonly<{
   artifactHash: string;
 }>;
 
+export type PhaseDSourceAdmissionTerminalV1 = Readonly<{
+  admissionStatus: "TERMINAL";
+  artifact: HierarchicalStrategicCohortCompressionArtifactV1;
+}>;
+
+export type PhaseDSourceAdmissionResultV1 =
+  | PhaseDSourceAdmissionSuccessV1
+  | PhaseDSourceAdmissionTerminalV1;
+
 export type StrategicCohortCompressionInputV1 = Readonly<{
   sourceBindingManifest: PhaseDSourceBindingManifestV1;
   evidenceBudget: StrategicCohortCompressionEvidenceBudgetV1;
 }>;
+
+export type HierarchicalStrategicCohortCompressorV1 = (
+  input: StrategicCohortCompressionInputV1,
+) => PhaseDSourceAdmissionResultV1;
