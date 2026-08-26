@@ -1,4 +1,5 @@
 import { canonicalHash } from "./strategicEvidenceCanonicalSerializer";
+import { materializeStrategicBudgetExecutionV1 } from "./strategicBudgetExecutionV1";
 import { classifyStrategicHierarchyBatchV1 } from "./strategicHierarchyClassifierV1";
 import { materializeStrategicResourceReservationsV1 } from "./strategicResourceReservationV1";
 import { generateStrategicRouteCandidateFactsV1 } from "./strategicRouteCandidateFactsV1";
@@ -133,7 +134,7 @@ export const compressHierarchicalStrategicCohortsV1: HierarchicalStrategicCohort
         budget: multiComponentArtifact.budget,
       });
       if (canonicalHash(replayedC2) !== canonicalHash(multiComponentArtifact)) {
-        return terminal(input, "REJECTED", ["SOURCE_BINDING_MISMATCH"], 0);
+        return terminal(input, "REJECTED", ["SOURCE_HASH_PAYLOAD_MISMATCH"], 0);
       }
     }
 
@@ -216,7 +217,8 @@ function validateMultiComponentArtifact(
     || artifact.componentEndpointCount !== artifact.andEndpointReferences.length
     || artifact.componentIds.length !== artifact.componentRouteFacts.length
     || artifact.componentRouteFacts.some((component) => !validComponentFact(component))
-    || artifact.andEndpointReferences.some((endpoint) => !validEndpointReference(endpoint))) {
+    || artifact.andEndpointReferences.some((endpoint) => !validEndpointReference(endpoint))
+    || !validMultiComponentBudgetExecution(artifact)) {
     return "HASH_MISMATCH";
   }
   if (artifact.andComponentSetHash !== canonicalHash({
@@ -244,6 +246,44 @@ function validateMultiComponentArtifact(
     endpointHashes: artifact.andEndpointReferences.map((endpoint) => endpoint.endpointHash),
   });
   return artifact.routeUniverseHash === expectedRouteUniverseHash ? "VALID" : "HASH_MISMATCH";
+}
+
+function validMultiComponentBudgetExecution(
+  artifact: StrategicMultiComponentAndBindingArtifactV1,
+): boolean {
+  if (artifact.componentEndpointCount !== artifact.budgetObservation.observedComponentEndpointCount
+    || artifact.evidenceCost !== artifact.budgetObservation.observedEvidenceCost
+    || artifact.budgetObservation.measurementCompleteness !== "EXACT"
+    || artifact.exhaustedDimensions.length !== 0
+    || artifact.reasonCodes.length !== 0) return false;
+  const expected = materializeStrategicBudgetExecutionV1({
+    measurements: [
+      {
+        dimension: "COMPONENT_ENDPOINT_COUNT",
+        limit: artifact.budget.maxComponentEndpointCount,
+        observedCount: artifact.componentEndpointCount,
+        measurementCompleteness: "EXACT",
+      },
+      {
+        dimension: "EVIDENCE_COST",
+        limit: artifact.budget.maxEvidenceCost,
+        observedCount: artifact.evidenceCost,
+        measurementCompleteness: "EXACT",
+      },
+    ],
+    exhaustedDimensions: [],
+    sourceHashBindings: [
+      ...artifact.sourceArtifactHashes.map((sourceHash) => ({
+        sourceKind: "STRATEGIC_ROUTE_GENERATION_ARTIFACT" as const,
+        sourceHash,
+      })),
+      ...artifact.sourceRouteUniverseHashes.map((sourceHash) => ({
+        sourceKind: "STRATEGIC_ROUTE_UNIVERSE" as const,
+        sourceHash,
+      })),
+    ],
+  });
+  return canonicalHash(expected) === canonicalHash(artifact.budgetExecution);
 }
 
 function validComponentFact(component: StrategicComponentRouteFactSetV1): boolean {
@@ -339,9 +379,14 @@ function routeIdentityIndexOf(
     resourceComponentId: component.resourceComponentId,
     sourceArtifactHash: component.routeArtifactHash,
     sourceRouteUniverseHash: component.routeUniverseHash,
-  }))).sort((left, right) => compareText(left.routeId, right.routeId)
+  }))).sort((left, right) => compareText(
+    left.sourceRouteUniverseHash,
+    right.sourceRouteUniverseHash,
+  )
+    || compareText(left.routeId, right.routeId)
     || compareText(left.routeHash, right.routeHash)
-    || compareText(left.resourceComponentId, right.resourceComponentId));
+    || compareText(left.resourceComponentId, right.resourceComponentId)
+    || compareText(left.sourceArtifactHash, right.sourceArtifactHash));
 }
 
 function admitted(

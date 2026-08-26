@@ -203,6 +203,73 @@ export function makeDamagedEmptyRouteUniverseFixture(): StrategicCohortCompressi
   };
 }
 
+export function makeDamagedEmptyC2BudgetExecutionFixture(): StrategicCohortCompressionInputV1 {
+  const input = makeEmptyRouteUniverseFixture();
+  const original = input.sourceBindingManifest.multiComponentArtifact;
+  const budgetExecution = {
+    ...original.budgetExecution,
+    executionHash: "forged-budget-execution-hash",
+  };
+  return inputOf([], rehashMultiComponentArtifact({ ...original, budgetExecution }));
+}
+
+export function makeNonReplayableC2PayloadFixture(): StrategicCohortCompressionInputV1 {
+  const components = makeComponentSources(2);
+  const original = bind(components);
+  const observedEvidenceCost = original.evidenceCost + 1;
+  const budgetObservation = {
+    ...original.budgetObservation,
+    observedEvidenceCost,
+  };
+  const budgetExecution = materializeStrategicBudgetExecutionV1({
+    measurements: [
+      {
+        dimension: "COMPONENT_ENDPOINT_COUNT",
+        limit: original.budget.maxComponentEndpointCount,
+        observedCount: original.componentEndpointCount,
+        measurementCompleteness: "EXACT",
+      },
+      {
+        dimension: "EVIDENCE_COST",
+        limit: original.budget.maxEvidenceCost,
+        observedCount: observedEvidenceCost,
+        measurementCompleteness: "EXACT",
+      },
+    ],
+    exhaustedDimensions: [],
+    sourceHashBindings: [
+      ...original.sourceArtifactHashes.map((sourceHash) => ({
+        sourceKind: "STRATEGIC_ROUTE_GENERATION_ARTIFACT" as const,
+        sourceHash,
+      })),
+      ...original.sourceRouteUniverseHashes.map((sourceHash) => ({
+        sourceKind: "STRATEGIC_ROUTE_UNIVERSE" as const,
+        sourceHash,
+      })),
+    ],
+  });
+  const routeUniverseHash = canonicalHash({
+    kind: "strategic-multi-component-and-route-universe-v1",
+    identityHash: original.identityHash,
+    snapshotHash: original.snapshotHash,
+    sourceRootHash: original.sourceRootHash,
+    provenanceRoot: original.provenanceRoot,
+    budget: original.budget,
+    budgetObservation,
+    sourceRouteUniverseHashes: original.sourceRouteUniverseHashes,
+    componentFactHashes: original.componentRouteFacts!.map((fact) => fact.componentFactHash),
+    endpointHashes: original.andEndpointReferences!.map((endpoint) => endpoint.endpointHash),
+  });
+  const forged = rehashMultiComponentArtifact({
+    ...original,
+    evidenceCost: observedEvidenceCost,
+    budgetObservation,
+    budgetExecution,
+    routeUniverseHash,
+  });
+  return inputOf(components, forged);
+}
+
 function makeComponentSources(count: 2 | 3): readonly PhaseDComponentSourceBindingV1[] {
   const sevenIds = ["S7-1", "C7-1", "D7-1", "H7-1"];
   const pairNineIds = ["S9-1", "C9-1"];
@@ -280,6 +347,13 @@ function inputOf(
 ): StrategicCohortCompressionInputV1 {
   const manifest = manifestOf(componentSources, multiComponentArtifact);
   return { sourceBindingManifest: manifest, evidenceBudget: PHASE_D_BUDGET };
+}
+
+function rehashMultiComponentArtifact(
+  artifact: StrategicMultiComponentAndBindingArtifactV1,
+): StrategicMultiComponentAndBindingArtifactV1 {
+  const { artifactHash: _artifactHash, ...payload } = artifact;
+  return { ...payload, artifactHash: canonicalHash(payload) };
 }
 
 function withManifest(

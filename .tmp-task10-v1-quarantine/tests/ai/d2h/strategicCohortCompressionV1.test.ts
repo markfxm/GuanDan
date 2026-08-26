@@ -11,6 +11,7 @@ import { compressHierarchicalStrategicCohortsV1 } from
 import {
   makeCommonBindingMismatchFixture,
   makeCrossPairedC2EndpointFixture,
+  makeDamagedEmptyC2BudgetExecutionFixture,
   makeDamagedEmptyRouteUniverseFixture,
   makeDuplicateComponentSourceFixture,
   makeDuplicateRouteIdentityConflictFixture,
@@ -19,6 +20,7 @@ import {
   makeManifestHashMismatchFixture,
   makeMissingC2ComponentSourceFixture,
   makeMultiComponentHashMismatchFixture,
+  makeNonReplayableC2PayloadFixture,
   makeReversedComponentSourceInput,
   makeValidPhaseDAdmissionInput,
   makeWrongComponentABBindingFixture,
@@ -164,6 +166,19 @@ describe("Strategic cohort compression V1 component source admission", () => {
     expect(reversed).toEqual(canonical);
   });
 
+  it("orders the route identity index by source universe then route identity", () => {
+    const result = compressHierarchicalStrategicCohortsV1(makeValidPhaseDAdmissionInput());
+
+    expect(result.admissionStatus).toBe("ADMITTED");
+    if (result.admissionStatus !== "ADMITTED") throw new Error("Expected admitted source bindings");
+    const identityTuples = result.routeIdentityIndex.map((entry) => [
+      entry.sourceRouteUniverseHash,
+      entry.routeId,
+      entry.routeHash,
+    ] as const);
+    expect(identityTuples).toEqual([...identityTuples].sort(compareIdentityTuple));
+  });
+
   it("returns an atomic empty source universe artifact after complete admission", () => {
     const artifact = terminalArtifactOf(
       compressHierarchicalStrategicCohortsV1(makeEmptyRouteUniverseFixture()),
@@ -195,7 +210,35 @@ describe("Strategic cohort compression V1 component source admission", () => {
     expect(artifact.reasonCodes).toContain("SOURCE_HASH_PAYLOAD_MISMATCH");
     expect(artifact.reasonCodes).not.toContain("EMPTY_SOURCE_ROUTE_UNIVERSE");
   });
+
+  it("rejects damaged C2 budget execution before the empty universe path", () => {
+    const artifact = terminalArtifactOf(
+      compressHierarchicalStrategicCohortsV1(makeDamagedEmptyC2BudgetExecutionFixture()),
+    );
+    expect(artifact.compressionStatus).toBe("REJECTED");
+    expect(artifact.reasonCodes).toContain("SOURCE_HASH_PAYLOAD_MISMATCH");
+    expect(artifact.reasonCodes).not.toContain("EMPTY_SOURCE_ROUTE_UNIVERSE");
+  });
+
+  it("rejects a self-bound C2 payload that cannot replay from its component sources", () => {
+    const artifact = terminalArtifactOf(
+      compressHierarchicalStrategicCohortsV1(makeNonReplayableC2PayloadFixture()),
+    );
+    expect(artifact.compressionStatus).toBe("REJECTED");
+    expect(artifact.reasonCodes).toContain("SOURCE_HASH_PAYLOAD_MISMATCH");
+  });
 });
+
+function compareIdentityTuple(
+  left: readonly [string, string, string],
+  right: readonly [string, string, string],
+): number {
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] < right[index]) return -1;
+    if (left[index] > right[index]) return 1;
+  }
+  return 0;
+}
 
 function terminalArtifactOf(
   result: ReturnType<typeof compressHierarchicalStrategicCohortsV1>,
