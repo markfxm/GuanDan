@@ -313,6 +313,32 @@ export type NormalizedRouteCohortMemberDraftV1 = Readonly<{
   normalizationHash: string;
 }>;
 
+export type PhaseDRouteNormalizationSuccessV1 = Readonly<{
+  normalizationStatus: "COMPLETE";
+  sourceBindingManifestHash: string;
+  sourceAndComponentSetHash: string;
+  normalizedMemberDrafts: readonly NormalizedRouteCohortMemberDraftV1[];
+  reasonCodes: readonly [];
+  normalizationUniverseHash: string;
+}>;
+
+export type PhaseDRouteNormalizationInconclusiveV1 = Readonly<{
+  normalizationStatus: "INCONCLUSIVE";
+  sourceBindingManifestHash: string;
+  sourceAndComponentSetHash: string;
+  normalizedMemberDrafts: null;
+  reasonCodes: readonly StrategicCohortCompressionReasonCodeV1[];
+  normalizationUniverseHash: null;
+}>;
+
+export type PhaseDRouteNormalizationResultV1 =
+  | PhaseDRouteNormalizationSuccessV1
+  | PhaseDRouteNormalizationInconclusiveV1;
+
+export type PhaseDAdmittedRouteNormalizerV1 = (
+  admission: PhaseDSourceAdmissionSuccessV1,
+) => PhaseDRouteNormalizationResultV1;
+
 export type StrategicConflictClosureReferenceKindV1 =
   | "RESERVATION_FACT"
   | "RESERVATION_ALTERNATIVE"

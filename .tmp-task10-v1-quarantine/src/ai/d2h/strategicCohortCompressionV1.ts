@@ -1,12 +1,27 @@
-import { canonicalHash } from "./strategicEvidenceCanonicalSerializer";
+import { canonicalHash, canonicalSerialize } from "./strategicEvidenceCanonicalSerializer";
 import { materializeStrategicBudgetExecutionV1 } from "./strategicBudgetExecutionV1";
 import { classifyStrategicHierarchyBatchV1 } from "./strategicHierarchyClassifierV1";
 import { materializeStrategicResourceReservationsV1 } from "./strategicResourceReservationV1";
 import { generateStrategicRouteCandidateFactsV1 } from "./strategicRouteCandidateFactsV1";
 import { bindStrategicMultiComponentAndEndpointsV1 } from
   "./strategicMultiComponentAndBindingV1";
-import type { StrategicRouteCandidateFactV1 } from
+import type {
+  StrategicRouteCandidateFactV1,
+  StrategicRouteResourceClaimV1,
+} from
   "./strategicRouteCandidateFactsV1Contracts";
+import type {
+  StrategicFamilyHierarchyMetadataV1,
+  StrategicHierarchyClassificationBatchV1,
+} from
+  "./strategicHierarchyClassifierV1Contracts";
+import type {
+  StrategicReservationAlternativeFactV1,
+  StrategicResourceReservationClaimV1,
+  StrategicResourceReservationFactV1,
+  StrategicResourceUnitV1,
+  StrategicWildcardAllocationLineageV1,
+} from "./strategicResourceReservationV1Contracts";
 import type {
   StrategicComponentAndEndpointReferenceV1,
   StrategicComponentRouteFactSetV1,
@@ -16,12 +31,22 @@ import {
   STRATEGIC_COHORT_COMPRESSION_V1_SCHEMA_VERSION,
   type HierarchicalStrategicCohortCompressionArtifactV1,
   type HierarchicalStrategicCohortCompressorV1,
+  type NormalizedRouteCohortMemberDraftV1,
+  type PhaseDAdmittedRouteNormalizerV1,
   type PhaseDAdmittedComponentSourceV1,
   type PhaseDCommonBindingsV1,
   type PhaseDComponentSourceBindingV1,
   type PhaseDRouteIdentityIndexEntryV1,
   type PhaseDSourceAdmissionResultV1,
+  type ResourceRoleSlotV1,
+  type StrategicCohortLatentResourceInterfaceV1,
+  type StrategicCohortRouteActiveResourceInterfaceV1,
+  type StrategicCohortStructuralClaimInterfaceV1,
+  type StrategicCohortStructuralInterfaceV1,
+  type StrategicCohortTask3MemberLocalLineageOccurrenceV1,
+  type StrategicCohortWildcardAllocationInterfaceV1,
   type PhaseDSourceBindingManifestV1,
+  type StrategicResourceDispositionV1,
   type StrategicCohortCompressionInputV1,
   type StrategicCohortCompressionReasonCodeV1,
   type StrategicCohortCompressionStatusV1,
@@ -150,6 +175,609 @@ export const compressHierarchicalStrategicCohortsV1: HierarchicalStrategicCohort
     };
     return admitted(canonicalManifest, componentSources, routeIdentityIndex);
   };
+
+type Task3NormalizationReasonV1 = Extract<
+  StrategicCohortCompressionReasonCodeV1,
+  | "MISSING_STRENGTH_INTERFACE"
+  | "ACTIVE_LATENT_ROLE_SEPARATION_UNPROVEN"
+  | "INCOMPLETE_RESOURCE_ROLE_ACCOUNTING"
+  | "MISSING_WILDCARD_ALLOCATION_PAYLOAD"
+>;
+
+type AllocationResolutionV1 = Readonly<{
+  interfaces: readonly StrategicCohortWildcardAllocationInterfaceV1[];
+  allocationVariantHashes: readonly string[];
+}>;
+
+type ResourceSlotSeedV1 = Readonly<{
+  physicalCardId: string;
+  disposition: StrategicResourceDispositionV1;
+  naturalOrWildcard: "NATURAL" | "WILDCARD";
+  routeActiveInterface: StrategicCohortRouteActiveResourceInterfaceV1;
+  latentResourceInterface: StrategicCohortLatentResourceInterfaceV1;
+  wildcardAllocationInterface: StrategicCohortWildcardAllocationInterfaceV1 | null;
+  wildcardAllocationVariantHashes: readonly string[];
+}>;
+
+type ComponentNormalizationIndexesV1 = Readonly<{
+  metadataByFamilyId: ReadonlyMap<string, StrategicFamilyHierarchyMetadataV1>;
+  reservationFactById: ReadonlyMap<string, StrategicResourceReservationFactV1>;
+  alternativeById: ReadonlyMap<string, StrategicReservationAlternativeFactV1>;
+  unitById: ReadonlyMap<string, StrategicResourceUnitV1>;
+  allocationPayloadByHash: ResourceReplayContextV1["allocationPayloadByHash"];
+}>;
+
+export const normalizeAdmittedStrategicRoutesV1: PhaseDAdmittedRouteNormalizerV1 = (admission) => {
+  const manifest = admission.canonicalSourceBindingManifest;
+  const drafts: NormalizedRouteCohortMemberDraftV1[] = [];
+  const orderedComponents = canonicalComponentSources(manifest.componentSources);
+  for (const component of orderedComponents) {
+    const indexes = componentNormalizationIndexesOf(component);
+    if (typeof indexes === "string") return normalizationFailure(admission, indexes);
+    const orderedRoutes = [...(component.routeArtifact.routeCandidates ?? [])]
+      .sort((left, right) => compareText(left.routeId, right.routeId)
+        || compareText(left.routeHash, right.routeHash));
+    for (const route of orderedRoutes) {
+      const normalized = normalizeRouteDraft(
+        component,
+        route,
+        manifest.andComponentSetHash,
+        indexes,
+      );
+      if (typeof normalized === "string") return normalizationFailure(admission, normalized);
+      drafts.push(normalized);
+    }
+  }
+  drafts.sort((left, right) => compareText(left.sourceRouteUniverseHash, right.sourceRouteUniverseHash)
+    || compareText(left.routeId, right.routeId)
+    || compareText(left.routeHash, right.routeHash));
+  const normalizationUniverseHash = canonicalHash({
+    kind: "phase-d-route-normalization-universe-v1",
+    sourceBindingManifestHash: admission.sourceBindingManifestHash,
+    sourceAndComponentSetHash: manifest.andComponentSetHash,
+    normalizationHashes: drafts.map((draft) => draft.normalizationHash),
+  });
+  return deepFreeze({
+    normalizationStatus: "COMPLETE" as const,
+    sourceBindingManifestHash: admission.sourceBindingManifestHash,
+    sourceAndComponentSetHash: manifest.andComponentSetHash,
+    normalizedMemberDrafts: drafts,
+    reasonCodes: [] as const,
+    normalizationUniverseHash,
+  });
+};
+
+function normalizationFailure(
+  admission: Parameters<PhaseDAdmittedRouteNormalizerV1>[0],
+  reason: Task3NormalizationReasonV1,
+) {
+  return deepFreeze({
+    normalizationStatus: "INCONCLUSIVE" as const,
+    sourceBindingManifestHash: admission.sourceBindingManifestHash,
+    sourceAndComponentSetHash: admission.canonicalSourceBindingManifest.andComponentSetHash,
+    normalizedMemberDrafts: null,
+    reasonCodes: [reason],
+    normalizationUniverseHash: null,
+  });
+}
+
+function normalizeRouteDraft(
+  component: PhaseDComponentSourceBindingV1,
+  route: StrategicRouteCandidateFactV1,
+  sourceAndComponentSetHash: string,
+  indexes: ComponentNormalizationIndexesV1,
+): NormalizedRouteCohortMemberDraftV1 | Task3NormalizationReasonV1 {
+  const structuralInterface = structuralInterfaceOf(route, indexes.metadataByFamilyId);
+  if (typeof structuralInterface === "string") return structuralInterface;
+  const resource = resourceInterfaceOf(component, route, indexes);
+  if (typeof resource === "string") return resource;
+  const task3MemberLocalLineage = memberLocalLineageOf(
+    route,
+    resource.slotByPhysicalCardId,
+    resource.wildcardAllocationVariantHashesByPhysicalCardId,
+  );
+  const payload = {
+    routeId: route.routeId,
+    routeHash: route.routeHash,
+    resourceComponentId: component.resourceComponentId,
+    sourceArtifactHash: component.routeArtifactHash,
+    sourceRouteUniverseHash: component.routeUniverseHash,
+    sourceAndComponentSetHash,
+    structuralInterface,
+    resourceInterface: resource.resourceInterface,
+    canonicalResourceRoleVector: resource.resourceInterface.canonicalRoleSlots,
+    task3MemberLocalLineage,
+  };
+  return { ...payload, normalizationHash: canonicalHash(payload) };
+}
+
+function structuralInterfaceOf(
+  route: StrategicRouteCandidateFactV1,
+  metadataByFamilyId: ComponentNormalizationIndexesV1["metadataByFamilyId"],
+): StrategicCohortStructuralInterfaceV1 | Task3NormalizationReasonV1 {
+  const hierarchyRefByFamilyId = new Map(route.supportingHierarchyFacts
+    .map((reference) => [reference.familyId, reference]));
+  const claimInterfaces: StrategicCohortStructuralClaimInterfaceV1[] = [];
+  for (const routeClaim of route.resourceClaims) {
+    const metadata = metadataByFamilyId.get(routeClaim.familyId);
+    const hierarchyRef = hierarchyRefByFamilyId.get(routeClaim.familyId);
+    if (metadata === undefined || hierarchyRef === undefined
+      || hierarchyRef.classificationHash !== metadata.classificationHash
+      || typeof metadata.strengthClass !== "string" || metadata.strengthClass.length === 0
+      || !validLevelRankRelation(metadata.levelRankRelation)) {
+      return "MISSING_STRENGTH_INTERFACE";
+    }
+    const payload = {
+      hierarchyTier: metadata.hierarchyTier,
+      controlRank: metadata.controlRank,
+      efficiencyRank: metadata.efficiencyRank,
+      strengthClass: metadata.strengthClass,
+      levelRankRelation: metadata.levelRankRelation,
+      canonicalGroupType: metadata.groupType,
+      canonicalGroupLength: metadata.canonicalGroupLength,
+      handCountReduction: metadata.handCountReduction,
+      claimRoleVector: sortedUnique(routeClaim.claimRoles),
+      reservationClass: metadata.reservationClass,
+    };
+    claimInterfaces.push({ ...payload, structuralClaimHash: canonicalHash(payload) });
+  }
+  claimInterfaces.sort(compareCanonicalPayload);
+  const payload = {
+    claimInterfaces,
+    routeClasses: sortedUnique(route.endpointFacts.routeClasses),
+    preservationFactCodes: sortedUnique(route.endpointFacts.preservationFactCodes),
+    closedThroughTier: route.endpointFacts.closedThroughTier,
+  };
+  return { ...payload, structuralSignatureHash: canonicalHash(payload) };
+}
+
+function resourceInterfaceOf(
+  component: PhaseDComponentSourceBindingV1,
+  route: StrategicRouteCandidateFactV1,
+  indexes: ComponentNormalizationIndexesV1,
+): Readonly<{
+  resourceInterface: Readonly<{
+    canonicalRoleSlots: readonly ResourceRoleSlotV1[];
+    preservedCardinality: number;
+    consumedCardinality: number;
+    remainderCardinality: number;
+    wildcardCardinality: number;
+    resourceSignatureHash: string;
+  }>;
+  slotByPhysicalCardId: ReadonlyMap<string, ResourceRoleSlotV1>;
+  wildcardAllocationVariantHashesByPhysicalCardId: ReadonlyMap<string, readonly string[]>;
+}> | Task3NormalizationReasonV1 {
+  const dispositionByCard = dispositionsOf(route);
+  if (dispositionByCard === null) return "INCOMPLETE_RESOURCE_ROLE_ACCOUNTING";
+  const context = resourceReplayContextOf(component, route, indexes);
+  if (typeof context === "string") return context;
+  const slotSeeds: ResourceSlotSeedV1[] = [];
+  for (const [physicalCardId, disposition] of dispositionByCard) {
+    const seed = resourceSlotSeedOf(
+      physicalCardId,
+      disposition,
+      context,
+    );
+    if (typeof seed === "string") return seed;
+    slotSeeds.push(seed);
+  }
+  const canonicalized = canonicalRoleSlotsOf(slotSeeds);
+  const canonicalRoleSlots = canonicalized.map((entry) => entry.slot);
+  const payload = {
+    canonicalRoleSlots,
+    preservedCardinality: countDisposition(dispositionByCard, "PRESERVED"),
+    consumedCardinality: countDisposition(dispositionByCard, "CONSUMED"),
+    remainderCardinality: countDisposition(dispositionByCard, "REMAINDER"),
+    wildcardCardinality: slotSeeds.filter((seed) => seed.naturalOrWildcard === "WILDCARD").length,
+  };
+  return {
+    resourceInterface: { ...payload, resourceSignatureHash: canonicalHash(payload) },
+    slotByPhysicalCardId: new Map(canonicalized.map((entry) => [entry.physicalCardId, entry.slot])),
+    wildcardAllocationVariantHashesByPhysicalCardId: new Map(slotSeeds
+      .map((seed) => [seed.physicalCardId, seed.wildcardAllocationVariantHashes])),
+  };
+}
+
+type ResourceReplayContextV1 = Readonly<{
+  supportingFacts: readonly StrategicResourceReservationFactV1[];
+  claimById: ReadonlyMap<string, StrategicResourceReservationClaimV1>;
+  alternativeById: ReadonlyMap<string, StrategicReservationAlternativeFactV1>;
+  unitById: ReadonlyMap<string, StrategicResourceUnitV1>;
+  activeRouteClaimsByCardId: ReadonlyMap<string, readonly StrategicRouteResourceClaimV1[]>;
+  claimsByCardId: ReadonlyMap<string, readonly StrategicResourceReservationClaimV1[]>;
+  factsByCardId: ReadonlyMap<string, readonly StrategicResourceReservationFactV1[]>;
+  unitsByCardId: ReadonlyMap<string, readonly StrategicResourceUnitV1[]>;
+  allocationPayloadByHash: ReadonlyMap<string, Readonly<{
+    canonicalGroupType: StrategicWildcardAllocationLineageV1["canonicalGroupType"];
+    wildcardCardIds: readonly string[];
+  }>>;
+}>;
+
+function resourceReplayContextOf(
+  component: PhaseDComponentSourceBindingV1,
+  route: StrategicRouteCandidateFactV1,
+  indexes: ComponentNormalizationIndexesV1,
+): ResourceReplayContextV1 | Task3NormalizationReasonV1 {
+  const { reservationFactById, alternativeById, unitById } = indexes;
+  const supportingFacts: StrategicResourceReservationFactV1[] = [];
+  const selectedAlternativeIds = new Set<string>();
+  for (const reference of route.supportingReservationFacts) {
+    const fact = reservationFactById.get(reference.reservationFactId);
+    if (fact === undefined || fact.resourceComponentId !== component.resourceComponentId) {
+      return "ACTIVE_LATENT_ROLE_SEPARATION_UNPROVEN";
+    }
+    supportingFacts.push(fact);
+    for (const alternativeId of reference.alternativeReservationFactIds) {
+      if (!alternativeById.has(alternativeId)) {
+        return "ACTIVE_LATENT_ROLE_SEPARATION_UNPROVEN";
+      }
+      selectedAlternativeIds.add(alternativeId);
+    }
+  }
+  const claims = supportingFacts.flatMap((fact) => fact.claims);
+  const claimById = uniqueMap(claims, (claim) => claim.claimId);
+  if (claimById === null) return "ACTIVE_LATENT_ROLE_SEPARATION_UNPROVEN";
+  for (const routeClaim of route.resourceClaims) {
+    const sourceClaim = claimById.get(routeClaim.claimId);
+    if (sourceClaim === undefined || sourceClaim.familyId !== routeClaim.familyId
+      || !sameSet(sourceClaim.claimRoles, routeClaim.claimRoles)
+      || routeClaim.resourceUnitIds.some((resourceUnitId) =>
+        !sourceClaim.resourceUnitIds.includes(resourceUnitId))
+      || routeClaim.alternativeReservationFactIds.length === 0) {
+      return "ACTIVE_LATENT_ROLE_SEPARATION_UNPROVEN";
+    }
+    for (const alternativeId of routeClaim.alternativeReservationFactIds) {
+      const alternative = alternativeById.get(alternativeId);
+      if (!selectedAlternativeIds.has(alternativeId) || alternative === undefined
+        || alternative.claimId !== routeClaim.claimId
+        || alternative.familyId !== routeClaim.familyId
+        || !routeClaim.resourceUnitIds.includes(alternative.resourceUnitId)
+        || !sameSet(alternative.physicalCardIds, routeClaim.physicalCardIds)
+        || !routeClaim.memberIds.includes(alternative.memberId)) {
+        return "ACTIVE_LATENT_ROLE_SEPARATION_UNPROVEN";
+      }
+    }
+  }
+  const referencedUnitIds = unique([
+    ...supportingFacts.flatMap((fact) => fact.resourceUnitIds),
+    ...claims.flatMap((claim) => claim.resourceUnitIds),
+  ]);
+  if (referencedUnitIds.some((resourceUnitId) => !unitById.has(resourceUnitId))) {
+    return "ACTIVE_LATENT_ROLE_SEPARATION_UNPROVEN";
+  }
+  const referencedUnits = referencedUnitIds.map((resourceUnitId) => unitById.get(resourceUnitId)!);
+  return {
+    supportingFacts,
+    claimById,
+    alternativeById,
+    unitById,
+    activeRouteClaimsByCardId: indexByPhysicalCard(route.resourceClaims,
+      (claim) => claim.physicalCardIds),
+    claimsByCardId: indexByPhysicalCard(claims, (claim) => claim.physicalCardIds),
+    factsByCardId: indexByPhysicalCard(supportingFacts, (fact) => fact.physicalCardIds),
+    unitsByCardId: indexByPhysicalCard(referencedUnits, (unit) => unit.physicalCardIds),
+    allocationPayloadByHash: indexes.allocationPayloadByHash,
+  };
+}
+
+function componentNormalizationIndexesOf(
+  component: PhaseDComponentSourceBindingV1,
+): ComponentNormalizationIndexesV1 | Task3NormalizationReasonV1 {
+  const metadataByFamilyId = uniqueMap(component.hierarchyBatch.families,
+    (family) => family.familyId);
+  const reservationFactById = uniqueMap(component.reservationArtifact.reservationFacts,
+    (fact) => fact.reservationFactId);
+  const alternativeById = uniqueMap(component.reservationArtifact.reservationAlternatives,
+    (alternative) => alternative.alternativeReservationFactId);
+  const unitById = uniqueMap(component.reservationArtifact.resourceUnits,
+    (unit) => unit.resourceUnitId);
+  if (metadataByFamilyId === null) return "MISSING_STRENGTH_INTERFACE";
+  if (reservationFactById === null || alternativeById === null || unitById === null) {
+    return "ACTIVE_LATENT_ROLE_SEPARATION_UNPROVEN";
+  }
+  return {
+    metadataByFamilyId,
+    reservationFactById,
+    alternativeById,
+    unitById,
+    allocationPayloadByHash: allocationPayloadIndexOf(component.hierarchyBatch),
+  };
+}
+
+function resourceSlotSeedOf(
+  physicalCardId: string,
+  disposition: StrategicResourceDispositionV1,
+  context: ResourceReplayContextV1,
+): ResourceSlotSeedV1 | Task3NormalizationReasonV1 {
+  const activeClaims = context.activeRouteClaimsByCardId.get(physicalCardId) ?? [];
+  if (activeClaims.length > 1 || (disposition === "REMAINDER" && activeClaims.length !== 0)
+    || (disposition !== "REMAINDER" && activeClaims.length !== 1)) {
+    return "ACTIVE_LATENT_ROLE_SEPARATION_UNPROVEN";
+  }
+  const relevantUnits = context.unitsByCardId.get(physicalCardId) ?? [];
+  const naturalnessFacts = unique(relevantUnits.flatMap((unit) => [
+    ...(unit.naturalCardIds.includes(physicalCardId) ? ["NATURAL" as const] : []),
+    ...(unit.wildcardCardIds.includes(physicalCardId) ? ["WILDCARD" as const] : []),
+  ]));
+  if (naturalnessFacts.length !== 1) return "ACTIVE_LATENT_ROLE_SEPARATION_UNPROVEN";
+  const naturalOrWildcard = naturalnessFacts[0];
+  const activeClaim = activeClaims[0];
+  if (activeClaim !== undefined && context.claimById.get(activeClaim.claimId) === undefined) {
+    return "ACTIVE_LATENT_ROLE_SEPARATION_UNPROVEN";
+  }
+  const activeAllocation = resolveAllocationInterfaces(
+    activeClaim?.wildcardAllocationLineage ?? [],
+    physicalCardId,
+    context.allocationPayloadByHash,
+  );
+  if (typeof activeAllocation === "string") return activeAllocation;
+  if (activeAllocation.interfaces.length > 1
+    || (naturalOrWildcard === "NATURAL" && activeAllocation.interfaces.length > 0)) {
+    return "ACTIVE_LATENT_ROLE_SEPARATION_UNPROVEN";
+  }
+  const activeAllocationInterface = activeAllocation.interfaces[0] ?? null;
+  if (naturalOrWildcard === "WILDCARD" && activeClaim !== undefined
+    && activeAllocationInterface === null) return "MISSING_WILDCARD_ALLOCATION_PAYLOAD";
+  const activePayload = activeClaim === undefined ? {
+    activeClaimRoles: [] as readonly StrategicResourceReservationClaimV1["claimRoles"][number][],
+    activeHierarchyTier: "TIER3_ATOMIC" as const,
+    activeReservationClass: "TIER3_ATOMIC_REMAINDER" as const,
+    activeAllocationInterface: null,
+  } : {
+    activeClaimRoles: sortedUnique(activeClaim.claimRoles),
+    activeHierarchyTier: activeClaim.hierarchyTier,
+    activeReservationClass: activeClaim.reservationClass,
+    activeAllocationInterface,
+  };
+  const routeActiveInterface = {
+    ...activePayload,
+    activeInterfaceHash: canonicalHash(activePayload),
+  };
+
+  const activeClaimIdsForCard = new Set(activeClaims.map((claim) => claim.claimId));
+  const latentClaims = (context.claimsByCardId.get(physicalCardId) ?? [])
+    .filter((claim) => !activeClaimIdsForCard.has(claim.claimId)
+      && claim.physicalCardIds.includes(physicalCardId));
+  const latentLineages = latentClaims.flatMap((claim) => claim.resourceUnitIds.flatMap((unitId) => {
+    const unit = context.unitById.get(unitId);
+    return unit?.physicalCardIds.includes(physicalCardId) === true
+      ? unit.wildcardAllocationLineage
+      : [];
+  }));
+  const latentAllocation = resolveAllocationInterfaces(
+    latentLineages,
+    physicalCardId,
+    context.allocationPayloadByHash,
+  );
+  if (typeof latentAllocation === "string") return latentAllocation;
+  const relevantFacts = context.factsByCardId.get(physicalCardId) ?? [];
+  const latentPayload = {
+    latentClaimRoles: sortedUnique(latentClaims.flatMap((claim) => claim.claimRoles)),
+    latentReservationStates: sortedUnique(relevantFacts.map((fact) => fact.reservationState)),
+    latentResourceImportanceFacts: sortedUnique(latentClaims
+      .flatMap((claim) => claim.resourceImportanceFacts)),
+    latentReleaseInterfaces: sortedUnique(relevantFacts.flatMap((fact) => fact.releaseConditions)),
+    latentAllocationInterfaces: [...latentAllocation.interfaces].sort(compareCanonicalPayload),
+  };
+  const latentResourceInterface = {
+    ...latentPayload,
+    latentInterfaceHash: canonicalHash(latentPayload),
+  };
+  const wildcardAllocationVariantHashes = sortedUnique([
+    ...activeAllocation.allocationVariantHashes,
+    ...latentAllocation.allocationVariantHashes,
+  ]);
+  if (naturalOrWildcard === "WILDCARD" && wildcardAllocationVariantHashes.length === 0) {
+    return "MISSING_WILDCARD_ALLOCATION_PAYLOAD";
+  }
+  return {
+    physicalCardId,
+    disposition,
+    naturalOrWildcard,
+    routeActiveInterface,
+    latentResourceInterface,
+    wildcardAllocationInterface: activeAllocationInterface,
+    wildcardAllocationVariantHashes,
+  };
+}
+
+function allocationPayloadIndexOf(
+  hierarchyBatch: StrategicHierarchyClassificationBatchV1,
+): ReadonlyMap<string, Readonly<{
+  canonicalGroupType: StrategicWildcardAllocationLineageV1["canonicalGroupType"];
+  wildcardCardIds: readonly string[];
+}>> {
+  const result = new Map<string, Readonly<{
+    canonicalGroupType: StrategicWildcardAllocationLineageV1["canonicalGroupType"];
+    wildcardCardIds: readonly string[];
+  }>>();
+  for (const family of hierarchyBatch.families) {
+    for (const member of family.memberLineage) {
+      member.wildcardAllocationVariantHashes.forEach((allocationVariantHash, index) => {
+        const payload = member.wildcardAllocationVariants[index];
+        if (payload !== undefined && canonicalHash(payload) === allocationVariantHash) {
+          result.set(allocationVariantHash, payload);
+        }
+      });
+    }
+  }
+  return result;
+}
+
+function resolveAllocationInterfaces(
+  lineages: readonly StrategicWildcardAllocationLineageV1[],
+  physicalCardId: string,
+  payloadByHash: ResourceReplayContextV1["allocationPayloadByHash"],
+): AllocationResolutionV1 | Task3NormalizationReasonV1 {
+  const interfaces = new Map<string, StrategicCohortWildcardAllocationInterfaceV1>();
+  const allocationVariantHashes: string[] = [];
+  for (const lineage of lineages.filter((candidate) =>
+    candidate.wildcardCardIds.includes(physicalCardId))) {
+    const allocationPayload = payloadByHash.get(lineage.allocationVariantHash);
+    if (allocationPayload === undefined
+      || allocationPayload.canonicalGroupType !== lineage.canonicalGroupType
+      || !sameSet(allocationPayload.wildcardCardIds, lineage.wildcardCardIds)) {
+      return "MISSING_WILDCARD_ALLOCATION_PAYLOAD";
+    }
+    const payload = {
+      canonicalGroupType: allocationPayload.canonicalGroupType,
+      allocationCardinality: allocationPayload.wildcardCardIds.length,
+      canonicalAllocationRoleVector: Array.from(
+        { length: allocationPayload.wildcardCardIds.length },
+        () => "WILDCARD_ALLOCATION",
+      ),
+    };
+    const allocationInterface = {
+      ...payload,
+      allocationInterfaceHash: canonicalHash(payload),
+    };
+    interfaces.set(canonicalSerialize(allocationInterface), allocationInterface);
+    allocationVariantHashes.push(lineage.allocationVariantHash);
+  }
+  return {
+    interfaces: [...interfaces.values()].sort(compareCanonicalPayload),
+    allocationVariantHashes: sortedUnique(allocationVariantHashes),
+  };
+}
+
+function canonicalRoleSlotsOf(
+  seeds: readonly ResourceSlotSeedV1[],
+): readonly Readonly<{ physicalCardId: string; slot: ResourceRoleSlotV1 }>[] {
+  const ordered = seeds.map((seed) => {
+    const descriptor = {
+      disposition: seed.disposition,
+      naturalOrWildcard: seed.naturalOrWildcard,
+      routeActiveInterface: seed.routeActiveInterface,
+      latentResourceInterface: seed.latentResourceInterface,
+      wildcardAllocationInterface: seed.wildcardAllocationInterface,
+    };
+    return {
+      seed,
+      descriptor,
+      descriptorKey: canonicalSerialize(descriptor),
+      descriptorHash: canonicalHash(descriptor),
+    };
+  }).sort((left, right) => compareText(left.descriptorKey, right.descriptorKey)
+    || compareText(left.seed.physicalCardId, right.seed.physicalCardId));
+  const nextOrdinalByDescriptor = new Map<string, number>();
+  return ordered.map(({ seed, descriptor, descriptorKey, descriptorHash }) => {
+    const ordinal = nextOrdinalByDescriptor.get(descriptorKey) ?? 0;
+    nextOrdinalByDescriptor.set(descriptorKey, ordinal + 1);
+    const canonicalRolePosition = `${descriptorHash}:${ordinal}`;
+    const slotPayload = { ...descriptor, canonicalRolePosition };
+    return {
+      physicalCardId: seed.physicalCardId,
+      slot: { ...slotPayload, roleSlotHash: canonicalHash(slotPayload) },
+    };
+  });
+}
+
+function dispositionsOf(
+  route: StrategicRouteCandidateFactV1,
+): ReadonlyMap<string, StrategicResourceDispositionV1> | null {
+  const universe = route.endpointFacts.accountedPhysicalCardIds;
+  if (unique(universe).length !== universe.length) return null;
+  const assignments: readonly Readonly<{
+    disposition: StrategicResourceDispositionV1;
+    physicalCardIds: readonly string[];
+  }>[] = [
+    { disposition: "PRESERVED", physicalCardIds: route.preservedResources },
+    { disposition: "CONSUMED", physicalCardIds: route.consumedResources },
+    { disposition: "REMAINDER", physicalCardIds: route.endpointFacts.remainderPhysicalCardIds },
+  ];
+  const universeSet = new Set(universe);
+  if (assignments.some((assignment) => assignment.physicalCardIds
+    .some((physicalCardId) => !universeSet.has(physicalCardId)))) return null;
+  const result = new Map<string, StrategicResourceDispositionV1>();
+  for (const physicalCardId of universe) {
+    const occurrences = assignments.flatMap((assignment) => assignment.physicalCardIds
+      .filter((candidate) => candidate === physicalCardId)
+      .map(() => assignment.disposition));
+    if (occurrences.length !== 1) return null;
+    result.set(physicalCardId, occurrences[0]);
+  }
+  return result;
+}
+
+function memberLocalLineageOf(
+  route: StrategicRouteCandidateFactV1,
+  slotByPhysicalCardId: ReadonlyMap<string, ResourceRoleSlotV1>,
+  wildcardHashesByPhysicalCardId: ReadonlyMap<string, readonly string[]>,
+): readonly StrategicCohortTask3MemberLocalLineageOccurrenceV1[] {
+  const entries: StrategicCohortTask3MemberLocalLineageOccurrenceV1[] = [];
+  for (const [physicalCardId, slot] of slotByPhysicalCardId) {
+    const physicalPayload = {
+      routeId: route.routeId,
+      physicalCardId,
+      disposition: slot.disposition,
+      canonicalRolePosition: slot.canonicalRolePosition,
+    };
+    entries.push({
+      kind: "PHYSICAL",
+      occurrence: { ...physicalPayload, occurrenceHash: canonicalHash(physicalPayload) },
+    });
+    for (const allocationVariantHash of wildcardHashesByPhysicalCardId.get(physicalCardId) ?? []) {
+      const wildcardPayload = {
+        routeId: route.routeId,
+        wildcardCardId: physicalCardId,
+        allocationVariantHash,
+        canonicalRolePosition: slot.canonicalRolePosition,
+      };
+      entries.push({
+        kind: "WILDCARD",
+        occurrence: { ...wildcardPayload, occurrenceHash: canonicalHash(wildcardPayload) },
+      });
+    }
+  }
+  const familyMemberKeys = new Set<string>();
+  for (const claim of route.resourceClaims) {
+    for (const memberId of claim.memberIds) {
+      const key = canonicalSerialize([claim.familyId, memberId]);
+      if (familyMemberKeys.has(key)) continue;
+      familyMemberKeys.add(key);
+      const payload = { routeId: route.routeId, familyId: claim.familyId, memberId };
+      entries.push({
+        kind: "FAMILY_MEMBER",
+        occurrence: { ...payload, occurrenceHash: canonicalHash(payload) },
+      });
+    }
+  }
+  return entries.sort(compareCanonicalPayload);
+}
+
+function countDisposition(
+  dispositions: ReadonlyMap<string, StrategicResourceDispositionV1>,
+  expected: StrategicResourceDispositionV1,
+): number {
+  return [...dispositions.values()].filter((value) => value === expected).length;
+}
+
+function indexByPhysicalCard<T>(
+  values: readonly T[],
+  physicalCardIdsOf: (value: T) => readonly string[],
+): ReadonlyMap<string, readonly T[]> {
+  const result = new Map<string, T[]>();
+  for (const value of values) {
+    for (const physicalCardId of physicalCardIdsOf(value)) {
+      const entries = result.get(physicalCardId);
+      if (entries === undefined) result.set(physicalCardId, [value]);
+      else entries.push(value);
+    }
+  }
+  return result;
+}
+
+function validLevelRankRelation(value: unknown): boolean {
+  return value === "LEVEL_RANK_BASED" || value === "NON_LEVEL_RANK" || value === "NOT_APPLICABLE";
+}
+
+function sortedUnique<T extends string>(values: readonly T[]): T[] {
+  return [...new Set(values)].sort(compareText);
+}
+
+function compareCanonicalPayload(left: unknown, right: unknown): number {
+  return compareText(canonicalSerialize(left), canonicalSerialize(right));
+}
 
 function validateComponentSelfBindings(
   component: PhaseDComponentSourceBindingV1,

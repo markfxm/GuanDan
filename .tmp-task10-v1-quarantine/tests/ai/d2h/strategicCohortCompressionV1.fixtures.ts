@@ -51,6 +51,71 @@ export function makeValidPhaseDAdmissionInput(): StrategicCohortCompressionInput
   return inputOf(components, bind(components));
 }
 
+export function makeThreeComponentPhaseDAdmissionInput(): StrategicCohortCompressionInputV1 {
+  const components = makeComponentSources(3);
+  return inputOf(components, bind(components));
+}
+
+export function makeSameRankDifferentCopyPhaseDAdmissionInput(): StrategicCohortCompressionInputV1 {
+  const firstPairIds = ["S9-1", "C9-1"];
+  const secondPairIds = ["S9-2", "C9-2"];
+  const input = makeInventoryInput([...firstPairIds, ...secondPairIds], "2");
+  const inventory = buildStrategicStructureInventoryV1(input.a0, input.b0);
+  const family = exactFamily(inventory, "pair", firstPairIds);
+  const components = [firstPairIds, secondPairIds].map((physicalCardIds) => {
+    const fixture = makeRouteFixtureFromInventory(inventory, [{
+      familyId: family.familyId,
+      exactMemberPhysicalCardIds: physicalCardIds,
+    }]);
+    const routeArtifact = generateStrategicRouteCandidateFactsV1({ ...fixture, budget: C1_BUDGET });
+    if (routeArtifact.generationStatus !== "COMPLETE") {
+      throw new Error("Same-rank copy fixture needs complete C1 facts");
+    }
+    return componentSourceOf(fixture.hierarchyBatch, fixture.reservationArtifact, routeArtifact);
+  });
+  return inputOf(components, bind(components));
+}
+
+export function makeWildcardPhaseDAdmissionInput(): StrategicCohortCompressionInputV1 {
+  const straightFlushIds = ["S3-1", "S4-1", "S5-1", "S6-1", "H2-1"];
+  const bombIds = ["C7-1", "D7-1", "H7-1", "H2-1"];
+  const wildcardPairIds = ["C8-1", "H2-1"];
+  const disjointPairIds = ["S9-1", "C9-1"];
+  const input = makeInventoryInput([
+    ...new Set([...straightFlushIds, ...bombIds, ...wildcardPairIds, ...disjointPairIds]),
+  ], "2");
+  const inventory = buildStrategicStructureInventoryV1(input.a0, input.b0);
+  const selections: readonly FamilySelectionV1[][] = [
+    [
+      {
+        familyId: exactFamily(inventory, "straight-flush", straightFlushIds).familyId,
+        exactMemberPhysicalCardIds: straightFlushIds,
+      },
+      {
+        familyId: exactFamily(inventory, "bomb", bombIds).familyId,
+        exactMemberPhysicalCardIds: bombIds,
+      },
+      {
+        familyId: exactFamily(inventory, "pair", wildcardPairIds).familyId,
+        exactMemberPhysicalCardIds: wildcardPairIds,
+      },
+    ],
+    [{
+      familyId: exactFamily(inventory, "pair", disjointPairIds).familyId,
+      exactMemberPhysicalCardIds: disjointPairIds,
+    }],
+  ];
+  const components = selections.map((selection) => {
+    const fixture = makeRouteFixtureFromInventory(inventory, selection);
+    const routeArtifact = generateStrategicRouteCandidateFactsV1({ ...fixture, budget: C1_BUDGET });
+    if (routeArtifact.generationStatus !== "COMPLETE") {
+      throw new Error("Wildcard Phase D fixture needs complete C1 facts");
+    }
+    return componentSourceOf(fixture.hierarchyBatch, fixture.reservationArtifact, routeArtifact);
+  });
+  return inputOf(components, bind(components));
+}
+
 export function makeInvalidPhaseDEvidenceBudgetFixture(): StrategicCohortCompressionInputV1 {
   const input = makeValidPhaseDAdmissionInput();
   return {
