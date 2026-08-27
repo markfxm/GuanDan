@@ -519,11 +519,11 @@ function resourceSlotSeedOf(
   if (naturalOrWildcard === "WILDCARD" && activeClaim !== undefined
     && activeAllocationInterface === null) return "MISSING_WILDCARD_ALLOCATION_PAYLOAD";
   const activePayload = activeClaim === undefined ? {
-    activeClaimRoles: [] as readonly StrategicResourceReservationClaimV1["claimRoles"][number][],
-    activeHierarchyTier: "TIER3_ATOMIC" as const,
-    activeReservationClass: "TIER3_ATOMIC_REMAINDER" as const,
+    kind: "NO_ACTIVE_CLAIM" as const,
+    activeClaimRoles: [] as const,
     activeAllocationInterface: null,
   } : {
+    kind: "ACTIVE_CLAIM" as const,
     activeClaimRoles: sortedUnique(activeClaim.claimRoles),
     activeHierarchyTier: activeClaim.hierarchyTier,
     activeReservationClass: activeClaim.reservationClass,
@@ -686,17 +686,14 @@ function dispositionsOf(
     { disposition: "REMAINDER", physicalCardIds: route.endpointFacts.remainderPhysicalCardIds },
   ];
   const universeSet = new Set(universe);
-  if (assignments.some((assignment) => assignment.physicalCardIds
-    .some((physicalCardId) => !universeSet.has(physicalCardId)))) return null;
   const result = new Map<string, StrategicResourceDispositionV1>();
-  for (const physicalCardId of universe) {
-    const occurrences = assignments.flatMap((assignment) => assignment.physicalCardIds
-      .filter((candidate) => candidate === physicalCardId)
-      .map(() => assignment.disposition));
-    if (occurrences.length !== 1) return null;
-    result.set(physicalCardId, occurrences[0]);
+  for (const assignment of assignments) {
+    for (const physicalCardId of assignment.physicalCardIds) {
+      if (!universeSet.has(physicalCardId) || result.has(physicalCardId)) return null;
+      result.set(physicalCardId, assignment.disposition);
+    }
   }
-  return result;
+  return result.size === universe.length ? result : null;
 }
 
 function memberLocalLineageOf(
@@ -1165,10 +1162,12 @@ function difference(left: readonly string[], right: readonly string[]): readonly
 }
 
 function sameSet(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length
-    && unique(left).length === left.length
-    && unique(right).length === right.length
-    && [...left].sort(compareText).every((value, index) => value === [...right].sort(compareText)[index]);
+  const leftSorted = [...left].sort(compareText);
+  const rightSorted = [...right].sort(compareText);
+  return leftSorted.length === rightSorted.length
+    && unique(leftSorted).length === leftSorted.length
+    && unique(rightSorted).length === rightSorted.length
+    && leftSorted.every((value, index) => value === rightSorted[index]);
 }
 
 function uniqueMap<T>(

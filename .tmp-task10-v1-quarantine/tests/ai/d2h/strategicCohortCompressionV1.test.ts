@@ -372,6 +372,49 @@ describe("Strategic cohort compression V1 route normalization drafts", () => {
     ]);
   });
 
+  it("marks a remainder card without a route claim as NO_ACTIVE_CLAIM", () => {
+    const { admission, physicalCardId } = remainderCardFromComponent(
+      pairNineSingleRouteAdmission(),
+      0,
+    );
+    const draft = normalizedOf(normalizeAdmittedStrategicRoutesV1(admission))
+      .normalizedMemberDrafts[0];
+    const slot = slotForPhysicalCard(draft, physicalCardId);
+
+    expect(slot.routeActiveInterface.kind).toBe("NO_ACTIVE_CLAIM");
+  });
+
+  it("does not invent tier or reservation semantics for NO_ACTIVE_CLAIM", () => {
+    const { admission, physicalCardId } = remainderCardFromComponent(
+      pairNineSingleRouteAdmission(),
+      0,
+    );
+    const draft = normalizedOf(normalizeAdmittedStrategicRoutesV1(admission))
+      .normalizedMemberDrafts[0];
+    const activeInterface = slotForPhysicalCard(draft, physicalCardId).routeActiveInterface;
+
+    expect(activeInterface.kind).toBe("NO_ACTIVE_CLAIM");
+    expect(activeInterface.activeClaimRoles).toEqual([]);
+    expect(activeInterface.activeAllocationInterface).toBeNull();
+    expect("activeHierarchyTier" in activeInterface).toBe(false);
+    expect("activeReservationClass" in activeInterface).toBe(false);
+  });
+
+  it("keeps unclaimed remainder role interfaces shared while lineage stays exact", () => {
+    const source = admittedOf(makeSameRankDifferentCopyPhaseDAdmissionInput());
+    const first = remainderCardFromComponent(source, 0);
+    const second = remainderCardFromComponent(source, 1);
+    const firstDraft = normalizedOf(normalizeAdmittedStrategicRoutesV1(first.admission))
+      .normalizedMemberDrafts[0];
+    const secondDraft = normalizedOf(normalizeAdmittedStrategicRoutesV1(second.admission))
+      .normalizedMemberDrafts[0];
+
+    expect(firstDraft.resourceInterface).toEqual(secondDraft.resourceInterface);
+    expect(firstDraft.task3MemberLocalLineage).not.toEqual(secondDraft.task3MemberLocalLineage);
+    expect(JSON.stringify(firstDraft.resourceInterface)).not.toContain(first.physicalCardId);
+    expect(JSON.stringify(secondDraft.resourceInterface)).not.toContain(second.physicalCardId);
+  });
+
   it("canonicalizes latent and resource role input order", () => {
     const canonicalAdmission = levelDefenseSingleRouteAdmission();
     const reversedAdmission = reverseNormalizationEvidence(canonicalAdmission);
@@ -414,6 +457,53 @@ describe("Strategic cohort compression V1 route normalization drafts", () => {
       };
     });
     const result = normalizeAdmittedStrategicRoutesV1(duplicated);
+
+    expect(result.normalizationStatus).toBe("INCONCLUSIVE");
+    expect(result.reasonCodes).toEqual(["INCOMPLETE_RESOURCE_ROLE_ACCOUNTING"]);
+    expect(result.normalizedMemberDrafts).toBeNull();
+  });
+
+  it("fails closed when one accounted physical card has no disposition", () => {
+    const admission = pairNineSingleRouteAdmission();
+    const missing = mapOnlyComponent(admission, (component) => {
+      const route = component.routeArtifact.routeCandidates![0];
+      const physicalCardId = route.consumedResources[0];
+      if (physicalCardId === undefined) throw new Error("Missing disposition fixture card");
+      return {
+        ...component,
+        routeArtifact: {
+          ...component.routeArtifact,
+          routeCandidates: [{
+            ...route,
+            consumedResources: route.consumedResources
+              .filter((candidate) => candidate !== physicalCardId),
+          }],
+        },
+      };
+    });
+    const result = normalizeAdmittedStrategicRoutesV1(missing);
+
+    expect(result.normalizationStatus).toBe("INCONCLUSIVE");
+    expect(result.reasonCodes).toEqual(["INCOMPLETE_RESOURCE_ROLE_ACCOUNTING"]);
+    expect(result.normalizedMemberDrafts).toBeNull();
+  });
+
+  it("fails closed when a disposition names a card outside the route universe", () => {
+    const admission = pairNineSingleRouteAdmission();
+    const outOfUniverse = mapOnlyComponent(admission, (component) => {
+      const route = component.routeArtifact.routeCandidates![0];
+      return {
+        ...component,
+        routeArtifact: {
+          ...component.routeArtifact,
+          routeCandidates: [{
+            ...route,
+            consumedResources: [...route.consumedResources, "NOT-IN-UNIVERSE"],
+          }],
+        },
+      };
+    });
+    const result = normalizeAdmittedStrategicRoutesV1(outOfUniverse);
 
     expect(result.normalizationStatus).toBe("INCONCLUSIVE");
     expect(result.reasonCodes).toEqual(["INCOMPLETE_RESOURCE_ROLE_ACCOUNTING"]);
@@ -532,6 +622,60 @@ function draftWithPhysicalCards(
   });
   if (draft === undefined) throw new Error(`Missing normalization draft for ${expected.join(",")}`);
   return draft;
+}
+
+function slotForPhysicalCard(
+  draft: NormalizedRouteCohortMemberDraftV1,
+  physicalCardId: string,
+) {
+  const physicalOccurrence = draft.task3MemberLocalLineage.find((entry) =>
+    entry.kind === "PHYSICAL" && entry.occurrence.physicalCardId === physicalCardId);
+  if (physicalOccurrence?.kind !== "PHYSICAL") {
+    throw new Error(`Missing physical role occurrence for ${physicalCardId}`);
+  }
+  const slot = draft.canonicalResourceRoleVector.find((candidate) =>
+    candidate.canonicalRolePosition === physicalOccurrence.occurrence.canonicalRolePosition);
+  if (slot === undefined) throw new Error(`Missing canonical role slot for ${physicalCardId}`);
+  return slot;
+}
+
+function remainderCardFromComponent(
+  admission: PhaseDSourceAdmissionSuccessV1,
+  componentIndex: number,
+): { admission: PhaseDSourceAdmissionSuccessV1; physicalCardId: string } {
+  const component = admission.canonicalSourceBindingManifest.componentSources[componentIndex];
+  if (component === undefined) throw new Error("Missing remainder normalization component");
+  const route = component.routeArtifact.routeCandidates?.[0];
+  if (route === undefined) throw new Error("Missing remainder normalization route");
+  const physicalCardId = route.consumedResources[0];
+  if (physicalCardId === undefined) throw new Error("Missing remainder normalization card");
+  return {
+    admission: {
+      ...admission,
+      canonicalSourceBindingManifest: {
+        ...admission.canonicalSourceBindingManifest,
+        componentSources: [{
+          ...component,
+          routeArtifact: {
+            ...component.routeArtifact,
+            routeCandidates: [{
+              ...route,
+              resourceClaims: [],
+              consumedResources: [],
+              endpointFacts: {
+                ...route.endpointFacts,
+                remainderPhysicalCardIds: [
+                  ...route.endpointFacts.remainderPhysicalCardIds,
+                  ...route.consumedResources,
+                ],
+              },
+            }],
+          },
+        }],
+      },
+    },
+    physicalCardId,
+  };
 }
 
 function levelDefenseSingleRouteAdmission(): PhaseDSourceAdmissionSuccessV1 {

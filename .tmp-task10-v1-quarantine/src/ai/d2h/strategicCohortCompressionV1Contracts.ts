@@ -199,13 +199,25 @@ export type StrategicCohortStructuralInterfaceV1 = Readonly<{
   structuralSignatureHash: string;
 }>;
 
-export type StrategicCohortRouteActiveResourceInterfaceV1 = Readonly<{
+export type StrategicCohortRouteActiveClaimInterfaceV1 = Readonly<{
+  kind: "ACTIVE_CLAIM";
   activeClaimRoles: readonly StrategicReservationClaimRoleV1[];
   activeHierarchyTier: StrategicHierarchyTierV1;
   activeReservationClass: StrategicReservationClassV1;
   activeAllocationInterface: StrategicCohortWildcardAllocationInterfaceV1 | null;
   activeInterfaceHash: string;
 }>;
+
+export type StrategicCohortRouteNoActiveClaimInterfaceV1 = Readonly<{
+  kind: "NO_ACTIVE_CLAIM";
+  activeClaimRoles: readonly [];
+  activeAllocationInterface: null;
+  activeInterfaceHash: string;
+}>;
+
+export type StrategicCohortRouteActiveResourceInterfaceV1 =
+  | StrategicCohortRouteActiveClaimInterfaceV1
+  | StrategicCohortRouteNoActiveClaimInterfaceV1;
 
 export type StrategicCohortLatentResourceInterfaceV1 = Readonly<{
   latentClaimRoles: readonly StrategicReservationClaimRoleV1[];
