@@ -93,6 +93,37 @@ export function makeDisjointTierCombinationRouteFixture(): StrategicRouteC1Fixtu
   ]);
 }
 
+export function makeDisjointLevelSevenBombDefensePairRouteFixture(): StrategicRouteC1FixtureV1 {
+  const bombIds = ["S7-1", "C7-1", "D7-1", "H7-1"];
+  const defensePairIds = ["C7-2", "D7-2"];
+  const bridgeStraightFlushIds = ["S3-1", "S4-1", "S5-1", "S6-1", "S7-1"];
+  const overlappingBridgeStraightIds = ["S3-1", "S4-1", "S5-1", "S6-1", "C7-2"];
+  // The two intended route allocations are disjoint. The bridge alternatives
+  // keep every selected family in one resource component, while the straight
+  // deliberately overlaps the defense pair and must remain unselected.
+  const handIds = [...new Set([
+    ...bombIds,
+    ...defensePairIds,
+    ...bridgeStraightFlushIds,
+    ...overlappingBridgeStraightIds,
+  ])];
+  return makeSelectedFixture(handIds, "7", (inventory) => [
+    { familyId: exactFamily(inventory, "bomb", bombIds).familyId, exactMemberPhysicalCardIds: bombIds },
+    {
+      familyId: exactFamily(inventory, "pair", defensePairIds).familyId,
+      exactMemberPhysicalCardIds: defensePairIds,
+    },
+    {
+      familyId: exactFamily(inventory, "straight-flush", bridgeStraightFlushIds).familyId,
+      exactMemberPhysicalCardIds: bridgeStraightFlushIds,
+    },
+    {
+      familyId: exactFamily(inventory, "straight", overlappingBridgeStraightIds).familyId,
+      exactMemberPhysicalCardIds: overlappingBridgeStraightIds,
+    },
+  ]);
+}
+
 export function makeWildcardContentionRouteFixture(): StrategicRouteC1FixtureV1 {
   const straightFlushIds = ["S3-1", "S4-1", "S5-1", "S6-1", "H2-1"];
   const bombIds = ["C7-1", "D7-1", "H7-1", "H2-1"];

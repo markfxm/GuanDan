@@ -284,6 +284,14 @@ function* branchesOf(
         yield* emit([...throughTier2, ...tier3Set]);
       }
     }
+    // A concrete level-rank defense alternative remains a valid local route
+    // alongside non-overlapping control even when an unrelated Tier2 choice
+    // would otherwise occupy its exact cards.
+    const defensiveTier3 = tier3.filter((alternative) =>
+      claimById.get(alternative.claimId)?.claimRoles.includes("LEVEL_RANK_DEFENSE") === true);
+    for (const defenseSet of streamingMaximalSets(defensiveTier3, tier1Cards, tracker)) {
+      yield* emit([...tier1Set, ...defenseSet]);
+    }
   }
   const hasHigherTierClaim = fact.claims.some((claim) => claim.hierarchyTier === "TIER1_CONTROL");
   const lowerTierVisibleWithoutControl = !hasHigherTierClaim

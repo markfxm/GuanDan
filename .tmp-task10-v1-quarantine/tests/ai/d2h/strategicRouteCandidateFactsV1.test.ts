@@ -9,6 +9,7 @@ import type {
 import {
   makeBombFastSheddingRouteFixture,
   makeDenseConflictRouteFixture,
+  makeDisjointLevelSevenBombDefensePairRouteFixture,
   makeDisjointTierCombinationRouteFixture,
   makeFourLevelSevensRouteFixture,
   makePlateStraightRouteFixture,
@@ -126,6 +127,86 @@ describe("D2H-S0.5 Phase3.2-R Phase C1 single component-local route generation",
     expect(combined?.resourceClaims).toHaveLength(2);
     expect(combined?.preservedResources).toEqual(["C7-1", "D7-1", "H7-1", "S7-1"]);
     expect(combined?.consumedResources).toEqual(["C7-2", "S3-1", "S4-1", "S5-1", "S6-1"]);
+  });
+
+  it("coexists a level-seven bomb and defense pair when their exact allocations are disjoint", () => {
+    const fixture = makeDisjointLevelSevenBombDefensePairRouteFixture();
+    const result = generate(fixture);
+    const reversed = generate(withReversedRouteInputs(fixture));
+    const bombIds = ["C7-1", "D7-1", "H7-1", "S7-1"];
+    const defensePairIds = ["C7-2", "D7-2"];
+    const route = result.routeCandidates?.find((candidate) => {
+      const claims = candidate.resourceClaims.map((claim) => [...claim.physicalCardIds].sort());
+      return claims.some((cards) => JSON.stringify(cards) === JSON.stringify(bombIds))
+        && claims.some((cards) => JSON.stringify(cards) === JSON.stringify(defensePairIds));
+    });
+
+    expect(result.generationStatus).toBe("COMPLETE");
+    expect(route).toBeDefined();
+    const bombClaim = route?.resourceClaims.find((claim) =>
+      JSON.stringify([...claim.physicalCardIds].sort()) === JSON.stringify(bombIds));
+    const defensePairClaim = route?.resourceClaims.find((claim) =>
+      JSON.stringify([...claim.physicalCardIds].sort()) === JSON.stringify(defensePairIds));
+    expect(bombClaim?.controlRank).toBe("CR2_BOMB");
+    expect(defensePairClaim?.claimRoles).toContain("LEVEL_RANK_DEFENSE");
+    expect(bombIds.filter((cardId) => defensePairIds.includes(cardId))).toEqual([]);
+    expect(route?.resourceClaims).toHaveLength(2);
+    for (const [claim, expectedCards] of [[bombClaim, bombIds], [defensePairClaim, defensePairIds]] as const) {
+      const alternative = fixture.reservationArtifact.reservationAlternatives.find((candidate) =>
+        candidate.alternativeReservationFactId === claim?.alternativeReservationFactIds[0]);
+      expect(alternative?.physicalCardIds).toEqual(expectedCards);
+      expect(alternative?.alternativeHash).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(route?.branchLocalResolutionWitnesses.flatMap((witness) => witness.allocations)
+      .flatMap((allocation) => allocation.physicalCardIds).sort())
+      .toEqual([...bombIds, ...defensePairIds].sort());
+    const bombAlternativeId = bombClaim?.alternativeReservationFactIds[0];
+    const defensePairAlternativeId = defensePairClaim?.alternativeReservationFactIds[0];
+    // The global component conflict remains unresolved; this local branch is
+    // nevertheless permitted to bind both disjoint alternatives, rather than
+    // turning shared level-rank semantics into an artificial XOR.
+    expect(route?.branchLocalResolutionWitnesses.some((witness) =>
+      witness.selectedAlternativeReservationFactIds.includes(bombAlternativeId ?? "")
+      && witness.selectedAlternativeReservationFactIds.includes(defensePairAlternativeId ?? ""))).toBe(true);
+    expect(reversed).toEqual(result);
+    expect(reversed.routeUniverseHash).toBe(result.routeUniverseHash);
+  });
+
+  it("derives exact hand-count reduction only from selected non-overlapping alternatives", () => {
+    const fixture = makeDisjointLevelSevenBombDefensePairRouteFixture();
+    const result = generate(fixture);
+    const reversed = generate(withReversedRouteInputs(fixture));
+    const bombIds = ["C7-1", "D7-1", "H7-1", "S7-1"];
+    const defensePairIds = ["C7-2", "D7-2"];
+    const bridgeOverlapIds = ["C7-2", "S3-1", "S4-1", "S5-1", "S6-1"];
+    const route = result.routeCandidates?.find((candidate) => {
+      const claims = candidate.resourceClaims.map((claim) => [...claim.physicalCardIds].sort());
+      return claims.some((cards) => JSON.stringify(cards) === JSON.stringify(bombIds))
+        && claims.some((cards) => JSON.stringify(cards) === JSON.stringify(defensePairIds));
+    });
+
+    expect(result.generationStatus).toBe("COMPLETE");
+    expect(route).toBeDefined();
+    const selectedCards = route!.resourceClaims.map((claim) => [...claim.physicalCardIds].sort());
+    expect(selectedCards).toEqual(expect.arrayContaining([bombIds, defensePairIds]));
+    expect(new Set(selectedCards.flat()).size).toBe(bombIds.length + defensePairIds.length);
+    const sourceReductionByFamilyId = new Map(fixture.hierarchyBatch.families.map((family) => [
+      family.familyId,
+      family.handCountReduction,
+    ]));
+    expect(route!.resourceClaims.map((claim) => sourceReductionByFamilyId.get(claim.familyId)).sort())
+      .toEqual([1, 3]);
+    const expectedExactHcr = 3 + 1;
+    expect(route!.endpointFacts.exactHandCountReduction).toBe(expectedExactHcr);
+    const overlappingAlternative = fixture.reservationArtifact.reservationAlternatives.find((alternative) =>
+      JSON.stringify([...alternative.physicalCardIds].sort()) === JSON.stringify(bridgeOverlapIds));
+    expect(overlappingAlternative).toBeDefined();
+    expect(route!.resourceClaims.flatMap((claim) => claim.alternativeReservationFactIds))
+      .not.toContain(overlappingAlternative!.alternativeReservationFactId);
+    expect(route!.endpointFacts.exactHandCountReduction).not.toBe(expectedExactHcr + 4);
+    const reversedRoute = reversed.routeCandidates?.find((candidate) => candidate.routeHash === route!.routeHash);
+    expect(reversedRoute?.endpointFacts.exactHandCountReduction).toBe(expectedExactHcr);
+    expect(reversed.routeUniverseHash).toBe(result.routeUniverseHash);
   });
 
   it("retains every fixed wildcard contention lineage as a separate route fact", () => {
