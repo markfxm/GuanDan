@@ -1966,12 +1966,22 @@ function validateBranchWitnesses(
     if (!route.unresolvedConflicts.includes(witness.conflictFactId)) {
       return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
     }
+    const conflictAlternativeIds = new Set(conflict.alternativeReservationFactIds);
+    if (witness.selectedAlternativeReservationFactIds.length
+      !== new Set(witness.selectedAlternativeReservationFactIds).size
+      || witness.selectedAlternativeReservationFactIds.some((alternativeReservationFactId) =>
+        !conflictAlternativeIds.has(alternativeReservationFactId))) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
     if (witness.selectedAlternativeReservationFactIds.length !== witness.allocations.length
       || witness.selectedAlternativeReservationFactIds.some((id, index) =>
         id !== witness.allocations[index]?.alternativeReservationFactId)) {
       return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
     }
     for (const allocation of witness.allocations) {
+      if (!conflictAlternativeIds.has(allocation.alternativeReservationFactId)) {
+        return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+      }
       if (!selectedAlternativeIds.has(allocation.alternativeReservationFactId)) {
         return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
       }

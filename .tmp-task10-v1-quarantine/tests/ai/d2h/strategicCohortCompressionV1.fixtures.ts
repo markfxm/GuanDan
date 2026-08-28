@@ -16,11 +16,14 @@ import { buildStrategicStructureInventoryV1 } from
 import type { StrategicStructureInventoryV1 } from
   "../../../src/ai/d2h/strategicStructureInventoryContracts";
 import type {
+  NormalizedRouteCohortMemberDraftV1,
   PhaseDSourceAdmissionSuccessV1,
   PhaseDComponentSourceBindingV1,
   PhaseDSourceBindingManifestV1,
   StrategicCohortCompressionInputV1,
 } from "../../../src/ai/d2h/strategicCohortCompressionV1Contracts";
+import { normalizeAdmittedStrategicRoutesV1 } from
+  "../../../src/ai/d2h/strategicCohortCompressionV1";
 import {
   makeRouteFixtureFromInventory,
   type FamilySelectionV1,
@@ -549,6 +552,409 @@ export function makeBrokenClosureReferenceFixture(): PhaseDSourceAdmissionSucces
   };
   const admission = { ...admissionPayload, admissionHash: canonicalHash(admissionPayload) };
   return admission;
+}
+
+export function makeCrossConflictWitnessBindingFixture(): Readonly<{
+  admission: PhaseDSourceAdmissionSuccessV1;
+  normalizedMemberDrafts: readonly NormalizedRouteCohortMemberDraftV1[];
+}> {
+  const components = makeValidPhaseDAdmissionInput().sourceBindingManifest.componentSources;
+  const originalAdmission = admittedChangedComponentsOf(components);
+  const normalized = normalizeAdmittedStrategicRoutesV1(originalAdmission);
+  if (normalized.normalizationStatus !== "COMPLETE") {
+    throw new Error("Cross-conflict witness fixture needs normalized source drafts");
+  }
+  const targetComponent = components[0];
+  const targetRoute = targetComponent?.routeArtifact.routeCandidates?.[0];
+  const originalFact = targetComponent?.reservationArtifact.reservationFacts[0];
+  const originalConflict = targetComponent?.reservationArtifact.conflictFacts[0];
+  if (targetComponent === undefined || targetRoute === undefined || originalFact === undefined
+    || originalConflict === undefined) throw new Error("Missing cross-conflict source facts");
+  const alternatives = originalConflict.alternativeReservationFactIds.map((id) =>
+    targetComponent.reservationArtifact.reservationAlternatives.find((candidate) =>
+      candidate.alternativeReservationFactId === id));
+  if (alternatives.length < 4 || alternatives.some((alternative) => alternative === undefined)) {
+    throw new Error("Cross-conflict fixture needs four exact alternatives");
+  }
+  const [alternativeA1, alternativeA2, alternativeB1, alternativeB2] = alternatives as [
+    NonNullable<typeof alternatives[number]>,
+    NonNullable<typeof alternatives[number]>,
+    NonNullable<typeof alternatives[number]>,
+    NonNullable<typeof alternatives[number]>,
+  ];
+  const clonedAlternativeOf = (alternative: typeof alternativeA1, suffix: string) => {
+    const { alternativeHash: _alternativeHash, ...payload } = alternative;
+    const clonePayload = {
+      ...payload,
+      alternativeReservationFactId: canonicalHash({
+        kind: "task4-cross-conflict-alternative-fixture-v1",
+        originalAlternativeReservationFactId: alternative.alternativeReservationFactId,
+        suffix,
+      }),
+    };
+    return { ...clonePayload, alternativeHash: canonicalHash(clonePayload) };
+  };
+  const clonedAlternativeB1 = clonedAlternativeOf(alternativeB1, "B1");
+  const clonedAlternativeB2 = clonedAlternativeOf(alternativeB2, "B2");
+  const conflictA = originalConflict;
+  const conflictBAlternativeIds = [
+    clonedAlternativeB1.alternativeReservationFactId,
+    clonedAlternativeB2.alternativeReservationFactId,
+  ].sort(compareText);
+  const conflictBId = canonicalHash({
+    kind: "task4-cross-conflict-witness-fixture-v1",
+    resourceComponentId: originalConflict.resourceComponentId,
+    alternativeReservationFactIds: conflictBAlternativeIds,
+  });
+  const conflictBPayload = {
+    resourceComponentId: originalConflict.resourceComponentId,
+    claimantFamilyIds: [...originalConflict.claimantFamilyIds],
+    claimantMemberIds: [...originalConflict.claimantMemberIds],
+    physicalCardIds: [...originalConflict.physicalCardIds],
+    wildcardCardIds: [...originalConflict.wildcardCardIds],
+    conflictKinds: [...originalConflict.conflictKinds],
+    conflictFactId: conflictBId,
+    alternativeReservationFactIds: conflictBAlternativeIds,
+    resolutionState: "UNRESOLVED" as const,
+    dominanceWitnessId: null,
+  };
+  const conflictB = { ...conflictBPayload, conflictHash: canonicalHash(conflictBPayload) };
+  const { reservationHash: _reservationHash, ...reservationPayload } = originalFact;
+  const changedReservationFactPayload = {
+    ...reservationPayload,
+    conflictFactIds: [conflictA.conflictFactId, conflictB.conflictFactId].sort(compareText),
+  };
+  const changedReservationFact = {
+    ...changedReservationFactPayload,
+    reservationHash: canonicalHash(changedReservationFactPayload),
+  };
+  const reservationArtifact = rehashReservationArtifact({
+    ...targetComponent.reservationArtifact,
+    reservationFacts: targetComponent.reservationArtifact.reservationFacts.map((fact) =>
+      fact.reservationFactId === originalFact.reservationFactId ? changedReservationFact : fact),
+    reservationAlternatives: [
+      ...targetComponent.reservationArtifact.reservationAlternatives,
+      clonedAlternativeB1,
+      clonedAlternativeB2,
+    ].sort((left, right) => compareText(
+      left.alternativeReservationFactId,
+      right.alternativeReservationFactId,
+    )),
+    conflictFacts: [conflictA, conflictB].sort((left, right) =>
+      compareText(left.conflictFactId, right.conflictFactId)),
+  });
+  const claimsById = new Map(changedReservationFact.claims.map((claim) => [claim.claimId, claim]));
+  const routeClaims = [alternativeA1, clonedAlternativeB1].map((alternative) => {
+    const claim = claimsById.get(alternative.claimId);
+    if (claim === undefined) throw new Error("Missing cross-conflict source claim");
+    return {
+      claimId: claim.claimId,
+      familyId: claim.familyId,
+      memberIds: [alternative.memberId],
+      resourceUnitIds: [alternative.resourceUnitId],
+      alternativeReservationFactIds: [alternative.alternativeReservationFactId],
+      hierarchyTier: claim.hierarchyTier,
+      controlRank: claim.controlRank,
+      efficiencyRank: claim.efficiencyRank,
+      reservationClass: claim.reservationClass,
+      claimRoles: [...claim.claimRoles],
+      physicalCardIds: [...alternative.physicalCardIds],
+      wildcardCardIds: [...alternative.wildcardCardIds],
+      wildcardAllocationLineage: [...alternative.wildcardAllocationLineage],
+      claimHash: claim.claimHash,
+    };
+  });
+  const hierarchyByFamilyId = new Map(targetComponent.hierarchyBatch.families
+    .map((family) => [family.familyId, family]));
+  const supportingHierarchyFacts = routeClaims.map((claim) => {
+    const family = hierarchyByFamilyId.get(claim.familyId);
+    if (family === undefined) throw new Error("Missing cross-conflict hierarchy fact");
+    return { familyId: claim.familyId, classificationHash: family.classificationHash };
+  }).sort((left, right) => compareText(left.familyId, right.familyId));
+  const allocationOf = (alternative: typeof alternativeA1) => {
+    const payload = {
+      alternativeReservationFactId: alternative.alternativeReservationFactId,
+      alternativeHash: alternative.alternativeHash,
+      resourceUnitId: alternative.resourceUnitId,
+      physicalCardIds: [...alternative.physicalCardIds].sort(compareText),
+      wildcardCardIds: [...alternative.wildcardCardIds].sort(compareText),
+      wildcardAllocationLineage: [...alternative.wildcardAllocationLineage]
+        .sort((left, right) => compareText(left.allocationVariantHash, right.allocationVariantHash)),
+    };
+    return { ...payload, allocationHash: canonicalHash(payload) };
+  };
+  const witnessOf = (conflictFactId: string, alternative: typeof alternativeA1) => {
+    const allocation = allocationOf(alternative);
+    const payload = {
+      witnessKind: "BRANCH_LOCAL_RESOLUTION" as const,
+      conflictFactId,
+      selectedAlternativeReservationFactIds: [alternative.alternativeReservationFactId],
+      allocations: [allocation],
+    };
+    return { ...payload, witnessHash: canonicalHash(payload) };
+  };
+  const forgedWitnessA = witnessOf(conflictA.conflictFactId, clonedAlternativeB1);
+  const validWitnessB = witnessOf(conflictB.conflictFactId, clonedAlternativeB1);
+  const { routeHash: _routeHash, ...routePayload } = targetRoute;
+  const changedRoutePayload = {
+    ...routePayload,
+    supportingHierarchyFacts,
+    supportingReservationFacts: [{
+      reservationFactId: changedReservationFact.reservationFactId,
+      alternativeReservationFactIds: [
+        alternativeA1.alternativeReservationFactId,
+        clonedAlternativeB1.alternativeReservationFactId,
+      ].sort(compareText),
+    }],
+    resourceClaims: routeClaims,
+    unresolvedConflicts: [conflictA.conflictFactId, conflictB.conflictFactId].sort(compareText),
+    branchLocalResolutionWitnesses: [forgedWitnessA, validWitnessB]
+      .sort((left, right) => compareText(left.conflictFactId, right.conflictFactId)),
+  };
+  const changedRoute = { ...changedRoutePayload, routeHash: canonicalHash(changedRoutePayload) };
+  const changedRouteArtifact = rehashRouteArtifact({
+    ...targetComponent.routeArtifact,
+    sourceReservationArtifactHash: reservationArtifact.artifactHash,
+    routeCandidates: targetComponent.routeArtifact.routeCandidates!.map((candidate) =>
+      candidate.routeId === targetRoute.routeId ? changedRoute : candidate),
+  });
+  const changedComponents = canonicalComponentSources(components.map((component) =>
+    component.resourceComponentId === targetComponent.resourceComponentId ? {
+      ...component,
+      reservationArtifact,
+      reservationArtifactHash: reservationArtifact.artifactHash,
+      routeArtifact: changedRouteArtifact,
+      routeArtifactHash: changedRouteArtifact.artifactHash,
+      routeUniverseHash: changedRouteArtifact.routeUniverseHash!,
+    } : component));
+  const admission = admittedChangedComponentsOf(changedComponents);
+  const normalizedMemberDrafts = rebindNormalizedDrafts(
+    normalized.normalizedMemberDrafts,
+    admission,
+    changedComponents,
+  );
+  return { admission, normalizedMemberDrafts };
+}
+
+export function makePhysicallyAdjacentUnreachableConflictFixture(): Readonly<{
+  admission: PhaseDSourceAdmissionSuccessV1;
+  normalizedMemberDrafts: readonly NormalizedRouteCohortMemberDraftV1[];
+  relevantConflictFactId: string;
+  adjacentConflictFactId: string;
+}> {
+  const components = makeValidPhaseDAdmissionInput().sourceBindingManifest.componentSources;
+  const originalAdmission = admittedChangedComponentsOf(components);
+  const normalized = normalizeAdmittedStrategicRoutesV1(originalAdmission);
+  if (normalized.normalizationStatus !== "COMPLETE") {
+    throw new Error("Adjacent conflict fixture needs normalized source drafts");
+  }
+  const targetComponent = components[0];
+  const originalConflict = targetComponent?.reservationArtifact.conflictFacts[0];
+  if (targetComponent === undefined || originalConflict === undefined) {
+    throw new Error("Missing adjacent conflict source facts");
+  }
+  const { conflictHash: _conflictHash, ...conflictPayload } = originalConflict;
+  const adjacentConflictPayload = {
+    ...conflictPayload,
+    conflictFactId: canonicalHash({
+      kind: "task4-physically-adjacent-unreachable-conflict-fixture-v1",
+      originalConflictFactId: originalConflict.conflictFactId,
+    }),
+  };
+  const adjacentConflict = {
+    ...adjacentConflictPayload,
+    conflictHash: canonicalHash(adjacentConflictPayload),
+  };
+  const reservationArtifact = rehashReservationArtifact({
+    ...targetComponent.reservationArtifact,
+    conflictFacts: [...targetComponent.reservationArtifact.conflictFacts, adjacentConflict]
+      .sort((left, right) => compareText(left.conflictFactId, right.conflictFactId)),
+  });
+  const routeArtifact = rehashRouteArtifact({
+    ...targetComponent.routeArtifact,
+    sourceReservationArtifactHash: reservationArtifact.artifactHash,
+  });
+  const changedComponents = canonicalComponentSources(components.map((component) =>
+    component.resourceComponentId === targetComponent.resourceComponentId ? {
+      ...component,
+      reservationArtifact,
+      reservationArtifactHash: reservationArtifact.artifactHash,
+      routeArtifact,
+      routeArtifactHash: routeArtifact.artifactHash,
+      routeUniverseHash: routeArtifact.routeUniverseHash!,
+    } : component));
+  const admission = admittedChangedComponentsOf(changedComponents);
+  return {
+    admission,
+    normalizedMemberDrafts: rebindNormalizedDrafts(
+      normalized.normalizedMemberDrafts,
+      admission,
+      changedComponents,
+    ),
+    relevantConflictFactId: originalConflict.conflictFactId,
+    adjacentConflictFactId: adjacentConflict.conflictFactId,
+  };
+}
+
+function rebindNormalizedDrafts(
+  drafts: readonly NormalizedRouteCohortMemberDraftV1[],
+  admission: PhaseDSourceAdmissionSuccessV1,
+  components: readonly PhaseDComponentSourceBindingV1[],
+): readonly NormalizedRouteCohortMemberDraftV1[] {
+  const componentById = new Map(components.map((component) =>
+    [component.resourceComponentId, component]));
+  return drafts.map((draft) => {
+    const component = componentById.get(draft.resourceComponentId);
+    if (component === undefined) throw new Error("Missing changed component draft binding");
+    const route = component.routeArtifact.routeCandidates!.find((candidate) =>
+      candidate.routeId === draft.routeId);
+    if (route === undefined) throw new Error("Missing changed route draft binding");
+    const payload = {
+      ...draft,
+      routeHash: route.routeHash,
+      sourceArtifactHash: component.routeArtifactHash,
+      sourceRouteUniverseHash: component.routeUniverseHash,
+      sourceAndComponentSetHash: admission.canonicalSourceBindingManifest.andComponentSetHash,
+    };
+    const { normalizationHash: _normalizationHash, ...normalizationPayload } = payload;
+    return { ...normalizationPayload, normalizationHash: canonicalHash(normalizationPayload) };
+  });
+}
+
+function rehashReservationArtifact(
+  artifact: PhaseDComponentSourceBindingV1["reservationArtifact"],
+): PhaseDComponentSourceBindingV1["reservationArtifact"] {
+  const { artifactHash: _artifactHash, ...payload } = artifact;
+  return { ...payload, artifactHash: canonicalHash(payload) };
+}
+
+function rehashRouteArtifact(
+  artifact: StrategicRouteGenerationArtifactV1,
+): StrategicRouteGenerationArtifactV1 {
+  const routeCandidates = artifact.routeCandidates;
+  if (routeCandidates === null) throw new Error("Cross-conflict fixture needs complete route candidates");
+  const conflictExpansionCount = routeCandidates
+    .filter((candidate) => candidate.unresolvedConflicts.length > 0).length;
+  const evidenceCost = routeCandidates.reduce((sum, candidate) => sum
+    + candidate.supportingHierarchyFacts.length
+    + candidate.supportingReservationFacts.length
+    + candidate.resourceClaims.length
+    + candidate.preservedResources.length
+    + candidate.consumedResources.length
+    + candidate.unresolvedConflicts.length
+    + candidate.branchLocalResolutionWitnesses.length
+    + 1, 0);
+  const budgetObservation = {
+    ...artifact.budgetObservation,
+    observedRouteCount: routeCandidates.length,
+    observedConflictExpansionCount: conflictExpansionCount,
+    observedEvidenceCost: evidenceCost,
+  };
+  const budgetExecution = materializeStrategicBudgetExecutionV1({
+    measurements: [
+      {
+        dimension: "ROUTE_CANDIDATE_COUNT",
+        limit: artifact.budget.maxRouteCount,
+        observedCount: routeCandidates.length,
+        measurementCompleteness: "EXACT",
+      },
+      {
+        dimension: "CONFLICT_EXPANSION_COUNT",
+        limit: artifact.budget.maxConflictExpansion,
+        observedCount: artifact.generationWorkObservedCount,
+        measurementCompleteness: "EXACT",
+      },
+      {
+        dimension: "EVIDENCE_COST",
+        limit: artifact.budget.maxEvidenceCost,
+        observedCount: evidenceCost,
+        measurementCompleteness: "EXACT",
+      },
+    ],
+    exhaustedDimensions: [],
+    sourceHashBindings: [
+      { sourceKind: "STRATEGIC_STRUCTURE_INVENTORY", sourceHash: artifact.sourceInventoryHash },
+      {
+        sourceKind: "STRATEGIC_HIERARCHY_CLASSIFICATION_BATCH",
+        sourceHash: artifact.sourceHierarchyBatchHash,
+      },
+      {
+        sourceKind: "STRATEGIC_RESOURCE_RESERVATION_ARTIFACT",
+        sourceHash: artifact.sourceReservationArtifactHash,
+      },
+    ],
+  });
+  const routeUniverseHash = canonicalHash({
+    kind: "strategic-route-universe-v1",
+    identityHash: artifact.identityHash,
+    snapshotHash: artifact.snapshotHash,
+    sourceRootHash: artifact.sourceRootHash,
+    provenanceRoot: artifact.provenanceRoot,
+    sourceInventoryHash: artifact.sourceInventoryHash,
+    routeHashes: routeCandidates.map((candidate) => candidate.routeHash).sort(compareText),
+  });
+  const { artifactHash: _artifactHash, ...payload } = artifact;
+  const routePayload = {
+    ...payload,
+    conflictExpansionCount,
+    evidenceCost,
+    budgetObservation,
+    budgetExecution,
+    routeUniverseHash,
+  };
+  return { ...routePayload, artifactHash: canonicalHash(routePayload) };
+}
+
+function admittedChangedComponentsOf(
+  componentSources: readonly PhaseDComponentSourceBindingV1[],
+): PhaseDSourceAdmissionSuccessV1 {
+  const orderedComponents = canonicalComponentSources(componentSources);
+  const multiComponentArtifact = bind(orderedComponents);
+  const manifestPayload = {
+    commonBindings: commonBindingsOf(multiComponentArtifact),
+    componentSources: orderedComponents,
+    multiComponentArtifact,
+    multiComponentArtifactHash: multiComponentArtifact.artifactHash,
+    andComponentSetHash: multiComponentArtifact.andComponentSetHash!,
+  };
+  const sourceBindingManifest = {
+    ...manifestPayload,
+    manifestHash: canonicalHash(manifestPayload),
+  };
+  const admittedComponents = orderedComponents.map((component) => {
+    const routeCandidates = component.routeArtifact.routeCandidates!;
+    const payload = {
+      resourceComponentId: component.resourceComponentId,
+      hierarchyBatchHash: component.hierarchyBatchHash,
+      reservationArtifactHash: component.reservationArtifactHash,
+      routeArtifactHash: component.routeArtifactHash,
+      routeUniverseHash: component.routeUniverseHash,
+      routeIds: routeCandidates.map((candidate) => candidate.routeId).sort(compareText),
+      routeHashes: routeCandidates.map((candidate) => candidate.routeHash).sort(compareText),
+    };
+    return { ...payload, componentAdmissionHash: canonicalHash(payload) };
+  });
+  const routeIdentityIndex = orderedComponents.flatMap((component) =>
+    component.routeArtifact.routeCandidates!.map((candidate) => ({
+      routeId: candidate.routeId,
+      routeHash: candidate.routeHash,
+      resourceComponentId: component.resourceComponentId,
+      sourceArtifactHash: component.routeArtifactHash,
+      sourceRouteUniverseHash: component.routeUniverseHash,
+    }))).sort((left, right) => compareText(left.sourceRouteUniverseHash, right.sourceRouteUniverseHash)
+      || compareText(left.routeId, right.routeId)
+      || compareText(left.routeHash, right.routeHash)
+      || compareText(left.resourceComponentId, right.resourceComponentId)
+      || compareText(left.sourceArtifactHash, right.sourceArtifactHash));
+  const admissionPayload = {
+    admissionStatus: "ADMITTED" as const,
+    canonicalSourceBindingManifest: sourceBindingManifest,
+    sourceBindingManifestHash: sourceBindingManifest.manifestHash,
+    admittedComponents,
+    routeIdentityIndex,
+    inputRouteCount: routeIdentityIndex.length,
+  };
+  return { ...admissionPayload, admissionHash: canonicalHash(admissionPayload) };
 }
 
 export function makeEmptyRouteUniverseFixture(): StrategicCohortCompressionInputV1 {

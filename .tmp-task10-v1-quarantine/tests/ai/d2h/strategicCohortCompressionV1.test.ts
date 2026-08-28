@@ -19,6 +19,7 @@ import {
   makeCommonBindingMismatchFixture,
   makeBrokenClosureReferenceFixture,
   makeCorruptedSourceWithInvalidPhaseDEvidenceBudgetFixture,
+  makeCrossConflictWitnessBindingFixture,
   makeCrossPairedC2EndpointFixture,
   makeDamagedEmptyC2BudgetExecutionFixture,
   makeDamagedEmptyRouteUniverseFixture,
@@ -31,6 +32,7 @@ import {
   makeMissingC2ComponentSourceFixture,
   makeMultiComponentHashMismatchFixture,
   makeNonReplayableC2PayloadFixture,
+  makePhysicallyAdjacentUnreachableConflictFixture,
   makeReversedComponentSourceInput,
   makeSameRankDifferentCopyPhaseDAdmissionInput,
   makeThreeComponentPhaseDAdmissionInput,
@@ -574,6 +576,19 @@ describe("Strategic cohort compression V1 route normalization drafts", () => {
 });
 
 describe("Strategic cohort compression V1 Task 4 closure and occurrence universe", () => {
+  it("rejects a witness that binds one conflict to another conflict's selected alternative", () => {
+    const { admission, normalizedMemberDrafts } = makeCrossConflictWitnessBindingFixture();
+    const result = materializePhaseDTask4V1({
+      admission,
+      normalizedMemberDrafts,
+    });
+
+    expect(result.task4Status).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("SOURCE_BINDING_MISMATCH");
+    expect(result.routeRelevantConflictClosures).toBeNull();
+    expect(result.occurrenceUniverse).toBeNull();
+  });
+
   it("includes explicitly reachable conflict closure references", () => {
     const admission = admittedOf(makeValidPhaseDAdmissionInput());
     const normalized = normalizedOf(admission);
@@ -601,23 +616,34 @@ describe("Strategic cohort compression V1 Task 4 closure and occurrence universe
       .toEqual(expect.arrayContaining([...(sourceRoute?.unresolvedConflicts ?? [])]));
   });
 
-  it("excludes a globally adjacent conflict without an explicit reference path", () => {
-    const admission = admittedOf(makeValidPhaseDAdmissionInput());
-    const normalized = normalizedOf(admission);
+  it("excludes a physically adjacent conflict without an explicit reference path", () => {
+    const {
+      admission,
+      normalizedMemberDrafts,
+      relevantConflictFactId,
+      adjacentConflictFactId,
+    } = makePhysicallyAdjacentUnreachableConflictFixture();
     const result = materializePhaseDTask4V1({
       admission,
-      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+      normalizedMemberDrafts,
     });
 
     expect(result.task4Status).toBe("COMPLETE");
-    const closure = result.routeRelevantConflictClosures?.[0];
+    const closure = result.routeRelevantConflictClosures?.find((candidate) =>
+      candidate.conflictFactIds.includes(relevantConflictFactId));
     expect(closure).toBeDefined();
-    const globallyAdjacent = admission.canonicalSourceBindingManifest.componentSources
-      .flatMap((component) => component.reservationArtifact.conflictFacts)
-      .map((conflict) => conflict.conflictFactId)
-      .filter((conflictId) => !closure?.conflictFactIds.includes(conflictId));
-    expect(globallyAdjacent.length).toBeGreaterThan(0);
-    expect(closure?.conflictFactIds).not.toEqual(expect.arrayContaining(globallyAdjacent));
+    const component = admission.canonicalSourceBindingManifest.componentSources.find((candidate) =>
+      candidate.routeArtifactHash === closure?.sourceArtifactHash);
+    const relevantConflict = component?.reservationArtifact.conflictFacts.find((candidate) =>
+      candidate.conflictFactId === relevantConflictFactId);
+    const adjacentUnreferenced = component?.reservationArtifact.conflictFacts.find((candidate) =>
+      candidate.conflictFactId === adjacentConflictFactId);
+    expect(relevantConflict).toBeDefined();
+    expect(adjacentUnreferenced).toBeDefined();
+    expect(adjacentUnreferenced?.physicalCardIds.some((cardId) =>
+      relevantConflict?.physicalCardIds.includes(cardId))).toBe(true);
+    expect(closure?.conflictFactIds).toContain(relevantConflictFactId);
+    expect(closure?.conflictFactIds).not.toContain(adjacentConflictFactId);
   });
 
   it("publishes route-scoped physical, wildcard, family/member, reservation, conflict, and endpoint keys", () => {
