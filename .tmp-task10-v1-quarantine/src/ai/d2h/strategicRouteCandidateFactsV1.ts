@@ -284,13 +284,24 @@ function* branchesOf(
         yield* emit([...throughTier2, ...tier3Set]);
       }
     }
-    // A concrete level-rank defense alternative remains a valid local route
-    // alongside non-overlapping control even when an unrelated Tier2 choice
-    // would otherwise occupy its exact cards.
-    const defensiveTier3 = tier3.filter((alternative) =>
-      claimById.get(alternative.claimId)?.claimRoles.includes("LEVEL_RANK_DEFENSE") === true);
-    for (const defenseSet of streamingMaximalSets(defensiveTier3, tier1Cards, tracker)) {
-      yield* emit([...tier1Set, ...defenseSet]);
+    if (tier1Set.length > 0) {
+      // A concrete level-rank defense allocation constrains the lower-tier
+      // replay; it does not terminate it. Complete Tier2 and then remaining
+      // Tier3 around the exact reserved physical cards before publication.
+      const defensiveTier3 = tier3.filter((alternative) =>
+        claimById.get(alternative.claimId)?.claimRoles.includes("LEVEL_RANK_DEFENSE") === true);
+      for (const defenseSet of streamingMaximalSets(defensiveTier3, tier1Cards, tracker)) {
+        if (defenseSet.length === 0) continue;
+        const throughDefense = [...tier1Set, ...defenseSet];
+        const defenseCards = new Set(throughDefense.flatMap((alternative) => alternative.physicalCardIds));
+        for (const tier2Set of streamingMaximalSets(tier2, defenseCards, tracker)) {
+          const throughTier2 = [...throughDefense, ...tier2Set];
+          const throughTier2Cards = new Set(throughTier2.flatMap((alternative) => alternative.physicalCardIds));
+          for (const tier3Set of streamingMaximalSets(tier3, throughTier2Cards, tracker)) {
+            yield* emit([...throughTier2, ...tier3Set]);
+          }
+        }
+      }
     }
   }
   const hasHigherTierClaim = fact.claims.some((claim) => claim.hierarchyTier === "TIER1_CONTROL");

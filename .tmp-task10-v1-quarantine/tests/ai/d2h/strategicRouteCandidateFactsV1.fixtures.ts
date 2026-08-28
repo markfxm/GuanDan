@@ -1,5 +1,7 @@
-import type { GameRank } from "../../../src/engine/cards";
+import { createDeck, isHeartRankWild, type GameRank } from "../../../src/engine/cards";
 import { canonicalHash } from "../../../src/ai/d2h/strategicEvidenceCanonicalSerializer";
+import { buildCandidateUniverse } from "../../../src/ai/d2h/candidateUniverseAdapter";
+import { collectBaselineStructuralLineage } from "../../../src/ai/d2h/baselineStructuralLineage";
 import { buildStrategicStructureInventoryV1 } from "../../../src/ai/d2h/strategicStructureInventory";
 import { classifyStrategicHierarchyBatchV1 } from "../../../src/ai/d2h/strategicHierarchyClassifierV1";
 import { materializeStrategicResourceReservationsV1 } from "../../../src/ai/d2h/strategicResourceReservationV1";
@@ -10,6 +12,8 @@ import type { StrategicResourceReservationArtifactV1 } from
 import type { StrategicStructureInventoryV1 } from
   "../../../src/ai/d2h/strategicStructureInventoryContracts";
 import { makeInventoryInput } from "./strategicStructureInventory.fixtures";
+
+const deckById = new Map(createDeck().map((card) => [card.id, card]));
 
 export type StrategicRouteC1FixtureV1 = Readonly<{
   hierarchyBatch: StrategicHierarchyClassificationBatchV1;
@@ -124,6 +128,49 @@ export function makeDisjointLevelSevenBombDefensePairRouteFixture(): StrategicRo
   ]);
 }
 
+export function makeDefenseHierarchyClosureRouteFixture(): StrategicRouteC1FixtureV1 {
+  const bombIds = ["S7-1", "C7-1", "D7-1", "S7-2"];
+  const defensePairIds = ["C7-2", "D7-2"];
+  const conflictingTier2Ids = ["S3-1", "D4-1", "H5-1", "C6-1", "C7-2"];
+  const compatibleTier2Ids = ["S5-1", "C5-1", "D5-1", "C8-1", "D8-1"];
+  const ordinaryTier3Ids = ["S6-1"];
+  const bombBridgeIds = ["S3-1", "S4-1", "S5-1", "S6-1", "S7-1"];
+  // X conflicts with D and is disjoint from Y; Y and Z are both disjoint from B + D.
+  // The bridge straight-flush only connects the concrete component and is not
+  // a target route allocation.
+  const handIds = [...new Set([
+    ...bombIds,
+    ...defensePairIds,
+    ...conflictingTier2Ids,
+    ...compatibleTier2Ids,
+    ...ordinaryTier3Ids,
+    ...bombBridgeIds,
+  ])];
+  return makeSelectedFixture(handIds, "7", (inventory) => [
+    { familyId: exactFamily(inventory, "bomb", bombIds).familyId, exactMemberPhysicalCardIds: bombIds },
+    {
+      familyId: exactFamily(inventory, "pair", defensePairIds).familyId,
+      exactMemberPhysicalCardIds: defensePairIds,
+    },
+    {
+      familyId: exactFamily(inventory, "straight", conflictingTier2Ids).familyId,
+      exactMemberPhysicalCardIds: conflictingTier2Ids,
+    },
+    {
+      familyId: exactFamily(inventory, "full-house", compatibleTier2Ids).familyId,
+      exactMemberPhysicalCardIds: compatibleTier2Ids,
+    },
+    {
+      familyId: exactFamily(inventory, "single", ordinaryTier3Ids).familyId,
+      exactMemberPhysicalCardIds: ordinaryTier3Ids,
+    },
+    {
+      familyId: exactFamily(inventory, "straight-flush", bombBridgeIds).familyId,
+      exactMemberPhysicalCardIds: bombBridgeIds,
+    },
+  ], 5_000);
+}
+
 export function makeWildcardContentionRouteFixture(): StrategicRouteC1FixtureV1 {
   const straightFlushIds = ["S3-1", "S4-1", "S5-1", "S6-1", "H2-1"];
   const bombIds = ["C7-1", "D7-1", "H7-1", "H2-1"];
@@ -176,9 +223,44 @@ function makeSelectedFixture(
   handIds: readonly string[],
   gameRank: GameRank,
   selectFamilies: (inventory: StrategicStructureInventoryV1) => readonly FamilySelectionV1[],
+  sourceGenerationBudgetMs = 1_000,
 ): StrategicRouteC1FixtureV1 {
   const input = makeInventoryInput(handIds, gameRank);
-  const inventory = buildStrategicStructureInventoryV1(input.a0, input.b0);
+  if (sourceGenerationBudgetMs === 1_000) {
+    const inventory = buildStrategicStructureInventoryV1(input.a0, input.b0);
+    return makeRouteFixtureFromInventory(inventory, selectFamilies(inventory));
+  }
+  const ownHand = handIds.map((cardId) => {
+    const card = deckById.get(cardId);
+    if (card === undefined) throw new Error(`Missing fixture card: ${cardId}`);
+    return card;
+  });
+  const candidateUniverse = buildCandidateUniverse({
+    identity: input.a0.result.identity,
+    ownHand,
+    playContext: { mode: "lead", allowPass: false },
+    wildcardCardIds: ownHand
+      .filter((card) => isHeartRankWild(card, gameRank))
+      .map((card) => card.id)
+      .sort(),
+    budget: { maxElapsedMs: sourceGenerationBudgetMs },
+  });
+  const sourceArtifactIdentity = input.b0.result.provenance.sourceArtifactIdentity;
+  const sourceHash = input.b0.result.provenance.sourceHash;
+  if (sourceArtifactIdentity === null || sourceHash === null) {
+    throw new Error("Fixture needs baseline source bindings");
+  }
+  const baselineLineage = collectBaselineStructuralLineage({
+    identity: input.b0.result.identity,
+    ownHand,
+    sourceArtifactIdentity,
+    sourceHash,
+    budget: { maxElapsedMs: sourceGenerationBudgetMs },
+  });
+  const inventory = buildStrategicStructureInventoryV1(
+    { ...input.a0, result: candidateUniverse },
+    { ...input.b0, result: baselineLineage },
+  );
   return makeRouteFixtureFromInventory(inventory, selectFamilies(inventory));
 }
 

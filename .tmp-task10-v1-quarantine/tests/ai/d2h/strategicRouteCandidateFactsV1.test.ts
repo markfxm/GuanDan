@@ -9,6 +9,7 @@ import type {
 import {
   makeBombFastSheddingRouteFixture,
   makeDenseConflictRouteFixture,
+  makeDefenseHierarchyClosureRouteFixture,
   makeDisjointLevelSevenBombDefensePairRouteFixture,
   makeDisjointTierCombinationRouteFixture,
   makeFourLevelSevensRouteFixture,
@@ -207,6 +208,51 @@ describe("D2H-S0.5 Phase3.2-R Phase C1 single component-local route generation",
     const reversedRoute = reversed.routeCandidates?.find((candidate) => candidate.routeHash === route!.routeHash);
     expect(reversedRoute?.endpointFacts.exactHandCountReduction).toBe(expectedExactHcr);
     expect(reversed.routeUniverseHash).toBe(result.routeUniverseHash);
+  });
+
+  it("closes Tier2 and remaining Tier3 after reserving a disjoint level defense", () => {
+    const fixture = makeDefenseHierarchyClosureRouteFixture();
+    const result = generate(fixture, { ...LARGE_BUDGET, maxConflictExpansion: 10_000 });
+    const reversed = generate(withReversedRouteInputs(fixture), {
+      ...LARGE_BUDGET,
+      maxConflictExpansion: 10_000,
+    });
+    const bombIds = ["C7-1", "D7-1", "S7-1", "S7-2"];
+    const defensePairIds = ["C7-2", "D7-2"];
+    const conflictingTier2Ids = ["C6-1", "C7-2", "D4-1", "H5-1", "S3-1"];
+    const compatibleTier2Ids = ["C5-1", "C8-1", "D5-1", "D8-1", "S5-1"];
+    const ordinaryTier3Ids = ["S6-1"];
+    const route = result.routeCandidates?.find((candidate) => {
+      const claims = candidate.resourceClaims.map((claim) => [...claim.physicalCardIds].sort());
+      return [bombIds, defensePairIds, compatibleTier2Ids, ordinaryTier3Ids]
+        .every((expected) => claims.some((cards) => JSON.stringify(cards) === JSON.stringify(expected)));
+    });
+
+    expect(result.generationStatus).toBe("COMPLETE");
+    expect(route).toBeDefined();
+    const claimCards = route!.resourceClaims.map((claim) => [...claim.physicalCardIds].sort());
+    expect(claimCards).not.toContainEqual(conflictingTier2Ids);
+    expect(new Set(claimCards.flat()).size).toBe(claimCards.flat().length);
+    expect(route!.branchLocalResolutionWitnesses.flatMap((witness) => witness.allocations)
+      .flatMap((allocation) => allocation.physicalCardIds).sort())
+      .toEqual([...bombIds, ...defensePairIds, ...compatibleTier2Ids, ...ordinaryTier3Ids].sort());
+    expect(route!.endpointFacts.closedThroughTier).toBe("TIER3_ATOMIC");
+    expect(reversed).toEqual(result);
+    expect(reversed.routeUniverseHash).toBe(result.routeUniverseHash);
+  });
+
+  it("does not add a defense traversal when a component has no Tier1 control", () => {
+    const fixture = makePlateStraightRouteFixture();
+    const result = generate(fixture, { ...LARGE_BUDGET, maxConflictExpansion: 10_000 });
+    const reversed = generate(withReversedRouteInputs(fixture), {
+      ...LARGE_BUDGET,
+      maxConflictExpansion: 10_000,
+    });
+
+    expect(result.generationStatus).toBe("COMPLETE");
+    expect(result.routeCandidates?.map((route) => route.routeHash)).toHaveLength(2);
+    expect(result.budgetObservation.generationWorkObservedCount).toBe(23);
+    expect(reversed).toEqual(result);
   });
 
   it("retains every fixed wildcard contention lineage as a separate route fact", () => {
