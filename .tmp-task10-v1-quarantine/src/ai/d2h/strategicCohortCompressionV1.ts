@@ -17,6 +17,7 @@ import type {
   "./strategicHierarchyClassifierV1Contracts";
 import type {
   StrategicReservationAlternativeFactV1,
+  StrategicReservationConflictFactV1,
   StrategicResourceReservationClaimV1,
   StrategicResourceReservationFactV1,
   StrategicResourceUnitV1,
@@ -27,6 +28,10 @@ import type {
   StrategicComponentRouteFactSetV1,
   StrategicMultiComponentAndBindingArtifactV1,
 } from "./strategicMultiComponentAndBindingV1Contracts";
+import type {
+  StrategicRouteBranchLocalAllocationV1,
+  StrategicRouteBranchLocalResolutionWitnessV1,
+} from "./strategicRouteCandidateFactsV1Contracts";
 import {
   STRATEGIC_COHORT_COMPRESSION_V1_SCHEMA_VERSION,
   type HierarchicalStrategicCohortCompressionArtifactV1,
@@ -46,6 +51,19 @@ import {
   type StrategicCohortTask3MemberLocalLineageOccurrenceV1,
   type StrategicCohortWildcardAllocationInterfaceV1,
   type PhaseDSourceBindingManifestV1,
+  type PhaseDTask4ArtifactV1,
+  type PhaseDTask4InputV1,
+  type PhaseDTask4MaterializerV1,
+  type RouteRelevantConflictClosureV1,
+  type StrategicConflictClosureEdgeV1,
+  type StrategicConflictClosureReferenceV1,
+  type PhaseDRouteOccurrenceUniverseV1,
+  type PhaseDPhysicalOccurrenceKeyV1,
+  type PhaseDWildcardOccurrenceKeyV1,
+  type PhaseDFamilyMemberOccurrenceKeyV1,
+  type PhaseDReservationOccurrenceKeyV1,
+  type PhaseDConflictOccurrenceKeyV1,
+  type PhaseDEndpointOccurrenceKeyV1,
   type StrategicResourceDispositionV1,
   type StrategicCohortCompressionInputV1,
   type StrategicCohortCompressionReasonCodeV1,
@@ -864,11 +882,22 @@ function validateMultiComponentArtifact(
     snapshotHash: artifact.snapshotHash,
     sourceRootHash: artifact.sourceRootHash,
     provenanceRoot: artifact.provenanceRoot,
-    budget: artifact.budget,
-    budgetObservation: artifact.budgetObservation,
     sourceRouteUniverseHashes: artifact.sourceRouteUniverseHashes,
-    componentFactHashes: artifact.componentRouteFacts.map((fact) => fact.componentFactHash),
-    endpointHashes: artifact.andEndpointReferences.map((endpoint) => endpoint.endpointHash),
+    componentSemanticHashes: artifact.componentRouteFacts.map((fact) => canonicalHash({
+      kind: "strategic-component-route-universe-v1",
+      resourceComponentId: fact.resourceComponentId,
+      sourceRouteUniverseHash: fact.sourceRouteUniverseHash,
+      routeHashes: fact.routeCandidates.map((route) => route.routeHash).sort(compareText),
+      physicalCardIds: fact.physicalCardIds,
+      wildcardCardIds: fact.wildcardCardIds,
+    })).sort(compareText),
+    endpointSemanticHashes: artifact.andEndpointReferences.map((endpoint) => canonicalHash({
+      kind: "strategic-component-and-endpoint-universe-v1",
+      resourceComponentId: endpoint.resourceComponentId,
+      sourceRouteUniverseHash: endpoint.sourceRouteUniverseHash,
+      routeReferences: endpoint.routeReferences,
+      andComponentSetHash: endpoint.andComponentSetHash,
+    })).sort(compareText),
   });
   return artifact.routeUniverseHash === expectedRouteUniverseHash ? "VALID" : "HASH_MISMATCH";
 }
@@ -944,11 +973,7 @@ function validRouteArtifactSelfIntegrity(
     sourceRootHash: artifact.sourceRootHash,
     provenanceRoot: artifact.provenanceRoot,
     sourceInventoryHash: artifact.sourceInventoryHash,
-    sourceHierarchyBatchHash: artifact.sourceHierarchyBatchHash,
-    sourceReservationArtifactHash: artifact.sourceReservationArtifactHash,
-    budget: artifact.budget,
-    budgetObservation: artifact.budgetObservation,
-    routeHashes: artifact.routeCandidates.map((route) => route.routeHash),
+    routeHashes: artifact.routeCandidates.map((route) => route.routeHash).sort(compareText),
   });
 }
 
@@ -1196,4 +1221,1048 @@ function deepFreeze<T>(value: T): T {
   Object.freeze(value);
   for (const child of Object.values(value)) deepFreeze(child);
   return value;
+}
+
+type Task4IssueV1 = Readonly<{
+  status: "INCONCLUSIVE" | "REJECTED";
+  reason: StrategicCohortCompressionReasonCodeV1;
+}>;
+
+type Task4RouteRecordV1 = Readonly<{
+  component: PhaseDComponentSourceBindingV1;
+  route: StrategicRouteCandidateFactV1;
+  draft: NormalizedRouteCohortMemberDraftV1;
+}>;
+
+type Task4IndexedCollectionV1<T> = Readonly<{
+  byId: ReadonlyMap<string, T>;
+  ownerById: ReadonlyMap<string, string>;
+}>;
+
+type Task4ComponentIndexesV1 = Readonly<{
+  componentId: string;
+  reservationFacts: Task4IndexedCollectionV1<StrategicResourceReservationFactV1>;
+  claims: Task4IndexedCollectionV1<StrategicResourceReservationClaimV1>;
+  alternatives: Task4IndexedCollectionV1<StrategicReservationAlternativeFactV1>;
+  conflicts: Task4IndexedCollectionV1<StrategicReservationConflictFactV1>;
+  units: Task4IndexedCollectionV1<StrategicResourceUnitV1>;
+}>;
+
+type Task4ContextV1 = Readonly<{
+  components: ReadonlyMap<string, Task4ComponentIndexesV1>;
+  routeRecords: readonly Task4RouteRecordV1[];
+  endpointReferences: readonly StrategicComponentAndEndpointReferenceV1[];
+  endpointReferencesByRouteKey: ReadonlyMap<
+    string,
+    readonly StrategicComponentAndEndpointReferenceV1[]
+  >;
+}>;
+
+type Task4IndexedResultV1<T> =
+  | Readonly<{ value: Task4IndexedCollectionV1<T> }>
+  | Readonly<{ issue: Task4IssueV1 }>;
+
+type Task4OccurrenceEntryV1<K extends readonly string[]> = Readonly<{
+  key: K;
+  payloadHash: string;
+}>;
+
+type Task4OccurrenceAccumulatorV1 = {
+  physical: Map<string, Task4OccurrenceEntryV1<PhaseDPhysicalOccurrenceKeyV1>>;
+  wildcard: Map<string, Task4OccurrenceEntryV1<PhaseDWildcardOccurrenceKeyV1>>;
+  familyMember: Map<string, Task4OccurrenceEntryV1<PhaseDFamilyMemberOccurrenceKeyV1>>;
+  reservation: Map<string, Task4OccurrenceEntryV1<PhaseDReservationOccurrenceKeyV1>>;
+  conflict: Map<string, Task4OccurrenceEntryV1<PhaseDConflictOccurrenceKeyV1>>;
+  endpoint: Map<string, Task4OccurrenceEntryV1<PhaseDEndpointOccurrenceKeyV1>>;
+};
+
+const TASK4_REFERENCE_KIND_ORDER: readonly string[] = [
+  "RESERVATION_FACT",
+  "RESERVATION_ALTERNATIVE",
+  "CONFLICT_FACT",
+  "RESOURCE_UNIT",
+  "CLAIM",
+];
+
+export const materializePhaseDTask4V1: PhaseDTask4MaterializerV1 = (input) => {
+  const sourceIssue = validateTask4Source(input);
+  if (sourceIssue !== null) return task4Terminal(input, sourceIssue);
+
+  const contextResult = task4ContextOf(input);
+  if ("issue" in contextResult) return task4Terminal(input, contextResult.issue);
+  const context = contextResult.value;
+
+  const closures: RouteRelevantConflictClosureV1[] = [];
+  const occurrences: Task4OccurrenceAccumulatorV1 = {
+    physical: new Map(),
+    wildcard: new Map(),
+    familyMember: new Map(),
+    reservation: new Map(),
+    conflict: new Map(),
+    endpoint: new Map(),
+  };
+  const issues: Task4IssueV1[] = [];
+  for (const record of context.routeRecords) {
+    const closureResult = routeConflictClosureOf(record, context);
+    if ("issue" in closureResult) {
+      issues.push(closureResult.issue);
+      continue;
+    }
+    closures.push(closureResult.value);
+    const occurrenceIssue = addRouteOccurrences(occurrences, record, closureResult.value, context);
+    if (occurrenceIssue !== null) issues.push(occurrenceIssue);
+  }
+  if (issues.some((issue) => issue.status === "REJECTED")) {
+    return task4Terminal(input, issues.find((issue) => issue.status === "REJECTED")!);
+  }
+  if (issues.length > 0 || closures.length !== context.routeRecords.length) {
+    return task4Terminal(input, issues[0] ?? {
+      status: "INCONCLUSIVE",
+      reason: "INCOMPLETE_CONFLICT_CLOSURE",
+    });
+  }
+
+  const occurrenceUniverse = occurrenceUniverseOf(context.routeRecords, occurrences);
+  const payload = {
+    task4Status: "COMPLETE" as const,
+    sourceBindingManifestHash: input.admission.sourceBindingManifestHash,
+    sourceAndComponentSetHash: input.admission.canonicalSourceBindingManifest.andComponentSetHash,
+    routeRelevantConflictClosures: closures.sort(compareCanonicalPayload),
+    occurrenceUniverse,
+    reasonCodes: [] as const,
+    semanticBoundary: "PHASE_D_TASK4_FACTS_NOT_COHORT_OR_DECISION" as const,
+  };
+  return deepFreeze({ ...payload, artifactHash: canonicalHash(payload) });
+};
+
+export const materializePhaseDRouteConflictClosureAndOccurrenceUniverseV1 =
+  materializePhaseDTask4V1;
+
+function task4Terminal(
+  input: PhaseDTask4InputV1,
+  issue: Task4IssueV1,
+): PhaseDTask4ArtifactV1 {
+  const payload = {
+    task4Status: issue.status,
+    sourceBindingManifestHash: input.admission.sourceBindingManifestHash,
+    sourceAndComponentSetHash: input.admission.canonicalSourceBindingManifest.andComponentSetHash,
+    routeRelevantConflictClosures: null,
+    occurrenceUniverse: null,
+    reasonCodes: [issue.reason] as readonly StrategicCohortCompressionReasonCodeV1[],
+    semanticBoundary: "PHASE_D_TASK4_FACTS_NOT_COHORT_OR_DECISION" as const,
+  };
+  return deepFreeze({ ...payload, artifactHash: canonicalHash(payload) });
+}
+
+function validateTask4Source(input: PhaseDTask4InputV1): Task4IssueV1 | null {
+  const admission = input.admission;
+  if (admission.admissionStatus !== "ADMITTED") {
+    return { status: "INCONCLUSIVE", reason: "SOURCE_BINDING_INCOMPLETE" };
+  }
+  const manifest = admission.canonicalSourceBindingManifest;
+  const canonicalManifestPayload = manifestPayloadOf(manifest, canonicalComponentSources(manifest.componentSources));
+  if (manifest.manifestHash !== canonicalHash(canonicalManifestPayload)
+    || admission.sourceBindingManifestHash !== manifest.manifestHash) {
+    return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+  }
+  const c2 = manifest.multiComponentArtifact;
+  if (manifest.multiComponentArtifactHash !== c2.artifactHash) {
+    return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+  }
+  if (manifest.andComponentSetHash !== c2.andComponentSetHash) {
+    return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+  }
+  if (c2.artifactHash !== canonicalHash(payloadWithout(c2, "artifactHash"))) {
+    return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+  }
+  if (c2.bindingStatus !== "COMPLETE" || c2.componentRouteFacts === null
+    || c2.andEndpointReferences === null || c2.componentIds === null
+    || c2.andComponentSetHash === null || c2.routeUniverseHash === null) {
+    return { status: "INCONCLUSIVE", reason: "SOURCE_BINDING_INCOMPLETE" };
+  }
+  const c2Validation = validateMultiComponentArtifact(c2);
+  if (c2Validation === "INCOMPLETE") {
+    return { status: "INCONCLUSIVE", reason: "SOURCE_BINDING_INCOMPLETE" };
+  }
+  if (c2Validation === "HASH_MISMATCH") {
+    return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+  }
+  if (c2Validation === "BINDING_MISMATCH") {
+    return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+  }
+  const components = canonicalComponentSources(manifest.componentSources);
+  if (!sameBindings(manifest.commonBindings, c2)
+    || components.some((component) => !componentUsesBindings(component, manifest.commonBindings))) {
+    return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+  }
+  const componentIds = components.map((component) => component.resourceComponentId);
+  if (new Set(componentIds).size !== componentIds.length) {
+    return { status: "REJECTED", reason: "DUPLICATE_RESOURCE_COMPONENT" };
+  }
+  for (const component of components) {
+    if (component.hierarchyBatchHash !== component.hierarchyBatch.batchHash
+      || component.reservationArtifactHash !== component.reservationArtifact.artifactHash
+      || component.routeArtifactHash !== component.routeArtifact.artifactHash
+      || component.routeUniverseHash !== component.routeArtifact.routeUniverseHash) {
+      return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+    }
+    if (!selfBoundBatch(component.hierarchyBatch)
+      || !selfBoundArtifact(component.reservationArtifact)
+      || !validRouteArtifactSelfIntegrity(component.routeArtifact)) {
+      return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+    }
+    if (component.routeArtifact.sourceHierarchyBatchHash !== component.hierarchyBatchHash
+      || component.routeArtifact.sourceReservationArtifactHash !== component.reservationArtifactHash) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+    if (component.routeArtifact.routeCandidates?.some((route) =>
+      route.endpointFacts.resourceComponentId !== component.resourceComponentId) === true) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+    if (component.routeArtifact.routeCandidates?.some((route) => !validRoute(route)) === true) {
+      return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+    }
+  }
+  if (!sameSet(componentIds, c2.componentIds)
+    || !sameSet(components.map((component) => component.routeArtifactHash), c2.sourceArtifactHashes)
+    || !sameSet(components.map((component) => component.routeUniverseHash), c2.sourceRouteUniverseHashes)) {
+    return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+  }
+  for (const endpoint of c2.andEndpointReferences) {
+    if (!validEndpointReference(endpoint)) {
+      return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+    }
+    if (endpoint.andComponentSetHash !== c2.andComponentSetHash) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+  }
+  if (!task4C2KeyedBindingsMatch(components, c2)) {
+    return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+  }
+  const expectedAdmissionPayload = {
+    admissionStatus: "ADMITTED" as const,
+    canonicalSourceBindingManifest: manifest,
+    sourceBindingManifestHash: admission.sourceBindingManifestHash,
+    admittedComponents: admission.admittedComponents,
+    routeIdentityIndex: admission.routeIdentityIndex,
+    inputRouteCount: admission.inputRouteCount,
+  };
+  if (admission.admissionHash !== canonicalHash(expectedAdmissionPayload)) {
+    return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+  }
+  return null;
+}
+
+function task4C2KeyedBindingsMatch(
+  components: readonly PhaseDComponentSourceBindingV1[],
+  c2: StrategicMultiComponentAndBindingArtifactV1,
+): boolean {
+  const factByComponentId = uniqueMap(c2.componentRouteFacts!, (fact) => fact.resourceComponentId);
+  const endpointByComponentId = uniqueMap(
+    c2.andEndpointReferences!,
+    (endpoint) => endpoint.resourceComponentId,
+  );
+  if (factByComponentId === null || endpointByComponentId === null
+    || factByComponentId.size !== components.length
+    || endpointByComponentId.size !== components.length) return false;
+  return components.every((component) => {
+    const fact = factByComponentId.get(component.resourceComponentId);
+    const endpoint = endpointByComponentId.get(component.resourceComponentId);
+    if (fact === undefined || endpoint === undefined
+      || fact.sourceArtifactHash !== component.routeArtifactHash
+      || fact.sourceRouteUniverseHash !== component.routeUniverseHash
+      || endpoint.sourceArtifactHash !== component.routeArtifactHash
+      || endpoint.sourceRouteUniverseHash !== component.routeUniverseHash) return false;
+    const sourceRoutes = component.routeArtifact.routeCandidates ?? [];
+    const factRoutes = fact.routeCandidates;
+    const endpointRoutes = endpoint.routeReferences;
+    if (factRoutes.length !== sourceRoutes.length || endpointRoutes.length !== sourceRoutes.length) {
+      return false;
+    }
+    const sourceRouteKeys = sourceRoutes
+      .map((route) => routeKeyOf(route.routeId, route.routeHash))
+      .sort(compareText);
+    const factRouteKeys = factRoutes
+      .map((route) => routeKeyOf(route.routeId, route.routeHash))
+      .sort(compareText);
+    const endpointRouteKeys = endpointRoutes
+      .map((reference) => routeKeyOf(reference.routeId, reference.routeHash))
+      .sort(compareText);
+    return sameSet(sourceRouteKeys, factRouteKeys)
+      && sameSet(sourceRouteKeys, endpointRouteKeys);
+  });
+}
+
+function task4ContextOf(
+  input: PhaseDTask4InputV1,
+): Readonly<{ value: Task4ContextV1 }> | Readonly<{ issue: Task4IssueV1 }> {
+  const manifest = input.admission.canonicalSourceBindingManifest;
+  const components = new Map<string, Task4ComponentIndexesV1>();
+  const routeRecords: Task4RouteRecordV1[] = [];
+  const routeIdentity = new Map<string, string>();
+  const draftByRoute = new Map<string, NormalizedRouteCohortMemberDraftV1>();
+  for (const draft of input.normalizedMemberDrafts) {
+    if (draft.normalizationHash !== canonicalHash(payloadWithout(draft, "normalizationHash"))) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" } };
+    }
+    const routeKey = routeKeyOf(draft.routeId, draft.routeHash);
+    const previousDraft = draftByRoute.get(routeKey);
+    if (previousDraft !== undefined
+      && canonicalSerialize(previousDraft) !== canonicalSerialize(draft)) {
+      return { issue: { status: "REJECTED", reason: "SIGNATURE_HASH_PAYLOAD_CONFLICT" } };
+    }
+    draftByRoute.set(routeKey, draft);
+  }
+  for (const component of canonicalComponentSources(manifest.componentSources)) {
+    const indexesResult = componentIndexesOf(component);
+    if ("issue" in indexesResult) return indexesResult;
+    components.set(component.resourceComponentId, indexesResult.value);
+    for (const route of component.routeArtifact.routeCandidates ?? []) {
+      const previousRouteHash = routeIdentity.get(route.routeId);
+      if (previousRouteHash !== undefined && previousRouteHash !== route.routeHash) {
+        return { issue: { status: "REJECTED", reason: "ROUTE_ID_HASH_CONFLICT" } };
+      }
+      routeIdentity.set(route.routeId, route.routeHash);
+      const draft = draftByRoute.get(routeKeyOf(route.routeId, route.routeHash));
+      if (draft === undefined) {
+        return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_LINEAGE_COVERAGE" } };
+      }
+      if (draft.resourceComponentId !== component.resourceComponentId
+        || draft.sourceArtifactHash !== component.routeArtifactHash
+        || draft.sourceRouteUniverseHash !== component.routeUniverseHash) {
+        return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+      }
+      routeRecords.push({ component, route, draft });
+    }
+  }
+  const admittedRouteKeys = new Set(routeRecords.map((record) =>
+    routeKeyOf(record.route.routeId, record.route.routeHash)));
+  for (const routeKey of draftByRoute.keys()) {
+    if (!admittedRouteKeys.has(routeKey)) {
+      return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_LINEAGE_COVERAGE" } };
+    }
+  }
+  const endpointReferences = [...(manifest.multiComponentArtifact.andEndpointReferences ?? [])]
+    .sort(compareCanonicalPayload);
+  const routeByKey = new Map(routeRecords.map((record) => [
+    routeKeyOf(record.route.routeId, record.route.routeHash), record,
+  ]));
+  const endpointReferencesByRouteKey = new Map<
+    string,
+    StrategicComponentAndEndpointReferenceV1[]
+  >();
+  for (const endpoint of endpointReferences) {
+    for (const reference of endpoint.routeReferences) {
+      const route = routeByKey.get(routeKeyOf(reference.routeId, reference.routeHash));
+      if (route === undefined || route.component.resourceComponentId !== endpoint.resourceComponentId
+        || endpoint.sourceArtifactHash !== route.component.routeArtifactHash
+        || endpoint.sourceRouteUniverseHash !== route.component.routeUniverseHash) {
+        return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+      }
+      const routeKey = routeKeyOf(reference.routeId, reference.routeHash);
+      const entries = endpointReferencesByRouteKey.get(routeKey);
+      if (entries === undefined) endpointReferencesByRouteKey.set(routeKey, [endpoint]);
+      else if (!entries.some((entry) => entry.componentEndpointId === endpoint.componentEndpointId)) {
+        entries.push(endpoint);
+      }
+    }
+  }
+  for (const entries of endpointReferencesByRouteKey.values()) entries.sort(compareCanonicalPayload);
+  return {
+    value: {
+      components,
+      routeRecords: routeRecords.sort(compareRouteRecord),
+      endpointReferences,
+      endpointReferencesByRouteKey,
+    },
+  };
+}
+
+function componentIndexesOf(
+  component: PhaseDComponentSourceBindingV1,
+): Readonly<{ value: Task4ComponentIndexesV1 }> | Readonly<{ issue: Task4IssueV1 }> {
+  const facts = indexedCollectionOf(
+    component.reservationArtifact.reservationFacts,
+    (fact) => fact.reservationFactId,
+    "reservationHash",
+    component.resourceComponentId,
+  );
+  if ("issue" in facts) return facts;
+  const claims = indexedCollectionOf(
+    component.reservationArtifact.reservationFacts.flatMap((fact) => fact.claims),
+    (claim) => claim.claimId,
+    "claimHash",
+    component.resourceComponentId,
+  );
+  if ("issue" in claims) return claims;
+  const alternatives = indexedCollectionOf(
+    component.reservationArtifact.reservationAlternatives,
+    (alternative) => alternative.alternativeReservationFactId,
+    "alternativeHash",
+    component.resourceComponentId,
+  );
+  if ("issue" in alternatives) return alternatives;
+  const conflicts = indexedCollectionOf(
+    component.reservationArtifact.conflictFacts,
+    (conflict) => conflict.conflictFactId,
+    "conflictHash",
+    component.resourceComponentId,
+  );
+  if ("issue" in conflicts) return conflicts;
+  const units = indexedCollectionOf(
+    component.reservationArtifact.resourceUnits,
+    (unit) => unit.resourceUnitId,
+    "resourceUnitHash",
+    component.resourceComponentId,
+  );
+  if ("issue" in units) return units;
+  for (const fact of facts.value.byId.values()) {
+    if (fact.resourceComponentId !== component.resourceComponentId) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+    }
+  }
+  for (const alternative of alternatives.value.byId.values()) {
+    if (alternative.resourceComponentId !== component.resourceComponentId) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+    }
+  }
+  for (const conflict of conflicts.value.byId.values()) {
+    if (conflict.resourceComponentId !== component.resourceComponentId) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+    }
+  }
+  return {
+    value: {
+      componentId: component.resourceComponentId,
+      reservationFacts: facts.value,
+      claims: claims.value,
+      alternatives: alternatives.value,
+      conflicts: conflicts.value,
+      units: units.value,
+    },
+  };
+}
+
+function indexedCollectionOf<T extends Readonly<Record<string, unknown>>>(
+  values: readonly T[],
+  idOf: (value: T) => string,
+  hashProperty: string,
+  owner: string,
+): Task4IndexedResultV1<T> {
+  const byId = new Map<string, T>();
+  const ownerById = new Map<string, string>();
+  for (const value of values) {
+    const id = idOf(value);
+    const suppliedHash = value[hashProperty];
+    const payload = payloadWithout(value, hashProperty);
+    if (typeof suppliedHash !== "string" || suppliedHash !== canonicalHash(payload)) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" } };
+    }
+    const previous = byId.get(id);
+    if (previous !== undefined
+      && canonicalSerialize(previous) !== canonicalSerialize(value)) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" } };
+    }
+    byId.set(id, value);
+    ownerById.set(id, owner);
+  }
+  return { value: { byId, ownerById } };
+}
+
+function routeConflictClosureOf(
+  record: Task4RouteRecordV1,
+  context: Task4ContextV1,
+): Readonly<{ value: RouteRelevantConflictClosureV1 }> | Readonly<{ issue: Task4IssueV1 }> {
+  const indexes = context.components.get(record.component.resourceComponentId);
+  if (indexes === undefined) {
+    return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+  }
+  const route = record.route;
+  const routeReferenceIssue = validateRouteReferenceClosureSeeds(route, indexes);
+  if (routeReferenceIssue !== null) return { issue: routeReferenceIssue };
+  const seedReferences: StrategicConflictClosureReferenceV1[] = [];
+  const selectedAlternativeIds = new Set<string>();
+  const addFactSeed = (reservationFactId: string): Task4IssueV1 | null => {
+    const fact = indexes.reservationFacts.byId.get(reservationFactId);
+    if (fact === undefined) return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+    if (fact.resourceComponentId !== indexes.componentId) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+    seedReferences.push(referenceOf("RESERVATION_FACT", fact));
+    return null;
+  };
+  for (const reservationReference of route.supportingReservationFacts) {
+    const factIssue = addFactSeed(reservationReference.reservationFactId);
+    if (factIssue !== null) return { issue: factIssue };
+    for (const alternativeId of reservationReference.alternativeReservationFactIds) {
+      selectedAlternativeIds.add(alternativeId);
+      const alternative = indexes.alternatives.byId.get(alternativeId);
+      if (alternative === undefined) {
+        return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+      }
+      if (alternative.resourceComponentId !== indexes.componentId) {
+        return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+      }
+      seedReferences.push(referenceOf("RESERVATION_ALTERNATIVE", alternative));
+    }
+  }
+  if (route.supportingReservationFacts.length === 0) {
+    return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+  }
+  for (const claim of route.resourceClaims) {
+    for (const alternativeId of claim.alternativeReservationFactIds) selectedAlternativeIds.add(alternativeId);
+  }
+  for (const alternativeId of selectedAlternativeIds) {
+    const alternative = indexes.alternatives.byId.get(alternativeId);
+    if (alternative === undefined) {
+      return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+    }
+    if (alternative.resourceComponentId !== indexes.componentId) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+    }
+    seedReferences.push(referenceOf("RESERVATION_ALTERNATIVE", alternative));
+  }
+  for (const conflictFactId of route.unresolvedConflicts) {
+    const conflict = indexes.conflicts.byId.get(conflictFactId);
+    if (conflict === undefined) {
+      return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+    }
+    if (conflict.resourceComponentId !== indexes.componentId) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+    }
+    const routeFact = route.supportingReservationFacts
+      .map((reference) => indexes.reservationFacts.byId.get(reference.reservationFactId))
+      .find((fact) => fact?.conflictFactIds.includes(conflictFactId));
+    if (routeFact === undefined) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+    }
+    seedReferences.push(referenceOf("CONFLICT_FACT", conflict));
+  }
+  const witnessIssue = validateBranchWitnesses(route, indexes, selectedAlternativeIds);
+  if (witnessIssue !== null) return { issue: witnessIssue };
+
+  const visited = new Map<string, StrategicConflictClosureReferenceV1>();
+  const edges = new Map<string, StrategicConflictClosureEdgeV1>();
+  const queue = [...seedReferences].sort(compareReference);
+  let cursor = 0;
+  while (cursor < queue.length) {
+    const reference = queue[cursor++];
+    const visitKey = referenceKeyOf(reference);
+    if (visited.has(visitKey)) continue;
+    visited.set(visitKey, reference);
+    const targetsResult = closureTargetsOf(reference, indexes);
+    if ("issue" in targetsResult) return targetsResult;
+    for (const target of targetsResult.value) {
+      const targetKey = referenceKeyOf(target);
+      const edgePayload = { sourceReference: reference, targetReference: target };
+      const edge: StrategicConflictClosureEdgeV1 = {
+        ...edgePayload,
+        edgeHash: canonicalHash(edgePayload),
+      };
+      edges.set(`${visitKey}->${targetKey}`, edge);
+      if (!visited.has(targetKey)) queue.push(target);
+    }
+  }
+  const closurePayload = {
+    routeId: route.routeId,
+    routeHash: route.routeHash,
+    sourceArtifactHash: record.component.routeArtifactHash,
+    seedReferences: dedupeReferences(seedReferences),
+    traversedReferenceEdges: [...edges.values()].sort(compareEdge),
+    reservationFactIds: [...visited.values()]
+      .filter((reference) => reference.referenceKind === "RESERVATION_FACT")
+      .map((reference) => reference.referenceId).sort(compareText),
+    alternativeFactIds: [...visited.values()]
+      .filter((reference) => reference.referenceKind === "RESERVATION_ALTERNATIVE")
+      .map((reference) => reference.referenceId).sort(compareText),
+    conflictFactIds: [...visited.values()]
+      .filter((reference) => reference.referenceKind === "CONFLICT_FACT")
+      .map((reference) => reference.referenceId).sort(compareText),
+    resourceUnitIds: [...visited.values()]
+      .filter((reference) => reference.referenceKind === "RESOURCE_UNIT")
+      .map((reference) => reference.referenceId).sort(compareText),
+    branchLocalResolutionWitnesses: [...route.branchLocalResolutionWitnesses]
+      .sort(compareCanonicalPayload),
+    closureCompleteness: "COMPLETE" as const,
+  };
+  return { value: { ...closurePayload, closureHash: canonicalHash(closurePayload) } };
+}
+
+function validateRouteReferenceClosureSeeds(
+  route: StrategicRouteCandidateFactV1,
+  indexes: Task4ComponentIndexesV1,
+): Task4IssueV1 | null {
+  if (route.endpointFacts.resourceComponentId !== indexes.componentId) {
+    return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+  }
+  const supportingFactIds = new Set<string>();
+  for (const reference of route.supportingReservationFacts) {
+    if (supportingFactIds.has(reference.reservationFactId)) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+    supportingFactIds.add(reference.reservationFactId);
+    const fact = indexes.reservationFacts.byId.get(reference.reservationFactId);
+    if (fact === undefined) {
+      return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+    }
+    const factClaimIds = new Set(fact.claims.map((claim) => claim.claimId));
+    for (const alternativeId of reference.alternativeReservationFactIds) {
+      const alternative = indexes.alternatives.byId.get(alternativeId);
+      if (alternative === undefined) {
+        return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+      }
+      if (alternative.resourceComponentId !== indexes.componentId
+        || !fact.resourceUnitIds.includes(alternative.resourceUnitId)
+        || !factClaimIds.has(alternative.claimId)) {
+        return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+      }
+    }
+  }
+  if (supportingFactIds.size === 0) {
+    return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+  }
+  const supportingAlternativeIds = new Set(route.supportingReservationFacts
+    .flatMap((reference) => reference.alternativeReservationFactIds));
+  for (const routeClaim of route.resourceClaims) {
+    const claim = indexes.claims.byId.get(routeClaim.claimId);
+    if (claim === undefined) {
+      return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+    }
+    if (claim.claimHash !== routeClaim.claimHash
+      || claim.familyId !== routeClaim.familyId
+      || routeClaim.memberIds.some((memberId) => !claim.memberIds.includes(memberId))
+      || !sameSet(claim.claimRoles, routeClaim.claimRoles)
+      || routeClaim.resourceUnitIds.some((resourceUnitId) => !claim.resourceUnitIds.includes(resourceUnitId))) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+    for (const alternativeId of routeClaim.alternativeReservationFactIds) {
+      const alternative = indexes.alternatives.byId.get(alternativeId);
+      if (alternative === undefined) {
+        return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+      }
+      if (!supportingAlternativeIds.has(alternativeId)
+        || alternative.claimId !== routeClaim.claimId
+        || alternative.familyId !== routeClaim.familyId
+        || !routeClaim.memberIds.includes(alternative.memberId)
+        || !routeClaim.resourceUnitIds.includes(alternative.resourceUnitId)
+        || !sameSet(alternative.physicalCardIds, routeClaim.physicalCardIds)
+        || !sameSet(alternative.wildcardCardIds, routeClaim.wildcardCardIds)) {
+        return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+      }
+    }
+  }
+  return null;
+}
+
+function closureTargetsOf(
+  reference: StrategicConflictClosureReferenceV1,
+  indexes: Task4ComponentIndexesV1,
+): Readonly<{ value: readonly StrategicConflictClosureReferenceV1[] }> | Readonly<{ issue: Task4IssueV1 }> {
+  switch (reference.referenceKind) {
+    case "RESERVATION_FACT": {
+      const fact = indexes.reservationFacts.byId.get(reference.referenceId);
+      if (fact === undefined) return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+      const targets: StrategicConflictClosureReferenceV1[] = [];
+      for (const claim of fact.claims) {
+        const indexedClaim = indexes.claims.byId.get(claim.claimId);
+        if (indexedClaim === undefined) {
+          return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+        }
+        if (canonicalSerialize(indexedClaim) !== canonicalSerialize(claim)) {
+          return { issue: { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" } };
+        }
+        targets.push(referenceOf("CLAIM", indexedClaim));
+      }
+      for (const resourceUnitId of fact.resourceUnitIds) {
+        const unit = indexes.units.byId.get(resourceUnitId);
+        if (unit === undefined) {
+          return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+        }
+        targets.push(referenceOf("RESOURCE_UNIT", unit));
+      }
+      for (const conflictFactId of fact.conflictFactIds) {
+        const conflict = indexes.conflicts.byId.get(conflictFactId);
+        if (conflict === undefined) {
+          return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+        }
+        targets.push(referenceOf("CONFLICT_FACT", conflict));
+      }
+      for (const parentReservationFactId of fact.parentReservationFactIds) {
+        const parent = indexes.reservationFacts.byId.get(parentReservationFactId);
+        if (parent === undefined) {
+          return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+        }
+        targets.push(referenceOf("RESERVATION_FACT", parent));
+      }
+      return { value: targets.sort(compareReference) };
+    }
+    case "RESERVATION_ALTERNATIVE": {
+      const alternative = indexes.alternatives.byId.get(reference.referenceId);
+      if (alternative === undefined) return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+      const claim = indexes.claims.byId.get(alternative.claimId);
+      const unit = indexes.units.byId.get(alternative.resourceUnitId);
+      if (claim === undefined || unit === undefined) {
+        return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+      }
+      if (claim.familyId !== alternative.familyId
+        || !claim.memberIds.includes(alternative.memberId)
+        || !claim.resourceUnitIds.includes(alternative.resourceUnitId)
+        || unit.sourceFamilyId !== alternative.familyId
+        || unit.sourceMemberId !== alternative.memberId
+        || !sameSet(unit.physicalCardIds, alternative.physicalCardIds)
+        || !sameSet(unit.wildcardCardIds, alternative.wildcardCardIds)) {
+        return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+      }
+      return { value: [referenceOf("CLAIM", claim), referenceOf("RESOURCE_UNIT", unit)] };
+    }
+    case "CONFLICT_FACT": {
+      const conflict = indexes.conflicts.byId.get(reference.referenceId);
+      if (conflict === undefined) return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+      const targets: StrategicConflictClosureReferenceV1[] = [];
+      for (const alternativeReservationFactId of conflict.alternativeReservationFactIds) {
+        const alternative = indexes.alternatives.byId.get(alternativeReservationFactId);
+        if (alternative === undefined) {
+          return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+        }
+        targets.push(referenceOf("RESERVATION_ALTERNATIVE", alternative));
+      }
+      return { value: targets.sort(compareReference) };
+    }
+    case "CLAIM": {
+      const claim = indexes.claims.byId.get(reference.referenceId);
+      if (claim === undefined) return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+      const targets: StrategicConflictClosureReferenceV1[] = [];
+      for (const resourceUnitId of claim.resourceUnitIds) {
+        const unit = indexes.units.byId.get(resourceUnitId);
+        if (unit === undefined) {
+          return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+        }
+        targets.push(referenceOf("RESOURCE_UNIT", unit));
+      }
+      return { value: targets.sort(compareReference) };
+    }
+    case "RESOURCE_UNIT":
+      return { value: [] };
+  }
+}
+
+function validateBranchWitnesses(
+  route: StrategicRouteCandidateFactV1,
+  indexes: Task4ComponentIndexesV1,
+  selectedAlternativeIds: ReadonlySet<string>,
+): Task4IssueV1 | null {
+  const witnessConflictIds = new Set<string>();
+  for (const witness of route.branchLocalResolutionWitnesses) {
+    if (witness.witnessKind !== "BRANCH_LOCAL_RESOLUTION"
+      || witnessConflictIds.has(witness.conflictFactId)) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+    witnessConflictIds.add(witness.conflictFactId);
+    if (witness.witnessHash !== canonicalHash(payloadWithout(witness, "witnessHash"))) {
+      return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+    }
+    const conflict = indexes.conflicts.byId.get(witness.conflictFactId);
+    if (conflict === undefined) return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+    if (!route.unresolvedConflicts.includes(witness.conflictFactId)) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+    if (witness.selectedAlternativeReservationFactIds.length !== witness.allocations.length
+      || witness.selectedAlternativeReservationFactIds.some((id, index) =>
+        id !== witness.allocations[index]?.alternativeReservationFactId)) {
+      return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+    }
+    for (const allocation of witness.allocations) {
+      if (!selectedAlternativeIds.has(allocation.alternativeReservationFactId)) {
+        return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+      }
+      const alternative = indexes.alternatives.byId.get(allocation.alternativeReservationFactId);
+      if (alternative === undefined) return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+      if (allocation.alternativeHash !== alternative.alternativeHash
+        || allocation.resourceUnitId !== alternative.resourceUnitId
+        || !sameSet(allocation.physicalCardIds, alternative.physicalCardIds)
+        || !sameSet(allocation.wildcardCardIds, alternative.wildcardCardIds)
+        || canonicalSerialize(allocation.wildcardAllocationLineage)
+          !== canonicalSerialize(alternative.wildcardAllocationLineage)) {
+        return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+      }
+      if (allocation.allocationHash !== canonicalHash(payloadWithout(allocation, "allocationHash"))) {
+        return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+      }
+    }
+    if (!conflict.alternativeReservationFactIds.some((id) => selectedAlternativeIds.has(id))) {
+      return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+    }
+  }
+  for (const conflictFactId of route.unresolvedConflicts) {
+    if (!witnessConflictIds.has(conflictFactId)) {
+      return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+    }
+  }
+  return null;
+}
+
+function addRouteOccurrences(
+  accumulator: Task4OccurrenceAccumulatorV1,
+  record: Task4RouteRecordV1,
+  closure: RouteRelevantConflictClosureV1,
+  context: Task4ContextV1,
+): Task4IssueV1 | null {
+  const route = record.route;
+  const draftPhysical = new Map<string, {
+    disposition: StrategicResourceDispositionV1;
+    canonicalRolePosition: string;
+  }>();
+  const canonicalRolePositions = new Set(record.draft.canonicalResourceRoleVector
+    .map((slot) => slot.canonicalRolePosition));
+  for (const lineage of record.draft.task3MemberLocalLineage) {
+    if (lineage.kind === "PHYSICAL") {
+      const occurrence = lineage.occurrence;
+      if (occurrence.routeId !== route.routeId
+        || occurrence.occurrenceHash !== canonicalHash(payloadWithout(occurrence, "occurrenceHash"))) {
+        return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+      }
+      if (!canonicalRolePositions.has(occurrence.canonicalRolePosition)) {
+        return { status: "REJECTED", reason: "OCCURRENCE_KEY_PAYLOAD_CONFLICT" };
+      }
+      const next = {
+        disposition: occurrence.disposition,
+        canonicalRolePosition: occurrence.canonicalRolePosition,
+      };
+      const previous = draftPhysical.get(occurrence.physicalCardId);
+      if (previous !== undefined && canonicalSerialize(previous) !== canonicalSerialize(next)) {
+        return { status: "REJECTED", reason: "OCCURRENCE_KEY_PAYLOAD_CONFLICT" };
+      }
+      draftPhysical.set(occurrence.physicalCardId, {
+        disposition: lineage.occurrence.disposition,
+        canonicalRolePosition: lineage.occurrence.canonicalRolePosition,
+      });
+    }
+  }
+  const physicalIds = new Set(route.endpointFacts.accountedPhysicalCardIds);
+  const indexes = context.components.get(record.component.resourceComponentId);
+  if (indexes === undefined) return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+  for (const resourceUnitId of closure.resourceUnitIds) {
+    const unit = indexes.units.byId.get(resourceUnitId);
+    if (unit === undefined) return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+    unit.physicalCardIds.forEach((physicalCardId) => physicalIds.add(physicalCardId));
+  }
+  for (const [physicalCardId, draftEntry] of draftPhysical) {
+    const routeDisposition = dispositionOf(route, physicalCardId);
+    if (routeDisposition !== null && routeDisposition !== draftEntry.disposition) {
+      return { status: "REJECTED", reason: "OCCURRENCE_KEY_PAYLOAD_CONFLICT" };
+    }
+    if (!physicalIds.has(physicalCardId)) {
+      return { status: "INCONCLUSIVE", reason: "INCOMPLETE_LINEAGE_COVERAGE" };
+    }
+  }
+  for (const physicalCardId of route.endpointFacts.accountedPhysicalCardIds) {
+    if (!draftPhysical.has(physicalCardId)) {
+      return { status: "INCONCLUSIVE", reason: "INCOMPLETE_LINEAGE_COVERAGE" };
+    }
+  }
+  for (const physicalCardId of [...physicalIds].sort(compareText)) {
+    const disposition = draftPhysical.get(physicalCardId)?.disposition
+      ?? dispositionOf(route, physicalCardId);
+    const payload = {
+      routeId: route.routeId,
+      physicalCardId,
+      disposition: disposition ?? null,
+      canonicalRolePosition: draftPhysical.get(physicalCardId)?.canonicalRolePosition ?? null,
+    };
+    const issue = addOccurrence(accumulator.physical,
+      [route.routeId, physicalCardId], payload);
+    if (issue !== null) return issue;
+  }
+  const wildcardLineages: StrategicWildcardAllocationLineageV1[] = [];
+  route.resourceClaims.forEach((claim) => wildcardLineages.push(...claim.wildcardAllocationLineage));
+  route.branchLocalResolutionWitnesses.forEach((witness) =>
+    witness.allocations.forEach((allocation) => wildcardLineages.push(...allocation.wildcardAllocationLineage)));
+  for (const alternativeId of closure.alternativeFactIds) {
+    const alternative = indexes.alternatives.byId.get(alternativeId);
+    if (alternative === undefined) return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+    wildcardLineages.push(...alternative.wildcardAllocationLineage);
+  }
+  for (const resourceUnitId of closure.resourceUnitIds) {
+    const unit = indexes.units.byId.get(resourceUnitId);
+    if (unit === undefined) return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+    wildcardLineages.push(...unit.wildcardAllocationLineage);
+  }
+  for (const lineage of wildcardLineages) {
+    for (const wildcardCardId of [...lineage.wildcardCardIds].sort(compareText)) {
+      const payload = {
+        routeId: route.routeId,
+        wildcardCardId,
+        allocationVariantHash: lineage.allocationVariantHash,
+        canonicalGroupType: lineage.canonicalGroupType,
+        wildcardCardIds: [...lineage.wildcardCardIds].sort(compareText),
+      };
+      const issue = addOccurrence(accumulator.wildcard,
+        [route.routeId, wildcardCardId, lineage.allocationVariantHash], payload);
+      if (issue !== null) return issue;
+    }
+  }
+  for (const claim of route.resourceClaims) {
+    for (const memberId of claim.memberIds) {
+      const payload = { routeId: route.routeId, familyId: claim.familyId, memberId };
+      const issue = addOccurrence(accumulator.familyMember,
+        [route.routeId, claim.familyId, memberId], payload);
+      if (issue !== null) return issue;
+    }
+  }
+  for (const alternativeId of closure.alternativeFactIds) {
+    const alternative = indexes.alternatives.byId.get(alternativeId);
+    if (alternative === undefined) return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+    const payload = {
+      routeId: route.routeId,
+      familyId: alternative.familyId,
+      memberId: alternative.memberId,
+    };
+    const issue = addOccurrence(accumulator.familyMember,
+      [route.routeId, alternative.familyId, alternative.memberId], payload);
+    if (issue !== null) return issue;
+  }
+  for (const reservationFactId of closure.reservationFactIds) {
+    const fact = indexes.reservationFacts.byId.get(reservationFactId);
+    if (fact === undefined) return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+    const issue = addOccurrence(accumulator.reservation,
+      [route.routeId, reservationFactId], { routeId: route.routeId, reservationFactId, reservationHash: fact.reservationHash });
+    if (issue !== null) return issue;
+  }
+  for (const conflictFactId of closure.conflictFactIds) {
+    const conflict = indexes.conflicts.byId.get(conflictFactId);
+    if (conflict === undefined) return { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" };
+    const issue = addOccurrence(accumulator.conflict,
+      [route.routeId, conflictFactId], { routeId: route.routeId, conflictFactId, conflictHash: conflict.conflictHash });
+    if (issue !== null) return issue;
+  }
+  const routeKey = routeKeyOf(route.routeId, route.routeHash);
+  for (const endpoint of context.endpointReferencesByRouteKey.get(routeKey) ?? []) {
+    const routeReference = { routeId: route.routeId, routeHash: route.routeHash };
+    const issue = addOccurrence(accumulator.endpoint,
+      [route.routeId, endpoint.componentEndpointId], {
+        routeId: route.routeId,
+        componentEndpointId: endpoint.componentEndpointId,
+        endpointHash: endpoint.endpointHash,
+        routeReference,
+      });
+    if (issue !== null) return issue;
+  }
+  return null;
+}
+
+function addOccurrence<K extends readonly string[]>(
+  target: Map<string, Task4OccurrenceEntryV1<K>>,
+  key: K,
+  payload: unknown,
+): Task4IssueV1 | null {
+  const keyString = canonicalSerialize(key);
+  const payloadHash = canonicalHash(payload);
+  const previous = target.get(keyString);
+  if (previous !== undefined && previous.payloadHash !== payloadHash) {
+    return { status: "REJECTED", reason: "OCCURRENCE_KEY_PAYLOAD_CONFLICT" };
+  }
+  if (previous === undefined) target.set(keyString, { key, payloadHash });
+  return null;
+}
+
+function occurrenceUniverseOf(
+  routeRecords: readonly Task4RouteRecordV1[],
+  accumulator: Task4OccurrenceAccumulatorV1,
+): PhaseDRouteOccurrenceUniverseV1 {
+  const payload = {
+    sourceRouteIds: [...new Set(routeRecords.map((record) => record.route.routeId))].sort(compareText),
+    physicalOccurrenceKeys: keysOf(accumulator.physical),
+    wildcardOccurrenceKeys: keysOf(accumulator.wildcard),
+    familyMemberOccurrenceKeys: keysOf(accumulator.familyMember),
+    reservationOccurrenceKeys: keysOf(accumulator.reservation),
+    conflictOccurrenceKeys: keysOf(accumulator.conflict),
+    endpointOccurrenceKeys: keysOf(accumulator.endpoint),
+  };
+  return { ...payload, occurrenceUniverseHash: canonicalHash(payload) };
+}
+
+function keysOf<K extends readonly string[]>(entries: ReadonlyMap<string, Task4OccurrenceEntryV1<K>>): readonly K[] {
+  return [...entries.values()].map((entry) => entry.key).sort(compareTuple);
+}
+
+function referenceOf(
+  kind: StrategicConflictClosureReferenceV1["referenceKind"],
+  value: Readonly<Record<string, unknown>>,
+): StrategicConflictClosureReferenceV1 {
+  const idField = kind === "RESERVATION_FACT" ? "reservationFactId"
+    : kind === "RESERVATION_ALTERNATIVE" ? "alternativeReservationFactId"
+      : kind === "CONFLICT_FACT" ? "conflictFactId"
+        : kind === "RESOURCE_UNIT" ? "resourceUnitId" : "claimId";
+  const hashField = kind === "RESERVATION_FACT" ? "reservationHash"
+    : kind === "RESERVATION_ALTERNATIVE" ? "alternativeHash"
+      : kind === "CONFLICT_FACT" ? "conflictHash"
+        : kind === "RESOURCE_UNIT" ? "resourceUnitHash" : "claimHash";
+  return {
+    referenceKind: kind,
+    referenceId: String(value[idField]),
+    referenceHash: String(value[hashField]),
+  };
+}
+
+function dedupeReferences(values: readonly StrategicConflictClosureReferenceV1[]): readonly StrategicConflictClosureReferenceV1[] {
+  const result = new Map<string, StrategicConflictClosureReferenceV1>();
+  for (const value of values) {
+    const key = referenceKeyOf(value);
+    const previous = result.get(key);
+    if (previous === undefined) result.set(key, value);
+  }
+  return [...result.values()].sort(compareReference);
+}
+
+function referenceKeyOf(reference: StrategicConflictClosureReferenceV1): string {
+  return `${reference.referenceKind}:${reference.referenceId}`;
+}
+
+function compareReference(left: StrategicConflictClosureReferenceV1, right: StrategicConflictClosureReferenceV1): number {
+  const kindOrder = (kind: string) => TASK4_REFERENCE_KIND_ORDER.indexOf(kind);
+  return kindOrder(left.referenceKind) - kindOrder(right.referenceKind)
+    || compareText(left.referenceId, right.referenceId)
+    || compareText(left.referenceHash, right.referenceHash);
+}
+
+function compareEdge(left: StrategicConflictClosureEdgeV1, right: StrategicConflictClosureEdgeV1): number {
+  return compareReference(left.sourceReference, right.sourceReference)
+    || compareReference(left.targetReference, right.targetReference)
+    || compareText(left.edgeHash, right.edgeHash);
+}
+
+function compareTuple(left: readonly string[], right: readonly string[]): number {
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const leftValue = left[index] ?? "";
+    const rightValue = right[index] ?? "";
+    const compared = compareText(leftValue, rightValue);
+    if (compared !== 0) return compared;
+  }
+  return 0;
+}
+
+function compareRouteRecord(left: Task4RouteRecordV1, right: Task4RouteRecordV1): number {
+  return compareText(left.route.routeId, right.route.routeId)
+    || compareText(left.route.routeHash, right.route.routeHash)
+    || compareText(left.component.resourceComponentId, right.component.resourceComponentId);
+}
+
+function routeKeyOf(routeId: string, routeHash: string): string {
+  return `${routeId}:${routeHash}`;
+}
+
+function payloadWithout(value: Readonly<Record<string, unknown>>, property: string): Record<string, unknown> {
+  const payload = { ...value };
+  delete payload[property];
+  return payload;
+}
+
+function dispositionOf(
+  route: StrategicRouteCandidateFactV1,
+  physicalCardId: string,
+): StrategicResourceDispositionV1 | null {
+  if (route.preservedResources.includes(physicalCardId)) return "PRESERVED";
+  if (route.consumedResources.includes(physicalCardId)) return "CONSUMED";
+  if (route.endpointFacts.remainderPhysicalCardIds.includes(physicalCardId)) return "REMAINDER";
+  return null;
 }

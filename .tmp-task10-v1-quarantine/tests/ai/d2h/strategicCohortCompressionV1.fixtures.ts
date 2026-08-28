@@ -16,6 +16,7 @@ import { buildStrategicStructureInventoryV1 } from
 import type { StrategicStructureInventoryV1 } from
   "../../../src/ai/d2h/strategicStructureInventoryContracts";
 import type {
+  PhaseDSourceAdmissionSuccessV1,
   PhaseDComponentSourceBindingV1,
   PhaseDSourceBindingManifestV1,
   StrategicCohortCompressionInputV1,
@@ -212,11 +213,22 @@ export function makeCrossPairedC2EndpointFixture(): StrategicCohortCompressionIn
     snapshotHash: original.snapshotHash,
     sourceRootHash: original.sourceRootHash,
     provenanceRoot: original.provenanceRoot,
-    budget: original.budget,
-    budgetObservation: original.budgetObservation,
     sourceRouteUniverseHashes: original.sourceRouteUniverseHashes,
-    componentFactHashes: original.componentRouteFacts!.map((fact) => fact.componentFactHash),
-    endpointHashes: andEndpointReferences.map((endpoint) => endpoint.endpointHash),
+    componentSemanticHashes: original.componentRouteFacts!.map((fact) => canonicalHash({
+      kind: "strategic-component-route-universe-v1",
+      resourceComponentId: fact.resourceComponentId,
+      sourceRouteUniverseHash: fact.sourceRouteUniverseHash,
+      routeHashes: fact.routeCandidates.map((route) => route.routeHash).sort(compareText),
+      physicalCardIds: fact.physicalCardIds,
+      wildcardCardIds: fact.wildcardCardIds,
+    })).sort(compareText),
+    endpointSemanticHashes: andEndpointReferences.map((endpoint) => canonicalHash({
+      kind: "strategic-component-and-endpoint-universe-v1",
+      resourceComponentId: endpoint.resourceComponentId,
+      sourceRouteUniverseHash: endpoint.sourceRouteUniverseHash,
+      routeReferences: endpoint.routeReferences,
+      andComponentSetHash: endpoint.andComponentSetHash,
+    })).sort(compareText),
   });
   const { artifactHash: _artifactHash, ...originalPayload } = original;
   const payload = { ...originalPayload, andEndpointReferences, routeUniverseHash };
@@ -241,10 +253,6 @@ export function makeDuplicateRouteIdentityConflictFixture(): StrategicCohortComp
     sourceRootHash: secondArtifact.sourceRootHash,
     provenanceRoot: secondArtifact.provenanceRoot,
     sourceInventoryHash: secondArtifact.sourceInventoryHash,
-    sourceHierarchyBatchHash: secondArtifact.sourceHierarchyBatchHash,
-    sourceReservationArtifactHash: secondArtifact.sourceReservationArtifactHash,
-    budget: secondArtifact.budget,
-    budgetObservation: secondArtifact.budgetObservation,
     routeHashes: changedRoutes.map((route) => route.routeHash),
   });
   const { artifactHash: _artifactHash, ...artifactPayload } = secondArtifact;
@@ -259,7 +267,134 @@ export function makeDuplicateRouteIdentityConflictFixture(): StrategicCohortComp
     changedArtifact,
   );
   const changedComponents = [components[0], changedComponent];
-  return inputOf(changedComponents, bind(changedComponents));
+  return inputOf(changedComponents, rebindWithRouteIdentityConflict(bind(components), changedComponents));
+}
+
+function rebindWithRouteIdentityConflict(
+  original: StrategicMultiComponentAndBindingArtifactV1,
+  components: readonly PhaseDComponentSourceBindingV1[],
+): StrategicMultiComponentAndBindingArtifactV1 {
+  const componentRouteFacts = components.map((component) => {
+    const routeCandidates = [...(component.routeArtifact.routeCandidates ?? [])]
+      .sort((left, right) => compareText(left.routeId, right.routeId));
+    const payload = {
+      resourceComponentId: component.resourceComponentId,
+      sourceArtifactHash: component.routeArtifactHash,
+      sourceRouteUniverseHash: component.routeUniverseHash,
+      routeCandidates,
+      routeCount: routeCandidates.length,
+      physicalCardIds: [...new Set(routeCandidates
+        .flatMap((route) => route.endpointFacts.accountedPhysicalCardIds))].sort(compareText),
+      wildcardCardIds: [...new Set(routeCandidates
+        .flatMap((route) => route.resourceClaims.flatMap((claim) => claim.wildcardCardIds)))].sort(compareText),
+    };
+    return { ...payload, componentFactHash: canonicalHash(payload) };
+  }).sort((left, right) => compareText(left.resourceComponentId, right.resourceComponentId));
+  const componentIds = componentRouteFacts.map((component) => component.resourceComponentId);
+  const sourceArtifactHashes = componentRouteFacts.map((component) => component.sourceArtifactHash);
+  const sourceRouteUniverseHashes = componentRouteFacts.map((component) => component.sourceRouteUniverseHash);
+  const andComponentSetHash = canonicalHash({
+    kind: "strategic-and-component-set-v1",
+    componentIds,
+    sourceRouteUniverseHashes,
+  });
+  const andEndpointReferences = componentRouteFacts.map((component) => {
+    const routeReferences = component.routeCandidates
+      .map((route) => ({ routeId: route.routeId, routeHash: route.routeHash }))
+      .sort((left, right) => compareText(left.routeId, right.routeId));
+    const identityPayload = {
+      kind: "strategic-component-and-endpoint-reference-v1",
+      resourceComponentId: component.resourceComponentId,
+      sourceRouteUniverseHash: component.sourceRouteUniverseHash,
+      routeReferences,
+      andComponentSetHash,
+    };
+    const componentEndpointId = canonicalHash(identityPayload);
+    const payload = {
+      componentEndpointId,
+      resourceComponentId: component.resourceComponentId,
+      sourceArtifactHash: component.sourceArtifactHash,
+      sourceRouteUniverseHash: component.sourceRouteUniverseHash,
+      routeReferences,
+      andComponentSetHash,
+      semanticBoundary: "COMPONENT_AND_ENDPOINT_REFERENCE_NOT_ROUTE_SELECTION" as const,
+    };
+    return { ...payload, endpointHash: canonicalHash(payload) };
+  });
+  const routeUniverseHash = canonicalHash({
+    kind: "strategic-multi-component-and-route-universe-v1",
+    identityHash: original.identityHash,
+    snapshotHash: original.snapshotHash,
+    sourceRootHash: original.sourceRootHash,
+    provenanceRoot: original.provenanceRoot,
+    sourceRouteUniverseHashes,
+    componentSemanticHashes: componentRouteFacts.map((component) => canonicalHash({
+      kind: "strategic-component-route-universe-v1",
+      resourceComponentId: component.resourceComponentId,
+      sourceRouteUniverseHash: component.sourceRouteUniverseHash,
+      routeHashes: component.routeCandidates.map((route) => route.routeHash).sort(compareText),
+      physicalCardIds: component.physicalCardIds,
+      wildcardCardIds: component.wildcardCardIds,
+    })).sort(compareText),
+    endpointSemanticHashes: andEndpointReferences.map((endpoint) => canonicalHash({
+      kind: "strategic-component-and-endpoint-universe-v1",
+      resourceComponentId: endpoint.resourceComponentId,
+      sourceRouteUniverseHash: endpoint.sourceRouteUniverseHash,
+      routeReferences: endpoint.routeReferences,
+      andComponentSetHash: endpoint.andComponentSetHash,
+    })).sort(compareText),
+  });
+  const budgetExecution = materializeStrategicBudgetExecutionV1({
+    measurements: [
+      {
+        dimension: "COMPONENT_ENDPOINT_COUNT",
+        limit: original.budget.maxComponentEndpointCount,
+        observedCount: original.componentEndpointCount,
+        measurementCompleteness: "EXACT",
+      },
+      {
+        dimension: "EVIDENCE_COST",
+        limit: original.budget.maxEvidenceCost,
+        observedCount: original.evidenceCost,
+        measurementCompleteness: "EXACT",
+      },
+    ],
+    exhaustedDimensions: [],
+    sourceHashBindings: [
+      ...sourceArtifactHashes.map((sourceHash) => ({
+        sourceKind: "STRATEGIC_ROUTE_GENERATION_ARTIFACT" as const,
+        sourceHash,
+      })),
+      ...sourceRouteUniverseHashes.map((sourceHash) => ({
+        sourceKind: "STRATEGIC_ROUTE_UNIVERSE" as const,
+        sourceHash,
+      })),
+    ],
+  });
+  const payload = {
+    schemaVersion: original.schemaVersion,
+    identityHash: original.identityHash,
+    snapshotHash: original.snapshotHash,
+    sourceRootHash: original.sourceRootHash,
+    provenanceRoot: original.provenanceRoot,
+    budget: original.budget,
+    bindingStatus: "COMPLETE" as const,
+    componentRouteFacts,
+    andEndpointReferences,
+    componentEndpointCount: original.componentEndpointCount,
+    evidenceCost: original.evidenceCost,
+    budgetObservation: original.budgetObservation,
+    budgetExecution,
+    exhaustedDimensions: [],
+    reasonCodes: [],
+    componentIds,
+    andComponentSetHash,
+    sourceArtifactHashes,
+    sourceRouteUniverseHashes,
+    routeUniverseHash,
+    semanticBoundary: "MULTI_COMPONENT_AND_BINDING_FACTS_NOT_AI_DECISION" as const,
+  };
+  return { ...payload, artifactHash: canonicalHash(payload) };
 }
 
 export function makeReversedComponentSourceInput(
@@ -272,6 +407,148 @@ export function makeReversedComponentSourceInput(
       componentSources: [...input.sourceBindingManifest.componentSources].reverse(),
     },
   };
+}
+
+export function makeBrokenClosureReferenceFixture(): PhaseDSourceAdmissionSuccessV1 {
+  const original = makeValidPhaseDAdmissionInput();
+  const originalComponents = original.sourceBindingManifest.componentSources;
+  const first = originalComponents[0];
+  const route = first?.routeArtifact.routeCandidates?.[0];
+  if (first === undefined || route === undefined) throw new Error("Missing broken closure fixture route");
+  const { routeHash: _routeHash, ...routePayload } = route;
+  const changedRoutePayload = {
+    ...routePayload,
+    unresolvedConflicts: [...route.unresolvedConflicts, "missing-conflict-reference"],
+  };
+  const changedRoute = { ...changedRoutePayload, routeHash: canonicalHash(changedRoutePayload) };
+  const changedRoutes = first.routeArtifact.routeCandidates!.map((candidate) =>
+    candidate.routeId === route.routeId ? changedRoute : candidate);
+  const changedRouteUniverseHash = canonicalHash({
+    kind: "strategic-route-universe-v1",
+    identityHash: first.routeArtifact.identityHash,
+    snapshotHash: first.routeArtifact.snapshotHash,
+    sourceRootHash: first.routeArtifact.sourceRootHash,
+    provenanceRoot: first.routeArtifact.provenanceRoot,
+    sourceInventoryHash: first.routeArtifact.sourceInventoryHash,
+    routeHashes: changedRoutes.map((candidate) => candidate.routeHash).sort(compareText),
+  });
+  const changedConflictExpansionCount = changedRoutes
+    .filter((candidate) => candidate.unresolvedConflicts.length > 0).length;
+  const changedEvidenceCost = changedRoutes.reduce((sum, candidate) => sum
+    + candidate.supportingHierarchyFacts.length
+    + candidate.supportingReservationFacts.length
+    + candidate.resourceClaims.length
+    + candidate.preservedResources.length
+    + candidate.consumedResources.length
+    + candidate.unresolvedConflicts.length
+    + candidate.branchLocalResolutionWitnesses.length
+    + 1, 0);
+  const changedBudgetObservation = {
+    ...first.routeArtifact.budgetObservation,
+    observedConflictExpansionCount: changedConflictExpansionCount,
+    observedEvidenceCost: changedEvidenceCost,
+  };
+  const changedBudgetExecution = materializeStrategicBudgetExecutionV1({
+    measurements: [
+      {
+        dimension: "ROUTE_CANDIDATE_COUNT",
+        limit: first.routeArtifact.budget.maxRouteCount,
+        observedCount: changedRoutes.length,
+        measurementCompleteness: "EXACT",
+      },
+      {
+        dimension: "CONFLICT_EXPANSION_COUNT",
+        limit: first.routeArtifact.budget.maxConflictExpansion,
+        observedCount: first.routeArtifact.generationWorkObservedCount,
+        measurementCompleteness: "EXACT",
+      },
+      {
+        dimension: "EVIDENCE_COST",
+        limit: first.routeArtifact.budget.maxEvidenceCost,
+        observedCount: changedEvidenceCost,
+        measurementCompleteness: "EXACT",
+      },
+    ],
+    exhaustedDimensions: [],
+    sourceHashBindings: [
+      { sourceKind: "STRATEGIC_STRUCTURE_INVENTORY", sourceHash: first.routeArtifact.sourceInventoryHash },
+      {
+        sourceKind: "STRATEGIC_HIERARCHY_CLASSIFICATION_BATCH",
+        sourceHash: first.routeArtifact.sourceHierarchyBatchHash,
+      },
+      {
+        sourceKind: "STRATEGIC_RESOURCE_RESERVATION_ARTIFACT",
+        sourceHash: first.routeArtifact.sourceReservationArtifactHash,
+      },
+    ],
+  });
+  const { artifactHash: _artifactHash, ...artifactPayload } = first.routeArtifact;
+  const changedArtifactPayload = {
+    ...artifactPayload,
+    routeCandidates: changedRoutes,
+    conflictExpansionCount: changedConflictExpansionCount,
+    evidenceCost: changedEvidenceCost,
+    budgetObservation: changedBudgetObservation,
+    budgetExecution: changedBudgetExecution,
+    routeUniverseHash: changedRouteUniverseHash,
+  };
+  const changedArtifact = {
+    ...changedArtifactPayload,
+    artifactHash: canonicalHash(changedArtifactPayload),
+  };
+  const changedComponents = canonicalComponentSources([
+    {
+      ...first,
+      routeArtifact: changedArtifact,
+      routeArtifactHash: changedArtifact.artifactHash,
+      routeUniverseHash: changedRouteUniverseHash,
+    },
+    ...originalComponents.slice(1),
+  ]);
+  const multiComponentArtifact = bind(changedComponents);
+  const manifestPayload = {
+    commonBindings: commonBindingsOf(multiComponentArtifact),
+    componentSources: changedComponents,
+    multiComponentArtifact,
+    multiComponentArtifactHash: multiComponentArtifact.artifactHash,
+    andComponentSetHash: multiComponentArtifact.andComponentSetHash!,
+  };
+  const sourceBindingManifest = {
+    ...manifestPayload,
+    manifestHash: canonicalHash(manifestPayload),
+  };
+  const admittedComponents = changedComponents.map((component) => {
+    const routeCandidates = component.routeArtifact.routeCandidates!;
+    const payload = {
+      resourceComponentId: component.resourceComponentId,
+      hierarchyBatchHash: component.hierarchyBatchHash,
+      reservationArtifactHash: component.reservationArtifactHash,
+      routeArtifactHash: component.routeArtifactHash,
+      routeUniverseHash: component.routeUniverseHash,
+      routeIds: routeCandidates.map((candidate) => candidate.routeId).sort(compareText),
+      routeHashes: routeCandidates.map((candidate) => candidate.routeHash).sort(compareText),
+    };
+    return { ...payload, componentAdmissionHash: canonicalHash(payload) };
+  });
+  const routeIdentityIndex = changedComponents.flatMap((component) =>
+    component.routeArtifact.routeCandidates!.map((candidate) => ({
+      routeId: candidate.routeId,
+      routeHash: candidate.routeHash,
+      resourceComponentId: component.resourceComponentId,
+      sourceArtifactHash: component.routeArtifactHash,
+      sourceRouteUniverseHash: component.routeUniverseHash,
+    }))).sort((left, right) => compareText(left.routeId, right.routeId)
+      || compareText(left.routeHash, right.routeHash));
+  const admissionPayload = {
+    admissionStatus: "ADMITTED" as const,
+    canonicalSourceBindingManifest: sourceBindingManifest,
+    sourceBindingManifestHash: sourceBindingManifest.manifestHash,
+    admittedComponents,
+    routeIdentityIndex,
+    inputRouteCount: routeIdentityIndex.length,
+  };
+  const admission = { ...admissionPayload, admissionHash: canonicalHash(admissionPayload) };
+  return admission;
 }
 
 export function makeEmptyRouteUniverseFixture(): StrategicCohortCompressionInputV1 {
@@ -523,11 +800,9 @@ function emptyMultiComponentArtifact(
   const routeUniverseHash = canonicalHash({
     kind: "strategic-multi-component-and-route-universe-v1",
     ...bindings,
-    budget: C2_BUDGET,
-    budgetObservation,
     sourceRouteUniverseHashes,
-    componentFactHashes: [],
-    endpointHashes: [],
+    componentSemanticHashes: [],
+    endpointSemanticHashes: [],
   });
   const payload = {
     schemaVersion: STRATEGIC_MULTI_COMPONENT_AND_BINDING_V1_SCHEMA_VERSION,

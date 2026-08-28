@@ -16,6 +16,7 @@ import type {
 } from "./strategicResourceReservationV1Contracts";
 import type {
   StrategicRouteClassV1,
+  StrategicRouteBranchLocalResolutionWitnessV1,
   StrategicRouteGenerationArtifactV1,
   StrategicRoutePreservationFactCodeV1,
 } from "./strategicRouteCandidateFactsV1Contracts";
@@ -380,9 +381,30 @@ export type RouteRelevantConflictClosureV1 = Readonly<{
   alternativeFactIds: readonly string[];
   conflictFactIds: readonly string[];
   resourceUnitIds: readonly string[];
+  branchLocalResolutionWitnesses: readonly StrategicRouteBranchLocalResolutionWitnessV1[];
   closureCompleteness: "COMPLETE" | "INCOMPLETE";
   closureHash: string;
 }>;
+
+export type PhaseDTask4StatusV1 = Exclude<StrategicCohortCompressionStatusV1, "COMPLETE"> | "COMPLETE";
+
+export type PhaseDTask4InputV1 = Readonly<{
+  admission: PhaseDSourceAdmissionSuccessV1;
+  normalizedMemberDrafts: readonly NormalizedRouteCohortMemberDraftV1[];
+}>;
+
+export type PhaseDTask4ArtifactV1 = Readonly<{
+  task4Status: PhaseDTask4StatusV1;
+  sourceBindingManifestHash: string;
+  sourceAndComponentSetHash: string;
+  routeRelevantConflictClosures: readonly RouteRelevantConflictClosureV1[] | null;
+  occurrenceUniverse: PhaseDRouteOccurrenceUniverseV1 | null;
+  reasonCodes: readonly StrategicCohortCompressionReasonCodeV1[];
+  artifactHash: string;
+  semanticBoundary: "PHASE_D_TASK4_FACTS_NOT_COHORT_OR_DECISION";
+}>;
+
+export type PhaseDTask4MaterializerV1 = (input: PhaseDTask4InputV1) => PhaseDTask4ArtifactV1;
 
 export type StrategicCohortConflictInterfaceV1 = Readonly<{
   conflictKinds: readonly StrategicReservationConflictKindV1[];

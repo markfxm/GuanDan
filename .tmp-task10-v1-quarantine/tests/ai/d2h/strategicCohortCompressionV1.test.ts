@@ -1,4 +1,5 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
+import { canonicalHash } from "../../../src/ai/d2h/strategicEvidenceCanonicalSerializer";
 import {
   HARD_MAX_COHORT_COUNT_V1,
   type NormalizedRouteCohortMemberDraftV1,
@@ -10,11 +11,13 @@ import {
 } from "../../../src/ai/d2h/strategicCohortCompressionV1Contracts";
 import {
   compressHierarchicalStrategicCohortsV1,
+  materializePhaseDTask4V1,
   normalizeAdmittedStrategicRoutesV1,
 } from
   "../../../src/ai/d2h/strategicCohortCompressionV1";
 import {
   makeCommonBindingMismatchFixture,
+  makeBrokenClosureReferenceFixture,
   makeCorruptedSourceWithInvalidPhaseDEvidenceBudgetFixture,
   makeCrossPairedC2EndpointFixture,
   makeDamagedEmptyC2BudgetExecutionFixture,
@@ -570,6 +573,371 @@ describe("Strategic cohort compression V1 route normalization drafts", () => {
   });
 });
 
+describe("Strategic cohort compression V1 Task 4 closure and occurrence universe", () => {
+  it("includes explicitly reachable conflict closure references", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const result = materializePhaseDTask4V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    });
+
+    expect(result.task4Status).toBe("COMPLETE");
+    expect(result.routeRelevantConflictClosures).not.toBeNull();
+    const closure = result.routeRelevantConflictClosures?.find((candidate) =>
+      candidate.conflictFactIds.length > 0);
+    expect(closure).toBeDefined();
+    expect(closure?.closureCompleteness).toBe("COMPLETE");
+    expect(closure?.conflictFactIds.length).toBeGreaterThan(0);
+    expect(closure?.traversedReferenceEdges.length).toBeGreaterThan(0);
+    const sourceRoute = admission.canonicalSourceBindingManifest.componentSources
+      .flatMap((component) => component.routeArtifact.routeCandidates ?? [])
+      .find((route) => route.routeId === closure?.routeId);
+    expect(sourceRoute).toBeDefined();
+    expect(closure?.conflictFactIds).toEqual(
+      expect.arrayContaining([...(sourceRoute?.unresolvedConflicts ?? [])]),
+    );
+    expect(closure?.branchLocalResolutionWitnesses.map((witness) => witness.conflictFactId))
+      .toEqual(expect.arrayContaining([...(sourceRoute?.unresolvedConflicts ?? [])]));
+  });
+
+  it("excludes a globally adjacent conflict without an explicit reference path", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const result = materializePhaseDTask4V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    });
+
+    expect(result.task4Status).toBe("COMPLETE");
+    const closure = result.routeRelevantConflictClosures?.[0];
+    expect(closure).toBeDefined();
+    const globallyAdjacent = admission.canonicalSourceBindingManifest.componentSources
+      .flatMap((component) => component.reservationArtifact.conflictFacts)
+      .map((conflict) => conflict.conflictFactId)
+      .filter((conflictId) => !closure?.conflictFactIds.includes(conflictId));
+    expect(globallyAdjacent.length).toBeGreaterThan(0);
+    expect(closure?.conflictFactIds).not.toEqual(expect.arrayContaining(globallyAdjacent));
+  });
+
+  it("publishes route-scoped physical, wildcard, family/member, reservation, conflict, and endpoint keys", () => {
+    const admission = admittedOf(makeWildcardPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const result = materializePhaseDTask4V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    });
+
+    expect(result.task4Status).toBe("COMPLETE");
+    const universe = result.occurrenceUniverse;
+    expect(universe).not.toBeNull();
+    expect(universe?.sourceRouteIds.length).toBeGreaterThan(0);
+    expect(universe?.physicalOccurrenceKeys.length).toBeGreaterThan(0);
+    expect(universe?.wildcardOccurrenceKeys.length).toBeGreaterThan(0);
+    expect(universe?.familyMemberOccurrenceKeys.length).toBeGreaterThan(0);
+    expect(universe?.reservationOccurrenceKeys.length).toBeGreaterThan(0);
+    expect(universe?.conflictOccurrenceKeys.length).toBeGreaterThan(0);
+    expect(universe?.endpointOccurrenceKeys.length).toBeGreaterThan(0);
+    const relevantReservations = new Set(
+      result.routeRelevantConflictClosures?.flatMap((closure) => closure.reservationFactIds) ?? [],
+    );
+    const allReservations = admission.canonicalSourceBindingManifest.componentSources
+      .flatMap((component) => component.reservationArtifact.reservationFacts)
+      .map((fact) => fact.reservationFactId);
+    const occurrenceReservations = new Set(universe?.reservationOccurrenceKeys.map((key) => key[1]));
+    expect(occurrenceReservations).toEqual(relevantReservations);
+    expect([...relevantReservations].every((reservationFactId) => allReservations.includes(reservationFactId)))
+      .toBe(true);
+  });
+
+  it("keeps the same physical card distinct across routes", () => {
+    const admission = admittedOf(makeWildcardPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const result = materializePhaseDTask4V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    });
+
+    expect(result.task4Status).toBe("COMPLETE");
+    const physicalOccurrences = result.occurrenceUniverse?.physicalOccurrenceKeys ?? [];
+    const repeated = [...new Map(physicalOccurrences.map((key) => [
+      key[1], physicalOccurrences.filter((candidate) => candidate[1] === key[1]),
+    ])).values()].find((keys) => keys.length > 1);
+    expect(repeated).toBeDefined();
+    expect(new Set(repeated?.map((key) => key[0])).size).toBe(repeated?.length);
+  });
+
+  it("keeps wildcard allocation variants distinct and preserves AND endpoints without products", () => {
+    const admission = admittedOf(makeWildcardPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const result = materializePhaseDTask4V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    });
+
+    expect(result.task4Status).toBe("COMPLETE");
+    const variants = result.occurrenceUniverse?.wildcardOccurrenceKeys
+      .filter((key) => key[1] === "H2-1");
+    expect(new Set(variants?.map((key) => key.join("|"))).size).toBe(variants?.length);
+    expect(new Set(variants?.map((key) => key[2])).size).toBeGreaterThan(1);
+    const expectedEndpointKeys = admission.canonicalSourceBindingManifest.multiComponentArtifact
+      .andEndpointReferences?.flatMap((endpoint) => endpoint.routeReferences.map((reference) => [
+        reference.routeId,
+        endpoint.componentEndpointId,
+      ] as const)).sort((left, right) => compareTextTuple(left, right)) ?? [];
+    expect(result.occurrenceUniverse?.endpointOccurrenceKeys).toEqual(expectedEndpointKeys);
+  });
+
+  it("keeps repeated family/member lineage route-scoped", () => {
+    const admission = admittedOf(makeWildcardPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const result = materializePhaseDTask4V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    });
+
+    expect(result.task4Status).toBe("COMPLETE");
+    const keys = result.occurrenceUniverse?.familyMemberOccurrenceKeys ?? [];
+    const repeated = [...new Map(keys.map((key) => [
+      `${key[1]}|${key[2]}`,
+      keys.filter((candidate) => candidate[1] === key[1] && candidate[2] === key[2]),
+    ])).values()].find((entries) => entries.length > 1);
+    expect(repeated).toBeDefined();
+    expect(new Set(repeated?.map((key) => key[0])).size).toBe(repeated?.length);
+  });
+
+  it("is deterministic under component source order reversal", () => {
+    const canonicalInput = makeValidPhaseDAdmissionInput();
+    const canonicalAdmission = admittedOf(canonicalInput);
+    const reversedAdmission = admittedOf(makeReversedComponentSourceInput(canonicalInput));
+    const canonical = materializePhaseDTask4V1({
+      admission: canonicalAdmission,
+      normalizedMemberDrafts: normalizedOf(canonicalAdmission).normalizedMemberDrafts,
+    });
+    const reversed = materializePhaseDTask4V1({
+      admission: reversedAdmission,
+      normalizedMemberDrafts: normalizedOf(reversedAdmission).normalizedMemberDrafts,
+    });
+
+    expect(reversed).toEqual(canonical);
+  });
+
+  it("fails closed without partial Task 4 payload for a broken closure reference", () => {
+    const admission = makeBrokenClosureReferenceFixture();
+    const normalized = normalizedOf(admission);
+    const result = materializePhaseDTask4V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    });
+
+    expect(result.task4Status).toBe("INCONCLUSIVE");
+    expect(result.routeRelevantConflictClosures).toBeNull();
+    expect(result.occurrenceUniverse).toBeNull();
+    expect(result.reasonCodes).toContain("INCOMPLETE_CONFLICT_CLOSURE");
+  });
+
+  it("rejects a contradictory reservation fact hash before closure publication", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const component = admission.canonicalSourceBindingManifest.componentSources[0];
+    const fact = component?.reservationArtifact.reservationFacts[0];
+    if (component === undefined || fact === undefined) throw new Error("Missing reservation fact fixture");
+    const tamperedAdmission: PhaseDSourceAdmissionSuccessV1 = {
+      ...admission,
+      canonicalSourceBindingManifest: {
+        ...admission.canonicalSourceBindingManifest,
+        componentSources: [{
+          ...component,
+          reservationArtifact: {
+            ...component.reservationArtifact,
+            reservationFacts: [{ ...fact, reservationHash: "forged-reservation-hash" },
+              ...component.reservationArtifact.reservationFacts.slice(1)],
+          },
+        }, ...admission.canonicalSourceBindingManifest.componentSources.slice(1)],
+      },
+    };
+    const result = materializePhaseDTask4V1({
+      admission: tamperedAdmission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    });
+
+    expect(result.task4Status).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("SOURCE_HASH_PAYLOAD_MISMATCH");
+    expect(result.routeRelevantConflictClosures).toBeNull();
+    expect(result.occurrenceUniverse).toBeNull();
+  });
+
+  it("rejects a rehashed manifest with a mismatched C2 artifact binding", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const manifest = admission.canonicalSourceBindingManifest;
+    const { manifestHash: _manifestHash, ...manifestPayload } = manifest;
+    const changedManifestPayload = {
+      ...manifestPayload,
+      multiComponentArtifactHash: "forged-c2-artifact-hash",
+    };
+    const changedManifest = {
+      ...changedManifestPayload,
+      manifestHash: canonicalHash(changedManifestPayload),
+    };
+    const { admissionHash: _admissionHash, ...admissionPayload } = admission;
+    const changedAdmissionPayload = {
+      ...admissionPayload,
+      canonicalSourceBindingManifest: changedManifest,
+      sourceBindingManifestHash: changedManifest.manifestHash,
+    };
+    const changedAdmission: PhaseDSourceAdmissionSuccessV1 = {
+      ...changedAdmissionPayload,
+      admissionHash: canonicalHash(changedAdmissionPayload),
+    };
+    const result = materializePhaseDTask4V1({
+      admission: changedAdmission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    });
+
+    expect(result.task4Status).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("SOURCE_HASH_PAYLOAD_MISMATCH");
+    expect(result.routeRelevantConflictClosures).toBeNull();
+    expect(result.occurrenceUniverse).toBeNull();
+  });
+
+  it("rejects a C2 endpoint whose source binding is cross-paired", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const manifest = admission.canonicalSourceBindingManifest;
+    const c2 = manifest.multiComponentArtifact;
+    const endpoints = c2.andEndpointReferences!;
+    if (endpoints.length < 2) throw new Error("Missing two-component endpoint fixture");
+    const changedEndpoints = endpoints.map((endpoint, index) => {
+      const { endpointHash: _endpointHash, ...endpointPayload } = endpoint;
+      const changedPayload = {
+        ...endpointPayload,
+        sourceArtifactHash: endpoints[(index + 1) % endpoints.length].sourceArtifactHash,
+      };
+      return { ...changedPayload, endpointHash: canonicalHash(changedPayload) };
+    });
+    const { artifactHash: _c2ArtifactHash, ...c2Payload } = c2;
+    const changedC2Payload = { ...c2Payload, andEndpointReferences: changedEndpoints };
+    const changedC2 = {
+      ...changedC2Payload,
+      artifactHash: canonicalHash(changedC2Payload),
+    };
+    const { manifestHash: _manifestHash, ...manifestPayload } = manifest;
+    const changedManifestPayload = {
+      ...manifestPayload,
+      multiComponentArtifact: changedC2,
+      multiComponentArtifactHash: changedC2.artifactHash,
+    };
+    const changedManifest = {
+      ...changedManifestPayload,
+      manifestHash: canonicalHash(changedManifestPayload),
+    };
+    const { admissionHash: _admissionHash, ...admissionPayload } = admission;
+    const changedAdmissionPayload = {
+      ...admissionPayload,
+      canonicalSourceBindingManifest: changedManifest,
+      sourceBindingManifestHash: changedManifest.manifestHash,
+    };
+    const changedAdmission: PhaseDSourceAdmissionSuccessV1 = {
+      ...changedAdmissionPayload,
+      admissionHash: canonicalHash(changedAdmissionPayload),
+    };
+    const result = materializePhaseDTask4V1({
+      admission: changedAdmission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    });
+
+    expect(result.task4Status).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("SOURCE_BINDING_MISMATCH");
+    expect(result.routeRelevantConflictClosures).toBeNull();
+    expect(result.occurrenceUniverse).toBeNull();
+  });
+
+  it("rejects a route-scoped occurrence key with contradictory lineage payload", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const draft = normalized.normalizedMemberDrafts[0];
+    const physicalLineageIndex = draft.task3MemberLocalLineage.findIndex((entry) => entry.kind === "PHYSICAL");
+    if (physicalLineageIndex < 0) throw new Error("Missing physical lineage fixture");
+    const physicalLineage = draft.task3MemberLocalLineage[physicalLineageIndex];
+    if (physicalLineage.kind !== "PHYSICAL") throw new Error("Missing physical lineage fixture");
+    const { occurrenceHash: _occurrenceHash, ...occurrencePayload } = physicalLineage.occurrence;
+    const changedOccurrencePayload = {
+      ...occurrencePayload,
+      canonicalRolePosition: `${physicalLineage.occurrence.canonicalRolePosition}:contradictory`,
+    };
+    const changedLineage = {
+      ...physicalLineage,
+      occurrence: {
+        ...changedOccurrencePayload,
+        occurrenceHash: canonicalHash(changedOccurrencePayload),
+      },
+    };
+    const { normalizationHash: _normalizationHash, ...draftPayload } = draft;
+    const changedDraftPayload = {
+      ...draftPayload,
+      task3MemberLocalLineage: draft.task3MemberLocalLineage.map((entry, index) =>
+        index === physicalLineageIndex ? changedLineage : entry),
+    };
+    const changedDraft = {
+      ...changedDraftPayload,
+      normalizationHash: canonicalHash(changedDraftPayload),
+    };
+    const changedDrafts = normalized.normalizedMemberDrafts.map((candidate) =>
+      candidate === draft ? changedDraft : candidate);
+    const result = materializePhaseDTask4V1({
+      admission,
+      normalizedMemberDrafts: changedDrafts,
+    });
+
+    expect(result.task4Status).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("OCCURRENCE_KEY_PAYLOAD_CONFLICT");
+    expect(result.routeRelevantConflictClosures).toBeNull();
+    expect(result.occurrenceUniverse).toBeNull();
+  });
+
+  it("fails closed when a normalized draft is not present in the admitted route universe", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const draft = normalized.normalizedMemberDrafts[0];
+    const { normalizationHash: _normalizationHash, ...draftPayload } = draft;
+    const changedDraftPayload = {
+      ...draftPayload,
+      routeId: `${draft.routeId}:unbound`,
+    };
+    const changedDraft = {
+      ...changedDraftPayload,
+      normalizationHash: canonicalHash(changedDraftPayload),
+    };
+    const result = materializePhaseDTask4V1({
+      admission,
+      normalizedMemberDrafts: [...normalized.normalizedMemberDrafts, changedDraft],
+    });
+
+    expect(result.task4Status).toBe("INCONCLUSIVE");
+    expect(result.reasonCodes).toContain("INCOMPLETE_LINEAGE_COVERAGE");
+    expect(result.routeRelevantConflictClosures).toBeNull();
+    expect(result.occurrenceUniverse).toBeNull();
+  });
+
+  it("keeps Task 4 output free of Task 5 materialization fields", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const result = materializePhaseDTask4V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    });
+
+    expect(result).not.toHaveProperty("memberEnvelopeHash");
+    expect(result).not.toHaveProperty("conflictInterface");
+    expect(result).not.toHaveProperty("endpointInterface");
+    expect(result).not.toHaveProperty("coverageManifest");
+    expect(result).not.toHaveProperty("cohorts");
+    expect(result).not.toHaveProperty("routeToCohortMappings");
+    expect(result).not.toHaveProperty("membershipProofs");
+  });
+});
+
 function compareIdentityTuple(
   left: readonly [string, string, string],
   right: readonly [string, string, string],
@@ -577,6 +945,17 @@ function compareIdentityTuple(
   for (let index = 0; index < left.length; index += 1) {
     if (left[index] < right[index]) return -1;
     if (left[index] > right[index]) return 1;
+  }
+  return 0;
+}
+
+function compareTextTuple(
+  left: readonly string[],
+  right: readonly string[],
+): number {
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const compared = (left[index] ?? "").localeCompare(right[index] ?? "");
+    if (compared !== 0) return compared;
   }
   return 0;
 }
