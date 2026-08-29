@@ -4,6 +4,7 @@ import {
   HARD_MAX_COHORT_COUNT_V1,
   type NormalizedRouteCohortMemberDraftV1,
   type PhaseDComponentSourceBindingV1,
+  type PhaseDTask4ArtifactV1,
   type PhaseDSourceAdmissionSuccessV1,
   type RouteCohortMemberEnvelopeV1,
   type StrategicCohortCompressionEvidenceBudgetV1,
@@ -11,6 +12,11 @@ import {
 } from "../../../src/ai/d2h/strategicCohortCompressionV1Contracts";
 import {
   compressHierarchicalStrategicCohortsV1,
+  applyHardCohortGateV1,
+  __task5PostDerivationHardGateV1,
+  __validateTask5PublicationForTest,
+  __task5EndpointIndexForTest,
+  materializePhaseDTask5V1,
   materializePhaseDTask4V1,
   normalizeAdmittedStrategicRoutesV1,
 } from
@@ -38,6 +44,7 @@ import {
   makeThreeComponentPhaseDAdmissionInput,
   makeValidPhaseDAdmissionInput,
   makeWildcardPhaseDAdmissionInput,
+  makeWildcardPhaseDAdmissionInputWithWildcard,
   makeWrongComponentABBindingFixture,
 } from "./strategicCohortCompressionV1.fixtures";
 
@@ -964,6 +971,775 @@ describe("Strategic cohort compression V1 Task 4 closure and occurrence universe
   });
 });
 
+describe("Strategic cohort compression V1 Task 5 cohort materialization", () => {
+  it("accepts 49 distinct canonical cohort keys regardless of insertion order", () => {
+    const keys = Array.from({ length: 49 }, (_, ordinal) => canonicalHash({
+      kind: "task5-hard-gate-fixture",
+      ordinal,
+    }));
+    const canonical = applyHardCohortGateV1([...keys, keys[0]!]);
+    const reversed = applyHardCohortGateV1([...keys].reverse());
+
+    expect(canonical).toEqual({
+      gateStatus: "COMPLETE",
+      distinctCohortCount: 49,
+      observedDistinctCohortLowerBound: 49,
+      exhausted: false,
+    });
+    expect(reversed).toEqual(canonical);
+  });
+
+  it("fails closed at the 50th distinct canonical cohort key regardless of insertion order", () => {
+    const keys = Array.from({ length: 50 }, (_, ordinal) => canonicalHash({
+      kind: "task5-hard-gate-fixture",
+      ordinal,
+    }));
+    const canonical = applyHardCohortGateV1(keys);
+    const reversed = applyHardCohortGateV1([...keys].reverse());
+
+    expect(canonical).toEqual({
+      gateStatus: "INCONCLUSIVE",
+      distinctCohortCount: 0,
+      observedDistinctCohortLowerBound: 50,
+      exhausted: true,
+    });
+    expect(reversed).toEqual(canonical);
+  });
+
+  it("uses the real post-interface aggregation seam for atomic 50th publication", () => {
+    const keys = Array.from({ length: 50 }, (_, ordinal) => canonicalHash({
+      kind: "task5-post-interface-hard-gate-fixture",
+      ordinal,
+    }));
+    const aggregation = __task5PostDerivationHardGateV1(keys);
+    expect(aggregation.gate.gateStatus).toBe("INCONCLUSIVE");
+    expect(aggregation.gate.observedDistinctCohortLowerBound).toBe(50);
+  });
+
+  it("materializes final member envelopes, exact mappings, proofs, and route-scoped coverage", () => {
+    const admission = admittedOf(makeWildcardPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    });
+    expect(task4.task4Status).toBe("COMPLETE");
+
+    const result = materializePhaseDTask5V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+      task4,
+      evidenceBudget: {
+        maxMemberEnvelopeCount: 100,
+        maxResourceRoleSlotCount: 1000,
+        maxConflictClosureEdgeCount: 1000,
+        maxRouteMappingCount: 100,
+        maxEquivalenceProofCount: 100,
+        maxLineageOccurrenceWitnessCount: 5000,
+      },
+    });
+
+    expect(result.compressionStatus).toBe("COMPLETE");
+    expect(result.memberEnvelopes).toHaveLength(admission.inputRouteCount);
+    expect(result.routeToCohortMappings).toHaveLength(admission.inputRouteCount);
+    expect(result.equivalenceProofs).toHaveLength(admission.inputRouteCount);
+    expect(result.coverageManifest?.coveredRouteCount).toBe(admission.inputRouteCount);
+    expect(result.cohortCount).toBeGreaterThan(0);
+    expect(result.memberEnvelopes?.every((envelope) =>
+      envelope.normalizationHash !== envelope.memberEnvelopeHash)).toBe(true);
+    expect(result.equivalenceProofs?.every((proof) => result.routeToCohortMappings
+      ?.some((mapping) => mapping.mappingHash === proof.mappingHash
+        && mapping.memberEnvelopeHash === proof.memberEnvelopeHash))).toBe(true);
+    expect(result.coverageManifest?.inputPhysicalOccurrenceCount).toBeGreaterThan(0);
+    expect(result.coverageManifest?.inputWildcardOccurrenceCount).toBeGreaterThan(0);
+    expect(result.coverageManifest?.inputFamilyMemberOccurrenceCount).toBeGreaterThan(0);
+    expect(result.coverageManifest?.inputReservationOccurrenceCount).toBeGreaterThan(0);
+    expect(result.coverageManifest?.inputConflictOccurrenceCount).toBeGreaterThan(0);
+    expect(result.coverageManifest?.inputEndpointOccurrenceCount).toBeGreaterThan(0);
+    expect(result.coverageManifest?.coverageWitnesses.length).toBeGreaterThan(0);
+    const mappings = result.routeToCohortMappings ?? [];
+    expect(new Set(mappings.map((mapping) => mapping.memberEnvelopeHash)).size).toBe(mappings.length);
+    for (const mapping of mappings) {
+      const { mappingHash, ...mappingPayload } = mapping;
+      expect(mappingHash).toBe(canonicalHash(mappingPayload));
+      expect(result.memberEnvelopes?.some((envelope) => envelope.memberEnvelopeHash === mapping.memberEnvelopeHash
+        && envelope.routeId === mapping.routeId && envelope.routeHash === mapping.routeHash)).toBe(true);
+    }
+    const proofs = result.equivalenceProofs ?? [];
+    expect(new Set(proofs.map((proof) => proof.memberEnvelopeHash)).size).toBe(proofs.length);
+    for (const proof of proofs) {
+      const { proofHash, ...proofPayload } = proof;
+      expect(proofHash).toBe(canonicalHash(proofPayload));
+      expect(mappings.some((mapping) => mapping.mappingHash === proof.mappingHash
+        && mapping.cohortInterfaceHash === proof.cohortInterfaceHash
+        && mapping.memberEnvelopeHash === proof.memberEnvelopeHash)).toBe(true);
+    }
+    for (const witness of result.coverageManifest?.coverageWitnesses ?? []) {
+      expect(mappings.some((mapping) => mapping.mappingHash === witness.mappingHash
+        && mapping.memberEnvelopeHash === witness.memberEnvelopeHash)).toBe(true);
+      expect(proofs.some((proof) => proof.proofHash === witness.proofHash
+        && proof.memberEnvelopeHash === witness.memberEnvelopeHash
+        && proof.mappingHash === witness.mappingHash)).toBe(true);
+    }
+  });
+
+  it("fails closed when the Task 4 occurrence universe payload is contradictory", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    if (task4.task4Status !== "COMPLETE" || task4.occurrenceUniverse === null) throw new Error("Expected complete Task 4");
+    const forgedUniverse = {
+      ...task4.occurrenceUniverse,
+      sourceRouteIds: [...task4.occurrenceUniverse.sourceRouteIds, "unbound-route"],
+    };
+    const forgedTask4 = {
+      ...task4,
+      occurrenceUniverse: forgedUniverse,
+    };
+    const result = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts, task4: forgedTask4,
+      evidenceBudget: phaseDTask5Budget() });
+    expect(result.compressionStatus).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("SOURCE_HASH_PAYLOAD_MISMATCH");
+    expect(result.memberEnvelopes).toBeNull();
+    expect(result.coverageManifest).toBeNull();
+  });
+
+  it("returns inconclusive without a partial artifact when an occurrence is missing", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    if (task4.task4Status !== "COMPLETE" || task4.occurrenceUniverse === null) throw new Error("Expected complete Task 4");
+    const { occurrenceUniverseHash: _occurrenceUniverseHash, ...universePayload } = task4.occurrenceUniverse;
+    const forgedUniversePayload = {
+      ...universePayload,
+      endpointOccurrenceKeys: universePayload.endpointOccurrenceKeys.slice(1),
+    };
+    const forgedUniverse = {
+      ...forgedUniversePayload,
+      occurrenceUniverseHash: canonicalHash(forgedUniversePayload),
+    };
+    const { artifactHash: _artifactHash, ...task4Payload } = task4;
+    const forgedTask4Payload = { ...task4Payload, occurrenceUniverse: forgedUniverse };
+    const forgedTask4 = { ...forgedTask4Payload, artifactHash: canonicalHash(forgedTask4Payload) };
+    const result = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts, task4: forgedTask4,
+      evidenceBudget: phaseDTask5Budget() });
+    expect(result.compressionStatus).toBe("INCONCLUSIVE");
+    expect(result.reasonCodes).toContain("INCOMPLETE_LINEAGE_COVERAGE");
+    expect(result.memberEnvelopes).toBeNull();
+    expect(result.cohorts).toBeNull();
+    expect(result.coverageManifest).toBeNull();
+  });
+
+  it("keeps exact cards member-local while grouping equal four-part interfaces", () => {
+    const admission = admittedOf(makeSameRankDifferentCopyPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    const result = materializePhaseDTask5V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+      task4,
+      evidenceBudget: phaseDTask5Budget(),
+    });
+
+    expect(result.compressionStatus).toBe("COMPLETE");
+    expect(result.cohortCount).toBe(1);
+    expect(result.memberEnvelopes).toHaveLength(2);
+    expect(result.memberEnvelopes?.map((envelope) => envelope.physicalLineageOccurrences
+      .map((occurrence) => occurrence.physicalCardId).sort().join(",")).sort())
+      .toEqual(["C9-1,S9-1", "C9-2,S9-2"]);
+  });
+
+  it("derives a different structural cohort key from real strength and level facts", () => {
+    const strengthVariant = materializeTask5Fixture(makeSameRankDifferentCopyPhaseDAdmissionInput());
+    const levelVariant = materializeTask5Fixture(makeWildcardPhaseDAdmissionInput());
+    const base = materializeTask5Fixture(makeValidPhaseDAdmissionInput());
+    expect(strengthVariant.compressionStatus).toBe("COMPLETE");
+    expect(levelVariant.compressionStatus).toBe("COMPLETE");
+    expect(base.compressionStatus).toBe("COMPLETE");
+    expect(strengthVariant.cohortInterfaces?.map((value) => value.structuralInterface))
+      .not.toEqual(base.cohortInterfaces?.map((value) => value.structuralInterface));
+    expect(levelVariant.cohortInterfaces?.map((value) => value.structuralInterface))
+      .not.toEqual(base.cohortInterfaces?.map((value) => value.structuralInterface));
+    expect(strengthVariant.cohortInterfaces?.map((value) => value.cohortInterfaceHash))
+      .not.toEqual(base.cohortInterfaces?.map((value) => value.cohortInterfaceHash));
+    expect(levelVariant.cohortInterfaces?.map((value) => value.cohortInterfaceHash))
+      .not.toEqual(base.cohortInterfaces?.map((value) => value.cohortInterfaceHash));
+  });
+
+  it("derives distinct real resource, conflict, and endpoint interfaces", () => {
+    const base = materializeTask5Fixture(makeValidPhaseDAdmissionInput());
+    const wildcard = materializeTask5Fixture(makeWildcardPhaseDAdmissionInput());
+    expect(base.compressionStatus).toBe("COMPLETE");
+    expect(wildcard.compressionStatus).toBe("COMPLETE");
+    expect(wildcard.cohortInterfaces?.map((value) => value.resourceInterface))
+      .not.toEqual(base.cohortInterfaces?.map((value) => value.resourceInterface));
+    expect(wildcard.cohortInterfaces?.map((value) => value.conflictInterface))
+      .not.toEqual(base.cohortInterfaces?.map((value) => value.conflictInterface));
+    expect(wildcard.cohortInterfaces?.map((value) => value.conflictInterface.alternativeAllocationInterfaces))
+      .not.toEqual(base.cohortInterfaces?.map((value) => value.conflictInterface.alternativeAllocationInterfaces));
+    expect(wildcard.cohortInterfaces?.flatMap((value) => value.conflictInterface.routeClaimIncidenceVector))
+      .not.toEqual(base.cohortInterfaces?.flatMap((value) => value.conflictInterface.routeClaimIncidenceVector));
+    expect(wildcard.cohortInterfaces?.map((value) => value.endpointInterface))
+      .not.toEqual(base.cohortInterfaces?.map((value) => value.endpointInterface));
+    for (const cohortInterface of wildcard.cohortInterfaces ?? []) {
+      const serialized = JSON.stringify(cohortInterface.conflictInterface);
+      expect(serialized).not.toContain("allocationVariantHash");
+      expect(serialized).not.toContain("wildcardCardId");
+    }
+  });
+
+  it("derives claimant roles from route-relevant conflict claimants, not only current route claims", () => {
+    const input = makeValidPhaseDAdmissionInput();
+    const admission = admittedOf(input);
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    const result = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts, task4, evidenceBudget: phaseDTask5Budget() });
+    expect(result.compressionStatus).toBe("COMPLETE");
+    const envelope = result.memberEnvelopes?.[0];
+    const component = admission.canonicalSourceBindingManifest.componentSources
+      .find((candidate) => candidate.resourceComponentId === envelope?.resourceComponentId);
+    const closure = task4.routeRelevantConflictClosures?.find((candidate) =>
+      candidate.routeId === envelope?.routeId && candidate.routeHash === envelope?.routeHash);
+    if (envelope === undefined || component === undefined || closure === undefined) {
+      throw new Error("Expected route-relevant conflict evidence");
+    }
+    const claims = component.reservationArtifact.reservationFacts.flatMap((fact) => fact.claims);
+    const alternatives = new Map(component.reservationArtifact.reservationAlternatives
+      .map((alternative) => [alternative.alternativeReservationFactId, alternative] as const));
+    const claimsById = new Map(claims.map((claim) => [claim.claimId, claim] as const));
+    const conflicts = new Map(component.reservationArtifact.conflictFacts
+      .map((conflict) => [conflict.conflictFactId, conflict] as const));
+    const expected = new Set<string>();
+    for (const conflictId of closure.conflictFactIds) {
+      const conflict = conflicts.get(conflictId);
+      if (conflict === undefined) throw new Error("Missing conflict claimant fixture");
+      for (const alternativeId of conflict.alternativeReservationFactIds) {
+        const alternative = alternatives.get(alternativeId);
+        const claim = alternative === undefined ? undefined : claimsById.get(alternative.claimId);
+        if (claim === undefined) throw new Error("Missing conflict claimant claim fixture");
+        claim.claimRoles.forEach((role) => expected.add(role));
+      }
+    }
+    expect(envelope.conflictInterface.claimantRoleVector).toEqual([...expected].sort());
+  });
+
+  it("keeps branch-local incidence canonical when exact alternative identities differ", () => {
+    const materialize = (mode: "VALID_BRANCH" | "VALID_BRANCH_A2") => {
+      const fixture = makeCrossConflictWitnessBindingFixture(mode);
+      const task4 = materializePhaseDTask4V1({ admission: fixture.admission,
+        normalizedMemberDrafts: fixture.normalizedMemberDrafts });
+      const result = materializePhaseDTask5V1({ admission: fixture.admission,
+        normalizedMemberDrafts: fixture.normalizedMemberDrafts, task4, evidenceBudget: phaseDTask5Budget() });
+      return { task4, result };
+    };
+    const first = materialize("VALID_BRANCH");
+    const second = materialize("VALID_BRANCH_A2");
+    expect(first.task4.task4Status).toBe("COMPLETE");
+    expect(second.task4.task4Status).toBe("COMPLETE");
+    expect(first.result.compressionStatus).toBe("COMPLETE");
+    expect(second.result.compressionStatus).toBe("COMPLETE");
+    expect(first.result.memberEnvelopes?.[0]?.conflictInterface.routeClaimIncidenceVector)
+      .toEqual(second.result.memberEnvelopes?.[0]?.conflictInterface.routeClaimIncidenceVector);
+  });
+
+  it("changes branch-local incidence when a different canonical alternative semantics is selected", () => {
+    const materialize = (mode: "VALID_BRANCH" | "VALID_BRANCH_BOMB") => {
+      const fixture = makeCrossConflictWitnessBindingFixture(mode);
+      const task4 = materializePhaseDTask4V1({ admission: fixture.admission,
+        normalizedMemberDrafts: fixture.normalizedMemberDrafts });
+      const result = materializePhaseDTask5V1({ admission: fixture.admission,
+        normalizedMemberDrafts: fixture.normalizedMemberDrafts, task4, evidenceBudget: phaseDTask5Budget() });
+      return { task4, result };
+    };
+    const first = materialize("VALID_BRANCH");
+    const second = materialize("VALID_BRANCH_BOMB");
+    expect(first.task4.task4Status).toBe("COMPLETE");
+    expect(second.task4.task4Status).toBe("COMPLETE");
+    expect(first.result.compressionStatus).toBe("COMPLETE");
+    expect(second.result.compressionStatus).toBe("COMPLETE");
+    expect(first.result.memberEnvelopes?.[0]?.conflictInterface.routeClaimIncidenceVector)
+      .not.toEqual(second.result.memberEnvelopes?.[0]?.conflictInterface.routeClaimIncidenceVector);
+  });
+
+  it("keeps wildcard exact-card variants out of shared conflict and cohort interfaces", () => {
+    const first = materializeTask5Fixture(makeWildcardPhaseDAdmissionInputWithWildcard("H2-1"));
+    const second = materializeTask5Fixture(makeWildcardPhaseDAdmissionInputWithWildcard("H2-2"));
+    expect(first.compressionStatus).toBe("COMPLETE");
+    expect(second.compressionStatus).toBe("COMPLETE");
+    expect(second.cohortInterfaces).toEqual(first.cohortInterfaces);
+    expect(second.cohorts?.map((cohort) => cohort.cohortId))
+      .toEqual(first.cohorts?.map((cohort) => cohort.cohortId));
+    expect(second.memberEnvelopes?.map((envelope) => envelope.memberEnvelopeHash))
+      .not.toEqual(first.memberEnvelopes?.map((envelope) => envelope.memberEnvelopeHash));
+    expect(second.memberEnvelopes?.flatMap((envelope) => envelope.wildcardLineageOccurrences
+      .map((occurrence) => occurrence.wildcardCardId))).not.toEqual(
+        first.memberEnvelopes?.flatMap((envelope) => envelope.wildcardLineageOccurrences
+          .map((occurrence) => occurrence.wildcardCardId)),
+      );
+  });
+
+  it("indexes endpoint projections once per endpoint-route edge without retaining route payloads", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const index = __task5EndpointIndexForTest(admission);
+    const endpoints = admission.canonicalSourceBindingManifest.multiComponentArtifact.andEndpointReferences ?? [];
+    const expectedEdgeCount = endpoints.reduce((total, endpoint) => total + endpoint.routeReferences.length, 0);
+    expect(index.endpointRouteEdgeCount).toBe(expectedEdgeCount);
+    expect(index.endpointProjectionByHashCount).toBe(endpoints.length);
+    for (const projections of index.endpointProjectionsByRoute.values()) {
+      for (const projection of projections) {
+        expect(projection).not.toHaveProperty("routeReferences");
+        expect(projection).toHaveProperty("dependencyArity");
+      }
+    }
+  });
+
+  it("keeps canonical cohort evidence identical when component sources are reversed", () => {
+    const materialize = (input: Parameters<typeof compressHierarchicalStrategicCohortsV1>[0]) => {
+      const admission = admittedOf(input);
+      const normalized = normalizedOf(admission);
+      const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+      return materializePhaseDTask5V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+        task4, evidenceBudget: phaseDTask5Budget() });
+    };
+    const canonical = materialize(makeValidPhaseDAdmissionInput());
+    const reversed = materialize(makeReversedComponentSourceInput(makeValidPhaseDAdmissionInput()));
+
+    expect(reversed.compressionStatus).toBe("COMPLETE");
+    expect(reversed.cohortInterfaces).toEqual(canonical.cohortInterfaces);
+    expect(reversed.cohorts?.map((cohort) => cohort.cohortId))
+      .toEqual(canonical.cohorts?.map((cohort) => cohort.cohortId));
+  });
+
+  it("fails closed for adversarial mapping publication evidence", () => {
+    const evidence = publicationEvidenceOf();
+    const mapping = evidence.mappings[0]!;
+    const originalEnvelope = evidence.envelopes[0]!;
+    const { memberEnvelopeHash: _memberEnvelopeHash, ...envelopePayload } = originalEnvelope;
+    const conflictingEnvelopePayload = { ...envelopePayload, routeHash: `${originalEnvelope.routeHash}:other` };
+    const conflictingEnvelope = {
+      ...conflictingEnvelopePayload,
+      memberEnvelopeHash: canonicalHash(conflictingEnvelopePayload),
+    };
+    expect(__validateTask5PublicationForTest(
+      [originalEnvelope, conflictingEnvelope, ...evidence.envelopes.slice(1)],
+      evidence.mappings,
+      evidence.proofs,
+      evidence.cohortInterfaces,
+    )).toEqual({ status: "REJECTED", reason: "ROUTE_ID_HASH_CONFLICT" });
+
+    const duplicate = __validateTask5PublicationForTest(
+      evidence.envelopes,
+      [...evidence.mappings, mapping],
+      evidence.proofs,
+      evidence.cohortInterfaces,
+    );
+    expect(duplicate).toEqual({ status: "REJECTED", reason: "MEMBER_ENVELOPE_HASH_CONFLICT" });
+
+    const missing = __validateTask5PublicationForTest(
+      evidence.envelopes,
+      evidence.mappings.slice(1),
+      evidence.proofs,
+      evidence.cohortInterfaces,
+    );
+    expect(missing).toEqual({ status: "INCONCLUSIVE", reason: "INCOMPLETE_ROUTE_MAPPING" });
+
+    const wrongMemberEnvelope = { ...mapping, memberEnvelopeHash: "wrong-member-envelope",
+      mappingHash: canonicalHash({ ...mapping, memberEnvelopeHash: "wrong-member-envelope", mappingHash: undefined }) };
+    expect(__validateTask5PublicationForTest(evidence.envelopes, [wrongMemberEnvelope, ...evidence.mappings.slice(1)],
+      evidence.proofs, evidence.cohortInterfaces)).toEqual({ status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" });
+
+    const wrongCohortIdPayload = { ...mapping, cohortId: "wrong-cohort" };
+    const wrongCohortId = { ...wrongCohortIdPayload, mappingHash: canonicalHash(wrongCohortIdPayload) };
+    expect(__validateTask5PublicationForTest(evidence.envelopes, [wrongCohortId, ...evidence.mappings.slice(1)],
+      evidence.proofs, evidence.cohortInterfaces)).toEqual({ status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" });
+
+    const wrongCohortInterfacePayload = { ...mapping, cohortInterfaceHash: "wrong-interface" };
+    const wrongCohortInterface = { ...wrongCohortInterfacePayload, mappingHash: canonicalHash(wrongCohortInterfacePayload) };
+    expect(__validateTask5PublicationForTest(evidence.envelopes, [wrongCohortInterface, ...evidence.mappings.slice(1)],
+      evidence.proofs, evidence.cohortInterfaces)).toEqual({ status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" });
+
+    const wrongMappingHash = { ...mapping, mappingHash: "wrong-mapping-hash" };
+    expect(__validateTask5PublicationForTest(evidence.envelopes, [wrongMappingHash, ...evidence.mappings.slice(1)],
+      evidence.proofs, evidence.cohortInterfaces)).toEqual({ status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" });
+  });
+
+  it("fails closed for adversarial membership proof evidence", () => {
+    const evidence = publicationEvidenceOf();
+    const proof = evidence.proofs[0]!;
+    const duplicate = __validateTask5PublicationForTest(evidence.envelopes, evidence.mappings,
+      [...evidence.proofs, proof], evidence.cohortInterfaces);
+    expect(duplicate).toEqual({ status: "REJECTED", reason: "MEMBER_ENVELOPE_HASH_CONFLICT" });
+
+    const missing = __validateTask5PublicationForTest(evidence.envelopes, evidence.mappings,
+      evidence.proofs.slice(1), evidence.cohortInterfaces);
+    expect(missing).toEqual({ status: "INCONCLUSIVE", reason: "INCOMPLETE_EQUIVALENCE_PROOF" });
+
+    const wrongMappingHash = { ...proof, mappingHash: "wrong-mapping-hash" };
+    expect(__validateTask5PublicationForTest(evidence.envelopes, evidence.mappings,
+      [wrongMappingHash, ...evidence.proofs.slice(1)], evidence.cohortInterfaces)).toEqual({
+        status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH",
+      });
+
+    const wrongCohortInterfacePayload = { ...proof, cohortInterfaceHash: "wrong-interface" };
+    const wrongCohortInterface = { ...wrongCohortInterfacePayload, proofHash: canonicalHash(wrongCohortInterfacePayload) };
+    expect(__validateTask5PublicationForTest(evidence.envelopes, evidence.mappings,
+      [wrongCohortInterface, ...evidence.proofs.slice(1)], evidence.cohortInterfaces)).toEqual({
+        status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH",
+      });
+
+    const wrongSignaturesPayload = { ...proof, fourSignatureHashes: {
+      ...proof.fourSignatureHashes, endpointSignatureHash: "wrong-endpoint-signature",
+    } };
+    const wrongSignatures = { ...wrongSignaturesPayload, proofHash: canonicalHash(wrongSignaturesPayload) };
+    expect(__validateTask5PublicationForTest(evidence.envelopes, evidence.mappings,
+      [wrongSignatures, ...evidence.proofs.slice(1)], evidence.cohortInterfaces)).toEqual({
+        status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH",
+      });
+
+    const wrongProofHash = { ...proof, proofHash: "wrong-proof-hash" };
+    expect(__validateTask5PublicationForTest(evidence.envelopes, evidence.mappings,
+      [wrongProofHash, ...evidence.proofs.slice(1)], evidence.cohortInterfaces)).toEqual({
+        status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH",
+      });
+
+    const wrongWitnessPayload = { ...proof,
+      canonicalRolePositionBijectionWitness: proof.canonicalRolePositionBijectionWitness.slice(1),
+    };
+    const wrongWitness = { ...wrongWitnessPayload, proofHash: canonicalHash(wrongWitnessPayload) };
+    expect(__validateTask5PublicationForTest(evidence.envelopes, evidence.mappings,
+      [wrongWitness, ...evidence.proofs.slice(1)], evidence.cohortInterfaces)).toEqual({
+        status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH",
+      });
+  });
+
+  it("keeps member, mapping, proof, and coverage hashes deterministic under evidence order reversal", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    if (task4.task4Status !== "COMPLETE" || task4.occurrenceUniverse === null
+      || task4.routeRelevantConflictClosures === null) throw new Error("Expected complete Task 4");
+    const { occurrenceUniverseHash: _universeHash, ...universePayload } = task4.occurrenceUniverse;
+    const reversedUniversePayload = {
+      ...universePayload,
+      sourceRouteIds: [...universePayload.sourceRouteIds].reverse(),
+      physicalOccurrenceKeys: [...universePayload.physicalOccurrenceKeys].reverse(),
+      wildcardOccurrenceKeys: [...universePayload.wildcardOccurrenceKeys].reverse(),
+      familyMemberOccurrenceKeys: [...universePayload.familyMemberOccurrenceKeys].reverse(),
+      reservationOccurrenceKeys: [...universePayload.reservationOccurrenceKeys].reverse(),
+      conflictOccurrenceKeys: [...universePayload.conflictOccurrenceKeys].reverse(),
+      endpointOccurrenceKeys: [...universePayload.endpointOccurrenceKeys].reverse(),
+    };
+    const canonicalUniversePayload = {
+      ...reversedUniversePayload,
+      sourceRouteIds: [...reversedUniversePayload.sourceRouteIds].sort(),
+      physicalOccurrenceKeys: [...reversedUniversePayload.physicalOccurrenceKeys].sort(compareTextTuple),
+      wildcardOccurrenceKeys: [...reversedUniversePayload.wildcardOccurrenceKeys].sort(compareTextTuple),
+      familyMemberOccurrenceKeys: [...reversedUniversePayload.familyMemberOccurrenceKeys].sort(compareTextTuple),
+      reservationOccurrenceKeys: [...reversedUniversePayload.reservationOccurrenceKeys].sort(compareTextTuple),
+      conflictOccurrenceKeys: [...reversedUniversePayload.conflictOccurrenceKeys].sort(compareTextTuple),
+      endpointOccurrenceKeys: [...reversedUniversePayload.endpointOccurrenceKeys].sort(compareTextTuple),
+    };
+    const reversedUniverse = { ...reversedUniversePayload, occurrenceUniverseHash: canonicalHash(canonicalUniversePayload) };
+    const { artifactHash: _artifactHash, ...task4Payload } = task4;
+    const reversedTask4Payload = {
+      ...task4Payload,
+      routeRelevantConflictClosures: [...task4.routeRelevantConflictClosures].reverse(),
+      occurrenceUniverse: reversedUniverse,
+    };
+    const reversedTask4 = { ...reversedTask4Payload, artifactHash: task4.artifactHash };
+    const canonical = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts, task4, evidenceBudget: phaseDTask5Budget() });
+    const reversed = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: [...normalized.normalizedMemberDrafts].reverse(), task4: reversedTask4,
+      evidenceBudget: phaseDTask5Budget() });
+    expect(reversed.compressionStatus).toBe("COMPLETE");
+    expect(reversed.memberEnvelopes?.map((value) => value.memberEnvelopeHash))
+      .toEqual(canonical.memberEnvelopes?.map((value) => value.memberEnvelopeHash));
+    expect(reversed.cohortInterfaces).toEqual(canonical.cohortInterfaces);
+    expect(reversed.routeToCohortMappings).toEqual(canonical.routeToCohortMappings);
+    expect(reversed.equivalenceProofs).toEqual(canonical.equivalenceProofs);
+    expect(reversed.coverageManifest).toEqual(canonical.coverageManifest);
+    expect(reversed.cohortUniverseHash).toBe(canonical.cohortUniverseHash);
+  });
+
+  it("keeps Task 5 artifacts deterministic when verified C2 endpoint references are reversed", () => {
+    const originalAdmission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(originalAdmission);
+    const task4 = materializePhaseDTask4V1({ admission: originalAdmission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    const reversedAdmission = rebindTask5Admission(originalAdmission, (artifact) => ({
+      ...artifact,
+      andEndpointReferences: artifact.andEndpointReferences === null
+        ? null : [...artifact.andEndpointReferences].reverse(),
+    }));
+    const reversedTask4 = rebindTask4Artifact(task4, reversedAdmission);
+    const canonical = materializePhaseDTask5V1({ admission: originalAdmission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts, task4,
+      evidenceBudget: phaseDTask5Budget() });
+    const reversed = materializePhaseDTask5V1({ admission: reversedAdmission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts, task4: reversedTask4,
+      evidenceBudget: phaseDTask5Budget() });
+    expect(reversed.compressionStatus).toBe("COMPLETE");
+    expect(reversed.memberEnvelopes).toEqual(canonical.memberEnvelopes);
+    expect(reversed.cohortInterfaces).toEqual(canonical.cohortInterfaces);
+    expect(reversed.routeToCohortMappings).toEqual(canonical.routeToCohortMappings);
+    expect(reversed.equivalenceProofs).toEqual(canonical.equivalenceProofs);
+    expect(reversed.coverageManifest).toEqual(canonical.coverageManifest);
+    expect(reversed.cohortUniverseHash).toBe(canonical.cohortUniverseHash);
+  });
+
+  it("rejects a Task 4 closure bound to another route hash", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    if (task4.task4Status !== "COMPLETE" || task4.routeRelevantConflictClosures === null) throw new Error("Expected complete Task 4");
+    const original = task4.routeRelevantConflictClosures[0]!;
+    const { closureHash: _closureHash, ...closurePayload } = original;
+    const forgedClosurePayload = { ...closurePayload, routeHash: `${original.routeHash}:wrong` };
+    const forgedClosure = { ...forgedClosurePayload, closureHash: canonicalHash(forgedClosurePayload) };
+    const task4Payload = {
+      ...task4,
+      routeRelevantConflictClosures: [forgedClosure, ...task4.routeRelevantConflictClosures.slice(1)],
+    };
+    const { artifactHash: _task4ArtifactHash, ...forgedTask4Payload } = task4Payload;
+    const forgedTask4 = { ...forgedTask4Payload, artifactHash: canonicalHash(forgedTask4Payload) };
+    const result = materializePhaseDTask5V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+      task4: forgedTask4, evidenceBudget: phaseDTask5Budget() });
+    expect(result.compressionStatus).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("SOURCE_BINDING_MISMATCH");
+    expect(result.memberEnvelopes).toBeNull();
+  });
+
+  it("rejects a Task 4 closure bound to the wrong source artifact", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    if (task4.task4Status !== "COMPLETE" || task4.routeRelevantConflictClosures === null) throw new Error("Expected complete Task 4");
+    const original = task4.routeRelevantConflictClosures[0]!;
+    const { closureHash: _closureHash, ...closurePayload } = original;
+    const forgedClosurePayload = { ...closurePayload, sourceArtifactHash: `${original.sourceArtifactHash}:wrong` };
+    const forgedClosure = { ...forgedClosurePayload, closureHash: canonicalHash(forgedClosurePayload) };
+    const forgedTask4Payload = {
+      ...task4,
+      routeRelevantConflictClosures: [forgedClosure, ...task4.routeRelevantConflictClosures.slice(1)],
+    };
+    const { artifactHash: _artifactHash, ...withoutArtifactHash } = forgedTask4Payload;
+    const forgedTask4 = { ...withoutArtifactHash, artifactHash: canonicalHash(withoutArtifactHash) };
+    const result = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts, task4: forgedTask4,
+      evidenceBudget: phaseDTask5Budget() });
+    expect(result.compressionStatus).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("SOURCE_BINDING_MISMATCH");
+    expect(result.memberEnvelopes).toBeNull();
+    expect(result.cohorts).toBeNull();
+  });
+
+  it("keeps cohort interfaces free of route, member, card, and provenance identities", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    const result = materializePhaseDTask5V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+      task4, evidenceBudget: phaseDTask5Budget() });
+    expect(result.compressionStatus).toBe("COMPLETE");
+    const forbidden = new Set([
+      "routeId", "routeHash", "physicalCardId", "physicalCardIds", "wildcardCardId", "wildcardCardIds",
+      "memberId", "memberIds", "sourceArtifactHash", "sourceRouteUniverseHash", "normalizationHash",
+      "memberEnvelopeHash", "mappingHash", "proofHash", "familyId", "conflictFactId", "reservationFactId",
+    ]);
+    const keysOf = (value: unknown): string[] => {
+      if (Array.isArray(value)) return value.flatMap(keysOf);
+      if (typeof value !== "object" || value === null) return [];
+      return Object.entries(value).flatMap(([key, child]) => [key, ...keysOf(child)]);
+    };
+    for (const cohortInterface of result.cohortInterfaces ?? []) {
+      expect(keysOf(cohortInterface).some((key) => forbidden.has(key))).toBe(false);
+      const serialized = JSON.stringify(cohortInterface);
+      expect(serialized).not.toContain("H2-1");
+      expect(serialized).not.toContain("C7-1");
+    }
+  });
+
+  it("fails closed when Task 3 or Task 4 evidence is missing", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    if (task4.task4Status !== "COMPLETE" || task4.routeRelevantConflictClosures === null) throw new Error("Expected complete Task 4");
+    const missingDraft = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts.slice(1), task4, evidenceBudget: phaseDTask5Budget() });
+    expect(missingDraft.compressionStatus).toBe("INCONCLUSIVE");
+    expect(missingDraft.memberEnvelopes).toBeNull();
+    const missingClosurePayload = { ...task4, routeRelevantConflictClosures: task4.routeRelevantConflictClosures.slice(1) };
+    const { artifactHash: _artifactHash, ...missingClosureWithoutHash } = missingClosurePayload;
+    const missingClosure = { ...missingClosureWithoutHash, artifactHash: canonicalHash(missingClosureWithoutHash) };
+    const missingClosureResult = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts, task4: missingClosure,
+      evidenceBudget: phaseDTask5Budget() });
+    expect(missingClosureResult.compressionStatus).toBe("INCONCLUSIVE");
+    expect(missingClosureResult.coverageManifest).toBeNull();
+  });
+
+  it("returns inconclusive when required C2 endpoint evidence is missing", () => {
+    const originalAdmission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(originalAdmission);
+    const task4 = materializePhaseDTask4V1({ admission: originalAdmission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    const admission = rebindTask5Admission(originalAdmission, (artifact) => ({
+      ...artifact,
+      andEndpointReferences: null,
+    }));
+    const reboundTask4 = rebindTask4Artifact(task4, admission);
+    const result = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts, task4: reboundTask4,
+      evidenceBudget: phaseDTask5Budget() });
+    expect(result.compressionStatus).toBe("INCONCLUSIVE");
+    expect(result.memberEnvelopes).toBeNull();
+    expect(result.cohorts).toBeNull();
+    expect(result.routeToCohortMappings).toBeNull();
+    expect(result.equivalenceProofs).toBeNull();
+    expect(result.coverageManifest).toBeNull();
+    expect(result.cohortUniverseHash).toBeNull();
+  });
+
+  it("rejects a C2 endpoint with a wrong component or route-universe binding", () => {
+    const originalAdmission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(originalAdmission);
+    const task4 = materializePhaseDTask4V1({ admission: originalAdmission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    const endpoints = originalAdmission.canonicalSourceBindingManifest.multiComponentArtifact.andEndpointReferences;
+    if (endpoints === null || endpoints.length === 0) throw new Error("Expected endpoint evidence");
+    const admission = rebindTask5Admission(originalAdmission, (artifact) => ({
+      ...artifact,
+      andEndpointReferences: endpoints.map((endpoint, index) => index === 0
+        ? { ...endpoint, sourceRouteUniverseHash: `${endpoint.sourceRouteUniverseHash}:wrong` }
+        : endpoint),
+    }));
+    const reboundTask4 = rebindTask4Artifact(task4, admission);
+    const result = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts, task4: reboundTask4,
+      evidenceBudget: phaseDTask5Budget() });
+    expect(result.compressionStatus).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("SOURCE_HASH_PAYLOAD_MISMATCH");
+    expect(result.memberEnvelopes).toBeNull();
+    expect(result.cohorts).toBeNull();
+    expect(result.coverageManifest).toBeNull();
+  });
+
+  it("rejects a draft with a contradictory source artifact binding", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    const draft = normalized.normalizedMemberDrafts[0]!;
+    const { normalizationHash: _normalizationHash, ...draftWithoutHash } = draft;
+    const forgedDraftPayload = { ...draftWithoutHash, sourceArtifactHash: `${draft.sourceArtifactHash}:wrong` };
+    const forgedDraft = { ...forgedDraftPayload, normalizationHash: canonicalHash(forgedDraftPayload) };
+    const result = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: [forgedDraft, ...normalized.normalizedMemberDrafts.slice(1)],
+      task4, evidenceBudget: phaseDTask5Budget() });
+    expect(result.compressionStatus).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("SOURCE_BINDING_MISMATCH");
+    expect(result.cohorts).toBeNull();
+  });
+
+  it("rejects a draft with a contradictory normalization hash", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    const draft = normalized.normalizedMemberDrafts[0]!;
+    const forgedDraft = { ...draft, normalizationHash: `${draft.normalizationHash}:wrong` };
+    const result = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: [forgedDraft, ...normalized.normalizedMemberDrafts.slice(1)],
+      task4, evidenceBudget: phaseDTask5Budget() });
+    expect(result.compressionStatus).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("SOURCE_HASH_PAYLOAD_MISMATCH");
+    expect(result.memberEnvelopes).toBeNull();
+    expect(result.cohorts).toBeNull();
+    expect(result.routeToCohortMappings).toBeNull();
+    expect(result.equivalenceProofs).toBeNull();
+    expect(result.coverageManifest).toBeNull();
+  });
+
+  it("rejects self-bound drafts that reuse a route id with a different route hash", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    const original = normalized.normalizedMemberDrafts[0]!;
+    const { normalizationHash: _normalizationHash, ...payload } = original;
+    const forgedPayload = { ...payload, routeHash: `${original.routeHash}:other` };
+    const forged = { ...forgedPayload, normalizationHash: canonicalHash(forgedPayload) };
+    const result = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: [original, forged, ...normalized.normalizedMemberDrafts.slice(1)], task4,
+      evidenceBudget: phaseDTask5Budget() });
+    expect(result.compressionStatus).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("ROUTE_ID_HASH_CONFLICT");
+    expect(result.memberEnvelopes).toBeNull();
+    expect(result.cohorts).toBeNull();
+  });
+
+  it("rejects a self-bound draft that is foreign to the admitted route universe", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    const original = normalized.normalizedMemberDrafts[0]!;
+    const { normalizationHash: _normalizationHash, ...payload } = original;
+    const forgedPayload = { ...payload, routeId: `${original.routeId}:foreign` };
+    const forged = { ...forgedPayload, normalizationHash: canonicalHash(forgedPayload) };
+    const result = materializePhaseDTask5V1({ admission,
+      normalizedMemberDrafts: [...normalized.normalizedMemberDrafts, forged], task4,
+      evidenceBudget: phaseDTask5Budget() });
+    expect(result.compressionStatus).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("SOURCE_BINDING_MISMATCH");
+    expect(result.memberEnvelopes).toBeNull();
+    expect(result.coverageManifest).toBeNull();
+  });
+
+  it("does not rediscover an unreachable adjacent conflict during Task 5", () => {
+    const materialize = (input: Parameters<typeof compressHierarchicalStrategicCohortsV1>[0]) => {
+      const admission = admittedOf(input);
+      const normalized = normalizedOf(admission);
+      const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+      return materializePhaseDTask5V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+        task4, evidenceBudget: phaseDTask5Budget() });
+    };
+    const base = materialize(makeValidPhaseDAdmissionInput());
+    const adjacent = makePhysicallyAdjacentUnreachableConflictFixture();
+    const adjacentTask4 = materializePhaseDTask4V1({ admission: adjacent.admission,
+      normalizedMemberDrafts: adjacent.normalizedMemberDrafts });
+    const adjacentResult = materializePhaseDTask5V1({ admission: adjacent.admission,
+      normalizedMemberDrafts: adjacent.normalizedMemberDrafts, task4: adjacentTask4,
+      evidenceBudget: phaseDTask5Budget() });
+    expect(base.compressionStatus).toBe("COMPLETE");
+    expect(adjacentResult.compressionStatus).toBe("COMPLETE");
+    expect(adjacentResult.cohortInterfaces?.map((value) => value.conflictInterface))
+      .toEqual(base.cohortInterfaces?.map((value) => value.conflictInterface));
+    expect(adjacentResult.cohortInterfaces?.map((value) => value.cohortInterfaceHash))
+      .toEqual(base.cohortInterfaces?.map((value) => value.cohortInterfaceHash));
+    expect(adjacentResult.cohorts?.map((value) => value.cohortId))
+      .toEqual(base.cohorts?.map((value) => value.cohortId));
+  });
+
+  it("rejects route-universe, component-set, and normalization binding contradictions", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    const draft = normalized.normalizedMemberDrafts[0]!;
+    const variants = ["sourceRouteUniverseHash", "sourceAndComponentSetHash"] as const;
+    for (const field of variants) {
+      const { normalizationHash: _hash, ...withoutHash } = draft;
+      const forgedPayload = { ...withoutHash, [field]: `${draft[field]}:wrong` };
+      const forged = { ...forgedPayload, normalizationHash: canonicalHash(forgedPayload) };
+      const result = materializePhaseDTask5V1({ admission,
+        normalizedMemberDrafts: [forged, ...normalized.normalizedMemberDrafts.slice(1)], task4,
+        evidenceBudget: phaseDTask5Budget() });
+      expect(result.compressionStatus).toBe("REJECTED");
+      expect(result.reasonCodes).toContain("SOURCE_BINDING_MISMATCH");
+      expect(result.coverageManifest).toBeNull();
+    }
+  });
+});
+
 function compareIdentityTuple(
   left: readonly [string, string, string],
   right: readonly [string, string, string],
@@ -973,6 +1749,89 @@ function compareIdentityTuple(
     if (left[index] > right[index]) return 1;
   }
   return 0;
+}
+
+function phaseDTask5Budget(): StrategicCohortCompressionEvidenceBudgetV1 {
+  return {
+    maxMemberEnvelopeCount: 100,
+    maxResourceRoleSlotCount: 1000,
+    maxConflictClosureEdgeCount: 1000,
+    maxRouteMappingCount: 100,
+    maxEquivalenceProofCount: 100,
+    maxLineageOccurrenceWitnessCount: 5000,
+  };
+}
+
+function publicationEvidenceOf() {
+  const admission = admittedOf(makeValidPhaseDAdmissionInput());
+  const normalized = normalizedOf(admission);
+  const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+  const result = materializePhaseDTask5V1({
+    admission,
+    normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    task4,
+    evidenceBudget: phaseDTask5Budget(),
+  });
+  if (result.compressionStatus !== "COMPLETE"
+    || result.memberEnvelopes === null
+    || result.routeToCohortMappings === null
+    || result.equivalenceProofs === null
+    || result.cohortInterfaces === null) {
+    throw new Error("Expected complete Task 5 publication evidence");
+  }
+  return {
+    envelopes: result.memberEnvelopes,
+    mappings: result.routeToCohortMappings,
+    proofs: result.equivalenceProofs,
+    cohortInterfaces: new Map(result.cohortInterfaces.map((value) => [value.cohortInterfaceHash, value] as const)),
+  };
+}
+
+function materializeTask5Fixture(
+  input: Parameters<typeof compressHierarchicalStrategicCohortsV1>[0],
+) {
+  const admission = admittedOf(input);
+  const normalized = normalizedOf(admission);
+  const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+  return materializePhaseDTask5V1({ admission,
+    normalizedMemberDrafts: normalized.normalizedMemberDrafts, task4, evidenceBudget: phaseDTask5Budget() });
+}
+
+function rebindTask5Admission(
+  admission: PhaseDSourceAdmissionSuccessV1,
+  mutate: (artifact: PhaseDSourceAdmissionSuccessV1["canonicalSourceBindingManifest"]["multiComponentArtifact"])
+    => PhaseDSourceAdmissionSuccessV1["canonicalSourceBindingManifest"]["multiComponentArtifact"],
+): PhaseDSourceAdmissionSuccessV1 {
+  const originalManifest = admission.canonicalSourceBindingManifest;
+  const changedArtifactPayload = mutate(originalManifest.multiComponentArtifact);
+  const { artifactHash: _artifactHash, ...artifactPayload } = changedArtifactPayload;
+  const changedArtifact = { ...artifactPayload, artifactHash: canonicalHash(artifactPayload) };
+  const changedManifestPayload = {
+    ...originalManifest,
+    multiComponentArtifact: changedArtifact,
+    multiComponentArtifactHash: changedArtifact.artifactHash,
+  };
+  const { manifestHash: _manifestHash, ...manifestPayload } = changedManifestPayload;
+  const changedManifest = { ...manifestPayload, manifestHash: canonicalHash(manifestPayload) };
+  const changedAdmissionPayload = {
+    ...admission,
+    canonicalSourceBindingManifest: changedManifest,
+    sourceBindingManifestHash: changedManifest.manifestHash,
+  };
+  const { admissionHash: _admissionHash, ...admissionPayload } = changedAdmissionPayload;
+  return { ...admissionPayload, admissionHash: canonicalHash(admissionPayload) };
+}
+
+function rebindTask4Artifact(
+  task4: PhaseDTask4ArtifactV1,
+  admission: PhaseDSourceAdmissionSuccessV1,
+): PhaseDTask4ArtifactV1 {
+  const { artifactHash: _artifactHash, ...payload } = task4;
+  const reboundPayload = {
+    ...payload,
+    sourceBindingManifestHash: admission.sourceBindingManifestHash,
+  };
+  return { ...reboundPayload, artifactHash: canonicalHash(reboundPayload) };
 }
 
 function compareTextTuple(

@@ -81,19 +81,26 @@ export function makeSameRankDifferentCopyPhaseDAdmissionInput(): StrategicCohort
 }
 
 export function makeWildcardPhaseDAdmissionInput(): StrategicCohortCompressionInputV1 {
-  const straightFlushIds = ["S3-1", "S4-1", "S5-1", "S6-1", "H2-1"];
-  const bombIds = ["C7-1", "D7-1", "H7-1", "H2-1"];
-  const wildcardPairIds = ["C8-1", "H2-1"];
+  return makeWildcardPhaseDAdmissionInputWithWildcard("H2-1");
+}
+
+export function makeWildcardPhaseDAdmissionInputWithWildcard(
+  wildcardCardId: string,
+): StrategicCohortCompressionInputV1 {
+  const straightFlushNaturalIds = ["S3-1", "S4-1", "S5-1", "S6-1"];
+  const wildcardStraightFlushIds = [...straightFlushNaturalIds, wildcardCardId];
+  const bombIds = ["C7-1", "D7-1", "H7-1", wildcardCardId];
+  const wildcardPairIds = ["C8-1", wildcardCardId];
   const disjointPairIds = ["S9-1", "C9-1"];
   const input = makeInventoryInput([
-    ...new Set([...straightFlushIds, ...bombIds, ...wildcardPairIds, ...disjointPairIds]),
+    ...new Set([...wildcardStraightFlushIds, ...bombIds, ...wildcardPairIds, ...disjointPairIds]),
   ], "2");
   const inventory = buildStrategicStructureInventoryV1(input.a0, input.b0);
   const selections: readonly FamilySelectionV1[][] = [
     [
       {
-        familyId: exactFamily(inventory, "straight-flush", straightFlushIds).familyId,
-        exactMemberPhysicalCardIds: straightFlushIds,
+        familyId: exactFamily(inventory, "straight-flush", wildcardStraightFlushIds).familyId,
+        exactMemberPhysicalCardIds: wildcardStraightFlushIds,
       },
       {
         familyId: exactFamily(inventory, "bomb", bombIds).familyId,
@@ -554,7 +561,9 @@ export function makeBrokenClosureReferenceFixture(): PhaseDSourceAdmissionSucces
   return admission;
 }
 
-export function makeCrossConflictWitnessBindingFixture(): Readonly<{
+export function makeCrossConflictWitnessBindingFixture(
+  mode: "INVALID_CROSS_CONFLICT" | "VALID_BRANCH" | "VALID_BRANCH_A2" | "VALID_BRANCH_BOMB" = "INVALID_CROSS_CONFLICT",
+): Readonly<{
   admission: PhaseDSourceAdmissionSuccessV1;
   normalizedMemberDrafts: readonly NormalizedRouteCohortMemberDraftV1[];
 }> {
@@ -644,7 +653,12 @@ export function makeCrossConflictWitnessBindingFixture(): Readonly<{
       compareText(left.conflictFactId, right.conflictFactId)),
   });
   const claimsById = new Map(changedReservationFact.claims.map((claim) => [claim.claimId, claim]));
-  const routeClaims = [alternativeA1, clonedAlternativeB1].map((alternative) => {
+  const selectedAlternativeA = mode === "VALID_BRANCH_A2"
+    ? alternativeA2
+    : mode === "VALID_BRANCH_BOMB"
+      ? (alternatives.find((alternative) => alternative?.groupType === "bomb") ?? alternativeA2)
+      : alternativeA1;
+  const routeClaims = [selectedAlternativeA, clonedAlternativeB1].map((alternative) => {
     const claim = claimsById.get(alternative.claimId);
     if (claim === undefined) throw new Error("Missing cross-conflict source claim");
     return {
@@ -693,7 +707,12 @@ export function makeCrossConflictWitnessBindingFixture(): Readonly<{
     };
     return { ...payload, witnessHash: canonicalHash(payload) };
   };
-  const forgedWitnessA = witnessOf(conflictA.conflictFactId, clonedAlternativeB1);
+  const forgedWitnessA = witnessOf(
+    conflictA.conflictFactId,
+    mode === "VALID_BRANCH" || mode === "VALID_BRANCH_A2" || mode === "VALID_BRANCH_BOMB"
+      ? selectedAlternativeA
+      : clonedAlternativeB1,
+  );
   const validWitnessB = witnessOf(conflictB.conflictFactId, clonedAlternativeB1);
   const { routeHash: _routeHash, ...routePayload } = targetRoute;
   const changedRoutePayload = {
@@ -702,7 +721,7 @@ export function makeCrossConflictWitnessBindingFixture(): Readonly<{
     supportingReservationFacts: [{
       reservationFactId: changedReservationFact.reservationFactId,
       alternativeReservationFactIds: [
-        alternativeA1.alternativeReservationFactId,
+        selectedAlternativeA.alternativeReservationFactId,
         clonedAlternativeB1.alternativeReservationFactId,
       ].sort(compareText),
     }],

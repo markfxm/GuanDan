@@ -406,6 +406,13 @@ export type PhaseDTask4ArtifactV1 = Readonly<{
 
 export type PhaseDTask4MaterializerV1 = (input: PhaseDTask4InputV1) => PhaseDTask4ArtifactV1;
 
+export type PhaseDTask5InputV1 = Readonly<{
+  admission: PhaseDSourceAdmissionSuccessV1;
+  normalizedMemberDrafts: readonly NormalizedRouteCohortMemberDraftV1[];
+  task4: PhaseDTask4ArtifactV1;
+  evidenceBudget: StrategicCohortCompressionEvidenceBudgetV1;
+}>;
+
 export type StrategicCohortConflictInterfaceV1 = Readonly<{
   conflictKinds: readonly StrategicReservationConflictKindV1[];
   resolutionStates: readonly "UNRESOLVED"[];
@@ -427,6 +434,7 @@ export type StrategicCohortEndpointInterfaceV1 = Readonly<{
   routeClasses: readonly StrategicRouteClassV1[];
   closedThroughTier: StrategicHierarchyTierV1;
   exactHandCountReduction: number;
+  preservationFactCodes: readonly StrategicRoutePreservationFactCodeV1[];
   remainderRoleVector: readonly ResourceRoleSlotV1[];
   andTopology: StrategicCohortAndTopologyInterfaceV1;
   endpointArity: number;
@@ -440,6 +448,7 @@ export type RouteCohortMemberEnvelopeV1 = Readonly<{
   sourceArtifactHash: string;
   sourceRouteUniverseHash: string;
   sourceAndComponentSetHash: string;
+  normalizationHash: string;
   structuralInterface: StrategicCohortStructuralInterfaceV1;
   resourceInterface: StrategicCohortResourceInterfaceV1;
   canonicalResourceRoleVector: readonly ResourceRoleSlotV1[];
@@ -497,6 +506,7 @@ export type StrategicCohortMembershipProofV1 = Readonly<{
   memberEnvelopeHash: string;
   cohortInterfaceHash: string;
   fourSignatureHashes: StrategicCohortFourSignatureHashesV1;
+  mappingHash: string;
   canonicalRolePositionBijectionWitness: readonly CanonicalRolePositionBijectionWitnessV1[];
   sourceHashBindings: readonly StrategicCohortSourceHashBindingV1[];
   proofHash: string;
@@ -550,7 +560,18 @@ export type StrategicCohortCoverageManifestV1 = Readonly<{
   coveredConflictOccurrenceCount: number;
   inputEndpointOccurrenceCount: number;
   coveredEndpointOccurrenceCount: number;
+  coverageWitnesses: readonly StrategicCohortCoverageWitnessV1[];
   coverageHash: string;
+}>;
+
+export type StrategicCohortCoverageWitnessV1 = Readonly<{
+  occurrenceKind: "PHYSICAL" | "WILDCARD" | "FAMILY_MEMBER" | "RESERVATION" | "CONFLICT" | "ENDPOINT";
+  occurrenceKey: readonly string[];
+  occurrenceHash: string;
+  memberEnvelopeHash: string;
+  mappingHash: string;
+  proofHash: string;
+  witnessHash: string;
 }>;
 
 export type CompressionRatioInterpretationV1 =
@@ -612,3 +633,7 @@ export type StrategicCohortCompressionInputV1 = Readonly<{
 export type HierarchicalStrategicCohortCompressorV1 = (
   input: StrategicCohortCompressionInputV1,
 ) => PhaseDSourceAdmissionResultV1;
+
+export type PhaseDTask5MaterializerV1 = (
+  input: PhaseDTask5InputV1,
+) => HierarchicalStrategicCohortCompressionArtifactV1;

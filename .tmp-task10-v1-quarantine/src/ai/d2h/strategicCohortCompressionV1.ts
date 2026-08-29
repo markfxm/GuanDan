@@ -18,6 +18,7 @@ import type {
 import type {
   StrategicReservationAlternativeFactV1,
   StrategicReservationConflictFactV1,
+  StrategicReservationClaimRoleV1,
   StrategicResourceReservationClaimV1,
   StrategicResourceReservationFactV1,
   StrategicResourceUnitV1,
@@ -34,6 +35,7 @@ import type {
 } from "./strategicRouteCandidateFactsV1Contracts";
 import {
   STRATEGIC_COHORT_COMPRESSION_V1_SCHEMA_VERSION,
+  HARD_MAX_COHORT_COUNT_V1,
   type HierarchicalStrategicCohortCompressionArtifactV1,
   type HierarchicalStrategicCohortCompressorV1,
   type NormalizedRouteCohortMemberDraftV1,
@@ -42,6 +44,7 @@ import {
   type PhaseDCommonBindingsV1,
   type PhaseDComponentSourceBindingV1,
   type PhaseDRouteIdentityIndexEntryV1,
+  type PhaseDSourceAdmissionSuccessV1,
   type PhaseDSourceAdmissionResultV1,
   type ResourceRoleSlotV1,
   type StrategicCohortLatentResourceInterfaceV1,
@@ -54,7 +57,21 @@ import {
   type PhaseDTask4ArtifactV1,
   type PhaseDTask4InputV1,
   type PhaseDTask4MaterializerV1,
+  type PhaseDTask5InputV1,
+  type PhaseDTask5MaterializerV1,
   type RouteRelevantConflictClosureV1,
+  type RouteCohortMemberEnvelopeV1,
+  type StrategicCohortConflictInterfaceV1,
+  type StrategicCohortEndpointInterfaceV1,
+  type StrategicCohortInterfaceV1,
+  type StrategicCohortFourSignatureHashesV1,
+  type StrategicCohortMembershipProofV1,
+  type StrategicRouteCohortMappingFactV1,
+  type HierarchicalStrategicCohortV1,
+  type StrategicCohortCoverageManifestV1,
+  type StrategicCohortCoverageWitnessV1,
+  type StrategicCohortSourceHashBindingV1,
+  type CanonicalRolePositionBijectionWitnessV1,
   type StrategicConflictClosureEdgeV1,
   type StrategicConflictClosureReferenceV1,
   type PhaseDRouteOccurrenceUniverseV1,
@@ -2275,4 +2292,1118 @@ function dispositionOf(
   if (route.consumedResources.includes(physicalCardId)) return "CONSUMED";
   if (route.endpointFacts.remainderPhysicalCardIds.includes(physicalCardId)) return "REMAINDER";
   return null;
+}
+
+type Task5RecordV1 = Readonly<{
+  component: PhaseDComponentSourceBindingV1;
+  route: StrategicRouteCandidateFactV1;
+  draft: NormalizedRouteCohortMemberDraftV1;
+  closure: RouteRelevantConflictClosureV1;
+}>;
+
+type Task5EndpointProjectionV1 = Readonly<{
+  componentEndpointId: string;
+  resourceComponentId: string;
+  sourceArtifactHash: string;
+  sourceRouteUniverseHash: string;
+  andComponentSetHash: string;
+  endpointHash: string;
+  semanticBoundary: StrategicComponentAndEndpointReferenceV1["semanticBoundary"];
+  dependencyArity: number;
+}>;
+
+type Task5EndpointIndexV1 = Readonly<{
+  endpointByComponentId: ReadonlyMap<string, Task5EndpointProjectionV1>;
+  endpointProjectionByHash: ReadonlyMap<string, Task5EndpointProjectionV1>;
+  endpointProjectionsByRoute: ReadonlyMap<string, readonly Task5EndpointProjectionV1[]>;
+  endpointRouteEdgeCount: number;
+}>;
+
+type Task5IssueV1 = Readonly<{
+  status: "INCONCLUSIVE" | "REJECTED";
+  reason: StrategicCohortCompressionReasonCodeV1;
+}>;
+
+type HardCohortGateResultV1 = Readonly<{
+  gateStatus: "COMPLETE" | "INCONCLUSIVE";
+  distinctCohortCount: number;
+  observedDistinctCohortLowerBound: number;
+  exhausted: boolean;
+}>;
+
+/**
+ * Internal post-interface seam used by the real Task 5 materializer. It accepts
+ * only already-derived canonical interface hashes. The real materializer uses
+ * the shared Task 5 terminal constructor for atomic publication.
+ */
+export function __task5PostDerivationHardGateV1(
+  canonicalCohortKeys: readonly string[],
+): Readonly<{ gate: HardCohortGateResultV1 }> {
+  const gate = applyHardCohortGateV1(canonicalCohortKeys);
+  return { gate };
+}
+
+/** Internal test-support seam for the compact endpoint index. */
+export function __task5EndpointIndexForTest(
+  admission: PhaseDSourceAdmissionSuccessV1,
+): Readonly<{
+  endpointByComponentId: ReadonlyMap<string, Task5EndpointProjectionV1>;
+  endpointProjectionByHashCount: number;
+  endpointProjectionsByRoute: ReadonlyMap<string, readonly Task5EndpointProjectionV1[]>;
+  endpointRouteEdgeCount: number;
+}> {
+  const index = endpointIndexOf(admission);
+  return {
+    endpointByComponentId: index.endpointByComponentId,
+    endpointProjectionByHashCount: index.endpointProjectionByHash.size,
+    endpointProjectionsByRoute: index.endpointProjectionsByRoute,
+    endpointRouteEdgeCount: index.endpointRouteEdgeCount,
+  };
+}
+
+/** Internal deterministic cardinality gate; it accepts only canonical cohort keys. */
+export function applyHardCohortGateV1(
+  canonicalCohortKeys: readonly string[],
+): HardCohortGateResultV1 {
+  const distinct = new Set<string>();
+  for (const key of canonicalCohortKeys) {
+    distinct.add(key);
+    if (distinct.size > HARD_MAX_COHORT_COUNT_V1) {
+      return {
+        gateStatus: "INCONCLUSIVE",
+        distinctCohortCount: 0,
+        observedDistinctCohortLowerBound: HARD_MAX_COHORT_COUNT_V1 + 1,
+        exhausted: true,
+      };
+    }
+  }
+  return {
+    gateStatus: "COMPLETE",
+    distinctCohortCount: distinct.size,
+    observedDistinctCohortLowerBound: distinct.size,
+    exhausted: false,
+  };
+}
+
+/** Task 5 only materializes established facts; Task 6 owns configurable budget execution. */
+export const materializePhaseDTask5V1: PhaseDTask5MaterializerV1 = (input) => {
+  const issueOrRecords = task5RecordsOf(input);
+  if ("issue" in issueOrRecords) return task5Terminal(input, issueOrRecords.issue, 0);
+  const records = issueOrRecords.records;
+  if (records.length === 0) {
+    return task5Terminal(input, { status: "INCONCLUSIVE", reason: "EMPTY_SOURCE_ROUTE_UNIVERSE" }, 0);
+  }
+
+  const envelopes: RouteCohortMemberEnvelopeV1[] = [];
+  const endpointIndex = endpointIndexOf(input.admission);
+  for (const record of records) {
+    const result = memberEnvelopeOf(record, input.admission, endpointIndex.endpointProjectionsByRoute);
+    if ("issue" in result) return task5Terminal(input, result.issue, 0);
+    envelopes.push(result.value);
+  }
+  const envelopeIdentity = new Map<string, string>();
+  for (const envelope of envelopes) {
+    const prior = envelopeIdentity.get(envelope.routeId);
+    if (prior !== undefined && prior !== envelope.routeHash) {
+      return task5Terminal(input, { status: "REJECTED", reason: "ROUTE_ID_HASH_CONFLICT" }, 0);
+    }
+    envelopeIdentity.set(envelope.routeId, envelope.routeHash);
+  }
+
+  const derivedCohortInterfaces = envelopes.map(cohortInterfaceOf);
+  const postDerivationGate = __task5PostDerivationHardGateV1(derivedCohortInterfaces
+    .map((cohortInterface) => cohortInterface.cohortInterfaceHash));
+  const hardGate = postDerivationGate.gate;
+  if (hardGate.gateStatus === "INCONCLUSIVE") {
+    return task5Terminal(input, { status: "INCONCLUSIVE", reason: "COHORT_COUNT_EXHAUSTED" },
+      hardGate.observedDistinctCohortLowerBound);
+  }
+  const cohortInterfaceByHash = new Map<string, StrategicCohortInterfaceV1>();
+  const memberCohort = new Map<string, StrategicCohortInterfaceV1>();
+  for (let index = 0; index < envelopes.length; index += 1) {
+    const envelope = envelopes[index]!;
+    const cohortInterface = derivedCohortInterfaces[index]!;
+    const previous = cohortInterfaceByHash.get(cohortInterface.cohortInterfaceHash);
+    if (previous !== undefined && canonicalSerialize(previous) !== canonicalSerialize(cohortInterface)) {
+      return task5Terminal(input, { status: "REJECTED", reason: "SIGNATURE_HASH_PAYLOAD_CONFLICT" }, 0);
+    }
+    cohortInterfaceByHash.set(cohortInterface.cohortInterfaceHash, cohortInterface);
+    memberCohort.set(envelope.memberEnvelopeHash, cohortInterface);
+  }
+
+  const sourceBindings = sourceBindingsOf(input.admission);
+  const mappings: StrategicRouteCohortMappingFactV1[] = [];
+  const proofs: StrategicCohortMembershipProofV1[] = [];
+  const membersByCohort = new Map<string, RouteCohortMemberEnvelopeV1[]>();
+  const proofHashesByCohort = new Map<string, string[]>();
+  for (const envelope of envelopes) {
+    const cohortInterface = memberCohort.get(envelope.memberEnvelopeHash)!;
+    const cohortId = canonicalHash({ kind: "hierarchical-strategic-cohort-v1", cohortInterfaceHash: cohortInterface.cohortInterfaceHash });
+    const fourSignatureHashes = cohortInterface.fourSignatureHashes;
+    const mappingPayload = {
+      routeId: envelope.routeId,
+      routeHash: envelope.routeHash,
+      memberEnvelopeHash: envelope.memberEnvelopeHash,
+      cohortId,
+      cohortInterfaceHash: cohortInterface.cohortInterfaceHash,
+      fourSignatureHashes,
+      sourceHashBindings: sourceBindings,
+    };
+    const mapping = { ...mappingPayload, mappingHash: canonicalHash(mappingPayload) };
+    mappings.push(mapping);
+    const witness = canonicalRoleWitnessOf(envelope);
+    const proofPayload = {
+      routeId: envelope.routeId,
+      routeHash: envelope.routeHash,
+      memberEnvelopeHash: envelope.memberEnvelopeHash,
+      cohortInterfaceHash: cohortInterface.cohortInterfaceHash,
+      fourSignatureHashes,
+      mappingHash: mapping.mappingHash,
+      canonicalRolePositionBijectionWitness: witness,
+      sourceHashBindings: sourceBindings,
+    };
+    proofs.push({ ...proofPayload, proofHash: canonicalHash(proofPayload) });
+    const proofHashes = proofHashesByCohort.get(cohortInterface.cohortInterfaceHash);
+    if (proofHashes === undefined) proofHashesByCohort.set(cohortInterface.cohortInterfaceHash, [proofs[proofs.length - 1]!.proofHash]);
+    else proofHashes.push(proofs[proofs.length - 1]!.proofHash);
+    const members = membersByCohort.get(cohortInterface.cohortInterfaceHash);
+    if (members === undefined) membersByCohort.set(cohortInterface.cohortInterfaceHash, [envelope]);
+    else members.push(envelope);
+  }
+  if (mappings.length !== records.length || proofs.length !== records.length) {
+    return task5Terminal(input, { status: "INCONCLUSIVE", reason: "INCOMPLETE_EQUIVALENCE_PROOF" }, cohortInterfaceByHash.size);
+  }
+  const publicationIssue = validateTask5Publication(envelopes, mappings, proofs, cohortInterfaceByHash);
+  if (publicationIssue !== null) return task5Terminal(input, publicationIssue, 0);
+  const coverage = coverageOf(input.task4.occurrenceUniverse!, envelopes, mappings, proofs);
+  if (coverage === null) {
+    return task5Terminal(input, { status: "INCONCLUSIVE", reason: "INCOMPLETE_LINEAGE_COVERAGE" }, cohortInterfaceByHash.size);
+  }
+  const cohorts = [...cohortInterfaceByHash.values()].map((cohortInterface) => {
+    const cohortId = canonicalHash({ kind: "hierarchical-strategic-cohort-v1", cohortInterfaceHash: cohortInterface.cohortInterfaceHash });
+    const memberEnvelopes = (membersByCohort.get(cohortInterface.cohortInterfaceHash) ?? [])
+      .map((member) => member.memberEnvelopeHash).sort(compareText);
+    const membershipProofHashes = [...(proofHashesByCohort.get(cohortInterface.cohortInterfaceHash) ?? [])].sort(compareText);
+    const payload = { cohortId, cohortInterfaceHash: cohortInterface.cohortInterfaceHash, memberEnvelopeHashes: memberEnvelopes, membershipProofHashes };
+    return { ...payload, cohortMaterializationHash: canonicalHash(payload) };
+  }).sort((left, right) => compareText(left.cohortId, right.cohortId));
+  const cohortInterfaces = [...cohortInterfaceByHash.values()].sort((left, right) =>
+    compareText(left.cohortInterfaceHash, right.cohortInterfaceHash));
+  const canonicalEnvelopes = [...envelopes].sort((left, right) => compareText(left.routeId, right.routeId) || compareText(left.routeHash, right.routeHash));
+  const canonicalMappings = [...mappings].sort((left, right) => compareText(left.routeId, right.routeId)
+    || compareText(left.routeHash, right.routeHash));
+  const canonicalProofs = [...proofs].sort((left, right) => compareText(left.routeId, right.routeId)
+    || compareText(left.routeHash, right.routeHash));
+  const payload = {
+    schemaVersion: STRATEGIC_COHORT_COMPRESSION_V1_SCHEMA_VERSION,
+    ...input.admission.canonicalSourceBindingManifest.commonBindings,
+    sourceBindingManifestHash: input.admission.sourceBindingManifestHash,
+    sourceComponentIds: input.admission.admittedComponents.map((component) => component.resourceComponentId).sort(compareText),
+    sourceMultiComponentArtifactHash: input.admission.canonicalSourceBindingManifest.multiComponentArtifactHash,
+    sourceAndComponentSetHash: input.admission.canonicalSourceBindingManifest.andComponentSetHash,
+    compressionStatus: "COMPLETE" as const,
+    evidenceBudget: input.evidenceBudget,
+    budgetExecution: emptyCohortBudgetExecution(),
+    cohorts,
+    cohortInterfaces,
+    routeToCohortMappings: canonicalMappings,
+    memberEnvelopes: canonicalEnvelopes,
+    equivalenceProofs: canonicalProofs,
+    coverageManifest: coverage,
+    cohortCount: cohorts.length,
+    compressionRatioObservation: {
+      inputRouteCount: records.length,
+      observedCohortCount: cohorts.length,
+      ratioNumerator: records.length,
+      ratioDenominator: cohorts.length,
+      cohortCountCompleteness: "EXACT" as const,
+      ratioInterpretation: "EXACT" as const,
+    },
+    reasonCodes: [] as readonly StrategicCohortCompressionReasonCodeV1[],
+    exhaustedDimensions: [] as const,
+    cohortUniverseHash: canonicalHash({ cohorts, cohortInterfaces, mappings: canonicalMappings }),
+    semanticBoundary: "HIERARCHICAL_STRATEGIC_COHORT_FACTS_NOT_DECISION" as const,
+  };
+  return deepFreeze({ ...payload, artifactHash: canonicalHash(payload) });
+};
+
+/** Internal test-support seam; validates already materialized publication evidence. */
+export function __validateTask5PublicationForTest(
+  envelopes: readonly RouteCohortMemberEnvelopeV1[],
+  mappings: readonly StrategicRouteCohortMappingFactV1[],
+  proofs: readonly StrategicCohortMembershipProofV1[],
+  cohortInterfaces: ReadonlyMap<string, StrategicCohortInterfaceV1>,
+): Task5IssueV1 | null {
+  return validateTask5Publication(envelopes, mappings, proofs, cohortInterfaces);
+}
+
+function validateTask5Publication(
+  envelopes: readonly RouteCohortMemberEnvelopeV1[],
+  mappings: readonly StrategicRouteCohortMappingFactV1[],
+  proofs: readonly StrategicCohortMembershipProofV1[],
+  cohortInterfaces: ReadonlyMap<string, StrategicCohortInterfaceV1>,
+): Task5IssueV1 | null {
+  const envelopeByHash = new Map<string, RouteCohortMemberEnvelopeV1>();
+  const envelopeRouteHashById = new Map<string, string>();
+  for (const envelope of envelopes) {
+    if (envelope.memberEnvelopeHash !== canonicalHash(payloadWithout(envelope, "memberEnvelopeHash"))) {
+      return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+    }
+    const priorRouteHash = envelopeRouteHashById.get(envelope.routeId);
+    if (priorRouteHash !== undefined && priorRouteHash !== envelope.routeHash) {
+      return { status: "REJECTED", reason: "ROUTE_ID_HASH_CONFLICT" };
+    }
+    envelopeRouteHashById.set(envelope.routeId, envelope.routeHash);
+    const previous = envelopeByHash.get(envelope.memberEnvelopeHash);
+    if (previous !== undefined && canonicalSerialize(previous) !== canonicalSerialize(envelope)) {
+      return { status: "REJECTED", reason: "SIGNATURE_HASH_PAYLOAD_CONFLICT" };
+    }
+    envelopeByHash.set(envelope.memberEnvelopeHash, envelope);
+  }
+  const mappingByMember = new Map<string, StrategicRouteCohortMappingFactV1>();
+  const mappingMemberByRoute = new Map<string, string>();
+  for (const mapping of mappings) {
+    if (mappingByMember.has(mapping.memberEnvelopeHash)) {
+      return { status: "REJECTED", reason: "MEMBER_ENVELOPE_HASH_CONFLICT" };
+    }
+    const envelope = envelopeByHash.get(mapping.memberEnvelopeHash);
+    const cohortInterface = cohortInterfaces.get(mapping.cohortInterfaceHash);
+    if (envelope === undefined || cohortInterface === undefined) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+    const priorMember = mappingMemberByRoute.get(mapping.routeId);
+    if (priorMember !== undefined && priorMember !== mapping.memberEnvelopeHash) {
+      return { status: "REJECTED", reason: "MEMBER_ENVELOPE_HASH_CONFLICT" };
+    }
+    mappingMemberByRoute.set(mapping.routeId, mapping.memberEnvelopeHash);
+    if (mapping.routeId !== envelope.routeId || mapping.routeHash !== envelope.routeHash
+      || mapping.cohortId !== cohortIdOf(cohortInterface)
+      || canonicalSerialize(mapping.fourSignatureHashes) !== canonicalSerialize(cohortInterface.fourSignatureHashes)
+      || canonicalSerialize(cohortInterfaceOf(envelope)) !== canonicalSerialize(cohortInterface)
+      || mapping.mappingHash !== canonicalHash(payloadWithout(mapping, "mappingHash"))) {
+      return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+    }
+    mappingByMember.set(mapping.memberEnvelopeHash, mapping);
+  }
+  const proofByMember = new Map<string, StrategicCohortMembershipProofV1>();
+  for (const proof of proofs) {
+    if (proofByMember.has(proof.memberEnvelopeHash)) {
+      return { status: "REJECTED", reason: "MEMBER_ENVELOPE_HASH_CONFLICT" };
+    }
+    const mapping = mappingByMember.get(proof.memberEnvelopeHash);
+    const cohortInterface = cohortInterfaces.get(proof.cohortInterfaceHash);
+    const envelope = envelopeByHash.get(proof.memberEnvelopeHash);
+    if (mapping === undefined) {
+      return { status: "INCONCLUSIVE", reason: "INCOMPLETE_ROUTE_MAPPING" };
+    }
+    if (cohortInterface === undefined || envelope === undefined) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+    if (proof.routeId !== envelope.routeId || proof.routeHash !== envelope.routeHash
+      || proof.mappingHash !== mapping.mappingHash
+      || proof.cohortInterfaceHash !== mapping.cohortInterfaceHash
+      || canonicalSerialize(proof.fourSignatureHashes) !== canonicalSerialize(cohortInterface.fourSignatureHashes)
+      || proof.proofHash !== canonicalHash(payloadWithout(proof, "proofHash"))
+      || canonicalSerialize(proof.canonicalRolePositionBijectionWitness)
+        !== canonicalSerialize(canonicalRoleWitnessOf(envelope))) {
+      return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+    }
+    proofByMember.set(proof.memberEnvelopeHash, proof);
+  }
+  for (const envelope of envelopes) {
+    if (!mappingByMember.has(envelope.memberEnvelopeHash)) {
+      return { status: "INCONCLUSIVE", reason: "INCOMPLETE_ROUTE_MAPPING" };
+    }
+    if (!proofByMember.has(envelope.memberEnvelopeHash)) {
+      return { status: "INCONCLUSIVE", reason: "INCOMPLETE_EQUIVALENCE_PROOF" };
+    }
+  }
+  return null;
+}
+
+function cohortIdOf(cohortInterface: StrategicCohortInterfaceV1): string {
+  return canonicalHash({ kind: "hierarchical-strategic-cohort-v1", cohortInterfaceHash: cohortInterface.cohortInterfaceHash });
+}
+
+function task5RecordsOf(input: PhaseDTask5InputV1): Readonly<{ records: readonly Task5RecordV1[] }> | Readonly<{ issue: Task5IssueV1 }> {
+  const admissionIntegrityIssue = admissionIntegrityIssueForTask5(input.admission);
+  if (admissionIntegrityIssue !== null) return { issue: admissionIntegrityIssue };
+  const task4IntegrityIssue = task4IntegrityIssueForTask5(input.task4);
+  if (task4IntegrityIssue !== null) return { issue: task4IntegrityIssue };
+  if (input.task4.task4Status !== "COMPLETE" || input.task4.routeRelevantConflictClosures === null
+    || input.task4.occurrenceUniverse === null) {
+    return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+  }
+  const admission = input.admission;
+  if (input.task4.sourceBindingManifestHash !== admission.sourceBindingManifestHash
+    || input.task4.sourceAndComponentSetHash !== admission.canonicalSourceBindingManifest.andComponentSetHash) {
+    return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+  }
+  const drafts = new Map<string, NormalizedRouteCohortMemberDraftV1>();
+  const draftRouteHashByRouteId = new Map<string, string>();
+  for (const draft of input.normalizedMemberDrafts) {
+    if (draft.normalizationHash !== canonicalHash(payloadWithout(draft, "normalizationHash"))) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" } };
+    }
+    const priorRouteHash = draftRouteHashByRouteId.get(draft.routeId);
+    if (priorRouteHash !== undefined && priorRouteHash !== draft.routeHash) {
+      return { issue: { status: "REJECTED", reason: "ROUTE_ID_HASH_CONFLICT" } };
+    }
+    draftRouteHashByRouteId.set(draft.routeId, draft.routeHash);
+    const key = routeKeyOf(draft.routeId, draft.routeHash);
+    if (drafts.has(key)) return { issue: { status: "REJECTED", reason: "MEMBER_ENVELOPE_HASH_CONFLICT" } };
+    drafts.set(key, draft);
+  }
+  const closures = new Map<string, RouteRelevantConflictClosureV1>();
+  const closureHashByRouteId = new Map<string, string>();
+  for (const closure of input.task4.routeRelevantConflictClosures) {
+    if (closure.closureHash !== canonicalHash(payloadWithout(closure, "closureHash"))) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" } };
+    }
+    const key = routeKeyOf(closure.routeId, closure.routeHash);
+    const priorRouteHash = closureHashByRouteId.get(closure.routeId);
+    if (priorRouteHash !== undefined && priorRouteHash !== closure.routeHash) {
+      return { issue: { status: "REJECTED", reason: "ROUTE_ID_HASH_CONFLICT" } };
+    }
+    closureHashByRouteId.set(closure.routeId, closure.routeHash);
+    if (closures.has(key)) return { issue: { status: "REJECTED", reason: "SIGNATURE_HASH_PAYLOAD_CONFLICT" } };
+    closures.set(key, closure);
+  }
+  const endpointBindingIssue = endpointBindingIssueForTask5(admission);
+  if (endpointBindingIssue !== null) return { issue: endpointBindingIssue };
+  const records: Task5RecordV1[] = [];
+  const admittedRouteKeys = new Set<string>();
+  for (const component of canonicalComponentSources(admission.canonicalSourceBindingManifest.componentSources)) {
+    for (const route of component.routeArtifact.routeCandidates ?? []) {
+      const key = routeKeyOf(route.routeId, route.routeHash);
+      admittedRouteKeys.add(key);
+      const draft = drafts.get(key);
+      const closure = closures.get(key);
+      if (closure === undefined && closureHashByRouteId.has(route.routeId)) {
+        return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+      }
+      if (draft === undefined || closure === undefined) return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_LINEAGE_COVERAGE" } };
+      if (draft.resourceComponentId !== component.resourceComponentId
+        || draft.sourceArtifactHash !== component.routeArtifactHash
+        || draft.sourceRouteUniverseHash !== component.routeUniverseHash
+        || draft.sourceAndComponentSetHash !== admission.canonicalSourceBindingManifest.andComponentSetHash
+        || closure.sourceArtifactHash !== component.routeArtifactHash) {
+        return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+      }
+      records.push({ component, route, draft, closure });
+    }
+  }
+  for (const draftKey of drafts.keys()) {
+    if (!admittedRouteKeys.has(draftKey)) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+    }
+  }
+  if (records.length !== drafts.size || records.length !== closures.size) {
+    return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_LINEAGE_COVERAGE" } };
+  }
+  const routeIds = new Set(records.map((record) => record.route.routeId));
+  if (input.task4.occurrenceUniverse?.sourceRouteIds.some((routeId) => !routeIds.has(routeId)) === true) {
+    return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+  }
+  return { records: records.sort((left, right) => compareRouteRecord(left, right)) };
+}
+
+function admissionIntegrityIssueForTask5(admission: PhaseDSourceAdmissionSuccessV1): Task5IssueV1 | null {
+  if (admission.admissionStatus !== "ADMITTED") {
+    return { status: "INCONCLUSIVE", reason: "SOURCE_BINDING_INCOMPLETE" };
+  }
+  const manifest = admission.canonicalSourceBindingManifest;
+  if (manifest.manifestHash !== canonicalHash(
+    manifestPayloadOf(manifest, canonicalComponentSources(manifest.componentSources)),
+  ) || admission.sourceBindingManifestHash !== manifest.manifestHash) {
+    return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+  }
+  if (manifest.multiComponentArtifactHash !== manifest.multiComponentArtifact.artifactHash
+    || !selfBoundArtifact(manifest.multiComponentArtifact)) {
+    return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+  }
+  const c2Validation = validateMultiComponentArtifact(manifest.multiComponentArtifact);
+  if (c2Validation === "INCOMPLETE") {
+    return { status: "INCONCLUSIVE", reason: "SOURCE_BINDING_INCOMPLETE" };
+  }
+  if (c2Validation === "HASH_MISMATCH") {
+    return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+  }
+  if (c2Validation === "BINDING_MISMATCH"
+    || !sameKeyedComponentBindings(manifest.componentSources, manifest.multiComponentArtifact)) {
+    return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+  }
+  for (const component of canonicalComponentSources(manifest.componentSources)) {
+    const componentValidation = validateComponentSelfBindings(component);
+    if (componentValidation === "INCOMPLETE") {
+      return { status: "INCONCLUSIVE", reason: "SOURCE_BINDING_INCOMPLETE" };
+    }
+    if (componentValidation === "HASH_MISMATCH") {
+      return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+    }
+    if (componentValidation === "BINDING_MISMATCH") {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+  }
+  const expectedPayload = {
+    admissionStatus: "ADMITTED" as const,
+    canonicalSourceBindingManifest: manifest,
+    sourceBindingManifestHash: admission.sourceBindingManifestHash,
+    admittedComponents: admission.admittedComponents,
+    routeIdentityIndex: admission.routeIdentityIndex,
+    inputRouteCount: admission.inputRouteCount,
+  };
+  if (admission.admissionHash !== canonicalHash(expectedPayload)) {
+    return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+  }
+  return null;
+}
+
+function endpointBindingIssueForTask5(
+  admission: PhaseDSourceAdmissionSuccessV1,
+): Task5IssueV1 | null {
+  const endpoints = admission.canonicalSourceBindingManifest.multiComponentArtifact.andEndpointReferences;
+  if (endpoints === null) {
+    return { status: "INCONCLUSIVE", reason: "INCOMPLETE_LINEAGE_COVERAGE" };
+  }
+  const componentsById = new Map(
+    canonicalComponentSources(admission.canonicalSourceBindingManifest.componentSources)
+      .map((component) => [component.resourceComponentId, component] as const),
+  );
+  const routesByKey = new Map<string, Readonly<{
+    routeHash: string;
+    resourceComponentId: string;
+  }>>();
+  const routeHashById = new Map<string, string>();
+  for (const component of componentsById.values()) {
+    for (const route of component.routeArtifact.routeCandidates ?? []) {
+      routesByKey.set(routeKeyOf(route.routeId, route.routeHash), {
+        routeHash: route.routeHash,
+        resourceComponentId: component.resourceComponentId,
+      });
+      routeHashById.set(route.routeId, route.routeHash);
+    }
+  }
+  for (const endpoint of endpoints) {
+    const component = componentsById.get(endpoint.resourceComponentId);
+    if (component === undefined) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+    if (endpoint.andComponentSetHash !== admission.canonicalSourceBindingManifest.andComponentSetHash
+      || endpoint.sourceArtifactHash !== component.routeArtifactHash
+      || endpoint.sourceRouteUniverseHash !== component.routeUniverseHash) {
+      return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+    }
+    for (const reference of endpoint.routeReferences) {
+      const route = routesByKey.get(routeKeyOf(reference.routeId, reference.routeHash));
+      if (route === undefined) {
+        if (routeHashById.has(reference.routeId)) {
+          return { status: "REJECTED", reason: "ROUTE_ID_HASH_CONFLICT" };
+        }
+        return { status: "INCONCLUSIVE", reason: "INCOMPLETE_LINEAGE_COVERAGE" };
+      }
+      if (route.resourceComponentId !== endpoint.resourceComponentId) {
+        return { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" };
+      }
+    }
+  }
+  return null;
+}
+
+function task4IntegrityIssueForTask5(task4: PhaseDTask4ArtifactV1): Task5IssueV1 | null {
+  if (task4.artifactHash !== canonicalHash(canonicalTask4Payload(task4))) {
+    return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+  }
+  if (task4.routeRelevantConflictClosures !== null) {
+    for (const closure of task4.routeRelevantConflictClosures) {
+      if (closure.closureHash !== canonicalHash(canonicalClosurePayload(closure))) {
+        return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+      }
+    }
+  }
+  const universe = task4.occurrenceUniverse;
+  if (universe !== null
+    && universe.occurrenceUniverseHash !== canonicalHash(canonicalOccurrenceUniversePayload(universe))) {
+    return { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" };
+  }
+  return null;
+}
+
+function canonicalTask4Payload(task4: PhaseDTask4ArtifactV1) {
+  const { artifactHash: _artifactHash, ...payload } = task4;
+  return {
+    ...payload,
+    routeRelevantConflictClosures: payload.routeRelevantConflictClosures === null
+      ? null
+      : [...payload.routeRelevantConflictClosures].sort(compareCanonicalPayload),
+    occurrenceUniverse: payload.occurrenceUniverse === null
+      ? null
+      : {
+        ...canonicalOccurrenceUniversePayload(payload.occurrenceUniverse),
+        occurrenceUniverseHash: payload.occurrenceUniverse.occurrenceUniverseHash,
+      },
+  };
+}
+
+function canonicalClosurePayload(closure: RouteRelevantConflictClosureV1) {
+  const { closureHash: _closureHash, ...payload } = closure;
+  return {
+    ...payload,
+    seedReferences: [...payload.seedReferences].sort(compareReference),
+    traversedReferenceEdges: [...payload.traversedReferenceEdges].sort(compareEdge),
+    reservationFactIds: [...payload.reservationFactIds].sort(compareText),
+    alternativeFactIds: [...payload.alternativeFactIds].sort(compareText),
+    conflictFactIds: [...payload.conflictFactIds].sort(compareText),
+    resourceUnitIds: [...payload.resourceUnitIds].sort(compareText),
+    branchLocalResolutionWitnesses: [...payload.branchLocalResolutionWitnesses].sort(compareCanonicalPayload),
+  };
+}
+
+function canonicalOccurrenceUniversePayload(universe: PhaseDRouteOccurrenceUniverseV1) {
+  const { occurrenceUniverseHash: _occurrenceUniverseHash, ...payload } = universe;
+  return {
+    ...payload,
+    sourceRouteIds: [...payload.sourceRouteIds].sort(compareText),
+    physicalOccurrenceKeys: [...payload.physicalOccurrenceKeys].sort(compareTuple),
+    wildcardOccurrenceKeys: [...payload.wildcardOccurrenceKeys].sort(compareTuple),
+    familyMemberOccurrenceKeys: [...payload.familyMemberOccurrenceKeys].sort(compareTuple),
+    reservationOccurrenceKeys: [...payload.reservationOccurrenceKeys].sort(compareTuple),
+    conflictOccurrenceKeys: [...payload.conflictOccurrenceKeys].sort(compareTuple),
+    endpointOccurrenceKeys: [...payload.endpointOccurrenceKeys].sort(compareTuple),
+  };
+}
+
+function memberEnvelopeOf(
+  record: Task5RecordV1,
+  admission: PhaseDSourceAdmissionSuccessV1,
+  endpointProjectionsByRoute: ReadonlyMap<string, readonly Task5EndpointProjectionV1[]>,
+): Readonly<{ value: RouteCohortMemberEnvelopeV1 }> | Readonly<{ issue: Task5IssueV1 }> {
+  const { route, draft, closure, component } = record;
+  const alternatives = new Map(component.reservationArtifact.reservationAlternatives.map((value) =>
+    [value.alternativeReservationFactId, value]));
+  const conflicts = new Map(component.reservationArtifact.conflictFacts.map((value) => [value.conflictFactId, value]));
+  const reservations = new Map(component.reservationArtifact.reservationFacts.map((value) => [value.reservationFactId, value]));
+  const conflictFacts = closure.conflictFactIds.map((id) => conflicts.get(id));
+  const reservationFacts = closure.reservationFactIds.map((id) => reservations.get(id));
+  const alternativeFacts = closure.alternativeFactIds.map((id) => alternatives.get(id));
+  if (conflictFacts.some((value) => value === undefined) || reservationFacts.some((value) => value === undefined)
+    || alternativeFacts.some((value) => value === undefined)) {
+    return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+  }
+  const conflictInterfaceResult = conflictInterfaceOf(
+    route,
+    closure,
+    conflictFacts as readonly StrategicReservationConflictFactV1[],
+    reservationFacts as readonly StrategicResourceReservationFactV1[],
+    alternativeFacts as readonly StrategicReservationAlternativeFactV1[],
+    allocationPayloadIndexOf(component.hierarchyBatch),
+  );
+  if ("issue" in conflictInterfaceResult) return conflictInterfaceResult;
+  const conflictInterface = conflictInterfaceResult.value;
+  const endpointProjections = endpointProjectionsByRoute.get(routeKeyOf(route.routeId, route.routeHash)) ?? [];
+  const endpointInterface = endpointInterfaceOf(route, draft, endpointProjections);
+  const lineage = lineageOf(route, draft, closure, reservationFacts as readonly StrategicResourceReservationFactV1[],
+    conflictFacts as readonly StrategicReservationConflictFactV1[], alternativeFacts as readonly StrategicReservationAlternativeFactV1[], endpointProjections);
+  if ("issue" in lineage) return lineage;
+  const payload = {
+    routeId: route.routeId,
+    routeHash: route.routeHash,
+    resourceComponentId: draft.resourceComponentId,
+    sourceArtifactHash: draft.sourceArtifactHash,
+    sourceRouteUniverseHash: draft.sourceRouteUniverseHash,
+    sourceAndComponentSetHash: draft.sourceAndComponentSetHash,
+    normalizationHash: draft.normalizationHash,
+    structuralInterface: draft.structuralInterface,
+    resourceInterface: draft.resourceInterface,
+    canonicalResourceRoleVector: draft.canonicalResourceRoleVector,
+    routeRelevantConflictClosure: closure,
+    conflictInterface,
+    endpointInterface,
+    ...lineage.value,
+    upstreamProvenanceHashes: [draft.normalizationHash, closure.closureHash, component.reservationArtifactHash,
+      component.routeArtifactHash, canonicalSourceBindingManifestHashOf(admission)].sort(compareText),
+  };
+  return { value: { ...payload, memberEnvelopeHash: canonicalHash(payload) } };
+}
+
+function endpointProjectionOf(
+  endpoint: StrategicComponentAndEndpointReferenceV1,
+): Task5EndpointProjectionV1 {
+  return {
+    componentEndpointId: endpoint.componentEndpointId,
+    resourceComponentId: endpoint.resourceComponentId,
+    sourceArtifactHash: endpoint.sourceArtifactHash,
+    sourceRouteUniverseHash: endpoint.sourceRouteUniverseHash,
+    andComponentSetHash: endpoint.andComponentSetHash,
+    endpointHash: endpoint.endpointHash,
+    semanticBoundary: endpoint.semanticBoundary,
+    dependencyArity: endpoint.routeReferences.length,
+  };
+}
+
+function endpointIndexOf(
+  admission: PhaseDSourceAdmissionSuccessV1,
+): Task5EndpointIndexV1 {
+  const endpointByComponentId = new Map<string, Task5EndpointProjectionV1>();
+  const endpointProjectionByHash = new Map<string, Task5EndpointProjectionV1>();
+  const endpointProjectionsByRoute = new Map<string, Task5EndpointProjectionV1[]>();
+  const endpointIdsByRoute = new Map<string, Set<string>>();
+  let endpointRouteEdgeCount = 0;
+  for (const endpoint of admission.canonicalSourceBindingManifest.multiComponentArtifact.andEndpointReferences ?? []) {
+    const projection = endpointProjectionOf(endpoint);
+    endpointByComponentId.set(endpoint.resourceComponentId, projection);
+    endpointProjectionByHash.set(endpoint.endpointHash, projection);
+    for (const reference of endpoint.routeReferences) {
+      endpointRouteEdgeCount += 1;
+      const key = routeKeyOf(reference.routeId, reference.routeHash);
+      const ids = endpointIdsByRoute.get(key);
+      if (ids === undefined) {
+        endpointIdsByRoute.set(key, new Set([projection.componentEndpointId]));
+        endpointProjectionsByRoute.set(key, [projection]);
+      } else if (!ids.has(projection.componentEndpointId)) {
+        ids.add(projection.componentEndpointId);
+        endpointProjectionsByRoute.get(key)!.push(projection);
+      }
+    }
+  }
+  for (const entries of endpointProjectionsByRoute.values()) {
+    entries.sort(compareEndpointProjection);
+  }
+  return {
+    endpointByComponentId,
+    endpointProjectionByHash,
+    endpointProjectionsByRoute,
+    endpointRouteEdgeCount,
+  };
+}
+
+function compareEndpointProjection(
+  left: Task5EndpointProjectionV1,
+  right: Task5EndpointProjectionV1,
+): number {
+  return compareText(left.componentEndpointId, right.componentEndpointId)
+    || compareText(left.endpointHash, right.endpointHash);
+}
+
+function conflictInterfaceOf(
+  route: StrategicRouteCandidateFactV1,
+  closure: RouteRelevantConflictClosureV1,
+  conflicts: readonly StrategicReservationConflictFactV1[],
+  reservations: readonly StrategicResourceReservationFactV1[],
+  alternatives: readonly StrategicReservationAlternativeFactV1[],
+  allocationPayloadByHash: ResourceReplayContextV1["allocationPayloadByHash"],
+): Readonly<{ value: StrategicCohortConflictInterfaceV1 }> | Readonly<{ issue: Task5IssueV1 }> {
+  const claims = reservations.flatMap((reservation) => reservation.claims);
+  const claimById = uniqueMap(claims, (claim) => claim.claimId);
+  if (claimById === null) return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+  const alternativeById = uniqueMap(alternatives, (alternative) => alternative.alternativeReservationFactId);
+  if (alternativeById === null) return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+  const allocationInterfaceOf = (
+    alternative: StrategicReservationAlternativeFactV1,
+  ): StrategicCohortWildcardAllocationInterfaceV1 | Task5IssueV1 => {
+    const semanticAllocations: Readonly<{ canonicalGroupType: StrategicWildcardAllocationLineageV1["canonicalGroupType"]; allocationCardinality: number; canonicalAllocationRoleVector: readonly string[] }>[] = [];
+    for (const lineage of alternative.wildcardAllocationLineage) {
+      const allocationPayload = allocationPayloadByHash.get(lineage.allocationVariantHash);
+      if (allocationPayload === undefined
+        || allocationPayload.canonicalGroupType !== lineage.canonicalGroupType
+        || !sameSet(allocationPayload.wildcardCardIds, lineage.wildcardCardIds)) {
+        return { status: "INCONCLUSIVE", reason: "MISSING_WILDCARD_ALLOCATION_PAYLOAD" };
+      }
+      semanticAllocations.push({
+        canonicalGroupType: allocationPayload.canonicalGroupType,
+        allocationCardinality: allocationPayload.wildcardCardIds.length,
+        canonicalAllocationRoleVector: Array.from(
+          { length: allocationPayload.wildcardCardIds.length },
+          () => "WILDCARD_ALLOCATION",
+        ),
+      });
+    }
+    const payload = {
+      canonicalGroupType: alternative.groupType,
+      allocationCardinality: alternative.physicalCardIds.length,
+      canonicalAllocationRoleVector: semanticAllocations
+        .flatMap((allocation) => allocation.canonicalAllocationRoleVector)
+        .sort(compareText),
+    };
+    return { ...payload, allocationInterfaceHash: canonicalHash(payload) };
+  };
+  const allocationInterfaces: StrategicCohortWildcardAllocationInterfaceV1[] = [];
+  for (const alternative of alternatives) {
+    const allocationInterface = allocationInterfaceOf(alternative);
+    if ("status" in allocationInterface) return { issue: allocationInterface };
+    allocationInterfaces.push(allocationInterface);
+  }
+  const claimantRoles = new Set<StrategicReservationClaimRoleV1>();
+  for (const conflict of conflicts) {
+    for (const alternativeId of conflict.alternativeReservationFactIds) {
+      const alternative = alternativeById.get(alternativeId);
+      const claim = alternative === undefined ? undefined : claimById.get(alternative.claimId);
+      if (claim === undefined) {
+        return { issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_CONFLICT_CLOSURE" } };
+      }
+      claim.claimRoles.forEach((role) => claimantRoles.add(role));
+    }
+  }
+  const routeClaimIncidence: string[] = [];
+  for (const routeClaim of route.resourceClaims) {
+    const sourceClaim = claimById.get(routeClaim.claimId);
+    if (sourceClaim === undefined || sourceClaim.claimHash !== routeClaim.claimHash
+      || sourceClaim.familyId !== routeClaim.familyId
+      || !sameSet(sourceClaim.claimRoles, routeClaim.claimRoles)) {
+      return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+    }
+    const selectedAllocations: StrategicCohortWildcardAllocationInterfaceV1[] = [];
+    for (const alternativeId of routeClaim.alternativeReservationFactIds) {
+      const alternative = alternativeById.get(alternativeId);
+      if (alternative === undefined || alternative.claimId !== routeClaim.claimId) {
+        return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+      }
+      const allocationInterface = allocationInterfaceOf(alternative);
+      if ("status" in allocationInterface) return { issue: allocationInterface };
+      selectedAllocations.push(allocationInterface);
+    }
+    const semanticClaim = {
+      claimRoles: sortedUnique(routeClaim.claimRoles),
+      hierarchyTier: routeClaim.hierarchyTier,
+      controlRank: routeClaim.controlRank,
+      efficiencyRank: routeClaim.efficiencyRank,
+      reservationClass: routeClaim.reservationClass,
+      physicalCardinality: routeClaim.physicalCardIds.length,
+      wildcardCardinality: routeClaim.wildcardCardIds.length,
+      alternatives: selectedAllocations.sort(compareCanonicalPayload),
+    };
+    routeClaimIncidence.push(canonicalHash(semanticClaim));
+  }
+  const branchIncidence: string[] = [];
+  for (const witness of closure.branchLocalResolutionWitnesses) {
+    const conflict = conflicts.find((candidate) => candidate.conflictFactId === witness.conflictFactId);
+    if (conflict === undefined) return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+    const selectedAllocations: StrategicCohortWildcardAllocationInterfaceV1[] = [];
+    for (const alternativeId of witness.selectedAlternativeReservationFactIds) {
+      const alternative = alternativeById.get(alternativeId);
+      if (alternative === undefined || !conflict.alternativeReservationFactIds.includes(alternativeId)) {
+        return { issue: { status: "REJECTED", reason: "SOURCE_BINDING_MISMATCH" } };
+      }
+      const allocationInterface = allocationInterfaceOf(alternative);
+      if ("status" in allocationInterface) return { issue: allocationInterface };
+      selectedAllocations.push(allocationInterface);
+    }
+    branchIncidence.push(canonicalHash({
+      conflictKinds: [...conflict.conflictKinds].sort(compareText),
+      selectedAllocations: selectedAllocations.sort(compareCanonicalPayload),
+    }));
+  }
+  const payload = {
+    conflictKinds: unique(conflicts.flatMap((conflict) => conflict.conflictKinds)).sort(compareText),
+    resolutionStates: conflicts.length === 0 ? [] : ["UNRESOLVED" as const],
+    claimantRoleVector: [...claimantRoles].sort(compareText),
+    alternativeAllocationInterfaces: allocationInterfaces.sort(compareCanonicalPayload),
+    routeClaimIncidenceVector: [...new Set([...routeClaimIncidence, ...branchIncidence])].sort(compareText),
+    crossTierContention: conflicts.some((conflict) => conflict.conflictKinds.includes("CROSS_TIER_CLAIM")),
+    wildcardContention: conflicts.some((conflict) => conflict.conflictKinds.includes("WILDCARD_CONTENTION")),
+  };
+  return { value: { ...payload, conflictSignatureHash: canonicalHash(payload) } };
+}
+
+function endpointInterfaceOf(
+  route: StrategicRouteCandidateFactV1,
+  draft: NormalizedRouteCohortMemberDraftV1,
+  endpoints: readonly Task5EndpointProjectionV1[],
+): StrategicCohortEndpointInterfaceV1 {
+  const topologyPayload = {
+    componentArity: unique(endpoints.map((endpoint) => endpoint.resourceComponentId)).length,
+    dependencyArityVector: endpoints.map((endpoint) => endpoint.dependencyArity).sort((left, right) => left - right),
+  };
+  const andTopology = { ...topologyPayload, topologyHash: canonicalHash(topologyPayload) };
+  const payload = {
+    routeClasses: [...route.endpointFacts.routeClasses].sort(compareText),
+    closedThroughTier: route.endpointFacts.closedThroughTier,
+    exactHandCountReduction: route.endpointFacts.exactHandCountReduction,
+    preservationFactCodes: [...route.endpointFacts.preservationFactCodes].sort(compareText),
+    remainderRoleVector: draft.canonicalResourceRoleVector.filter((slot) => slot.disposition === "REMAINDER"),
+    andTopology,
+    endpointArity: endpoints.length,
+  };
+  return { ...payload, endpointSignatureHash: canonicalHash(payload) };
+}
+
+function lineageOf(
+  route: StrategicRouteCandidateFactV1,
+  draft: NormalizedRouteCohortMemberDraftV1,
+  closure: RouteRelevantConflictClosureV1,
+  reservations: readonly StrategicResourceReservationFactV1[],
+  conflicts: readonly StrategicReservationConflictFactV1[],
+  alternatives: readonly StrategicReservationAlternativeFactV1[],
+  endpoints: readonly Task5EndpointProjectionV1[],
+): Readonly<{ value: Pick<RouteCohortMemberEnvelopeV1,
+  "physicalLineageOccurrences" | "wildcardLineageOccurrences" | "familyMemberOccurrences" | "reservationOccurrences" | "conflictOccurrences" | "endpointOccurrences"> }> | Readonly<{ issue: Task5IssueV1 }> {
+  const physicalLineageOccurrences = draft.task3MemberLocalLineage
+    .filter((entry): entry is Extract<StrategicCohortTask3MemberLocalLineageOccurrenceV1, { kind: "PHYSICAL" }> => entry.kind === "PHYSICAL")
+    .map((entry) => entry.occurrence).sort(compareCanonicalPayload);
+  const wildcardLineageOccurrences = draft.task3MemberLocalLineage
+    .filter((entry): entry is Extract<StrategicCohortTask3MemberLocalLineageOccurrenceV1, { kind: "WILDCARD" }> => entry.kind === "WILDCARD")
+    .map((entry) => entry.occurrence).sort(compareCanonicalPayload);
+  const familyMemberOccurrences = draft.task3MemberLocalLineage
+    .filter((entry): entry is Extract<StrategicCohortTask3MemberLocalLineageOccurrenceV1, { kind: "FAMILY_MEMBER" }> => entry.kind === "FAMILY_MEMBER")
+    .map((entry) => entry.occurrence);
+  for (const claim of route.resourceClaims) {
+    for (const memberId of claim.memberIds) {
+      const payload = { routeId: route.routeId, familyId: claim.familyId, memberId };
+      familyMemberOccurrences.push({ ...payload, occurrenceHash: canonicalHash(payload) });
+    }
+  }
+  for (const alternative of alternatives) {
+    const payload = { routeId: route.routeId, familyId: alternative.familyId, memberId: alternative.memberId };
+    familyMemberOccurrences.push({ ...payload, occurrenceHash: canonicalHash(payload) });
+  }
+  const reservationOccurrences = reservations.map((reservation) => {
+    const payload = { routeId: draft.routeId, reservationFactId: reservation.reservationFactId, reservationHash: reservation.reservationHash };
+    return { ...payload, occurrenceHash: canonicalHash(payload) };
+  }).sort(compareCanonicalPayload);
+  const conflictOccurrences = conflicts.map((conflict) => {
+    const payload = { routeId: draft.routeId, conflictFactId: conflict.conflictFactId, conflictHash: conflict.conflictHash };
+    return { ...payload, occurrenceHash: canonicalHash(payload) };
+  }).sort(compareCanonicalPayload);
+  const endpointOccurrences = endpoints.map((endpoint) => {
+    const payload = { routeId: draft.routeId, componentEndpointId: endpoint.componentEndpointId, endpointHash: endpoint.endpointHash };
+    return { ...payload, occurrenceHash: canonicalHash(payload) };
+  }).sort(compareCanonicalPayload);
+  return { value: { physicalLineageOccurrences, wildcardLineageOccurrences, familyMemberOccurrences: dedupeCanonical(familyMemberOccurrences),
+    reservationOccurrences, conflictOccurrences, endpointOccurrences } };
+}
+
+function cohortInterfaceOf(envelope: RouteCohortMemberEnvelopeV1): StrategicCohortInterfaceV1 {
+  const fourSignatureHashes: StrategicCohortFourSignatureHashesV1 = {
+    structuralSignatureHash: envelope.structuralInterface.structuralSignatureHash,
+    resourceSignatureHash: envelope.resourceInterface.resourceSignatureHash,
+    conflictSignatureHash: envelope.conflictInterface.conflictSignatureHash,
+    endpointSignatureHash: envelope.endpointInterface.endpointSignatureHash,
+  };
+  const payload = {
+    structuralInterface: envelope.structuralInterface,
+    resourceInterface: envelope.resourceInterface,
+    conflictInterface: envelope.conflictInterface,
+    endpointInterface: envelope.endpointInterface,
+    fourSignatureHashes,
+  };
+  return { ...payload, cohortInterfaceHash: canonicalHash(payload) };
+}
+
+function canonicalRoleWitnessOf(
+  envelope: RouteCohortMemberEnvelopeV1,
+): readonly CanonicalRolePositionBijectionWitnessV1[] {
+  const slotByPosition = new Map(envelope.canonicalResourceRoleVector.map((slot) =>
+    [slot.canonicalRolePosition, slot]));
+  return envelope.physicalLineageOccurrences.map((occurrence) => {
+    const slot = slotByPosition.get(occurrence.canonicalRolePosition);
+    if (slot === undefined) throw new Error("TASK5_MISSING_CANONICAL_ROLE_SLOT");
+    const payload = {
+      routeId: envelope.routeId,
+      physicalCardId: occurrence.physicalCardId,
+      canonicalRolePosition: occurrence.canonicalRolePosition,
+      roleSlotHash: slot.roleSlotHash,
+    };
+    return { ...payload, witnessHash: canonicalHash(payload) };
+  }).sort(compareCanonicalPayload);
+}
+
+function sourceBindingsOf(admission: PhaseDSourceAdmissionSuccessV1): readonly StrategicCohortSourceHashBindingV1[] {
+  const manifest = admission.canonicalSourceBindingManifest;
+  const bindings: StrategicCohortSourceHashBindingV1[] = [
+    { sourceKind: "PHASE_D_SOURCE_BINDING_MANIFEST", sourceHash: canonicalSourceBindingManifestHashOf(admission) },
+    { sourceKind: "MULTI_COMPONENT_AND_BINDING_ARTIFACT", sourceHash: canonicalMultiComponentArtifactHashOf(manifest.multiComponentArtifact) },
+  ];
+  for (const component of manifest.componentSources) {
+    bindings.push(
+      { sourceKind: "HIERARCHY_CLASSIFICATION_BATCH", sourceHash: component.hierarchyBatchHash },
+      { sourceKind: "RESOURCE_RESERVATION_ARTIFACT", sourceHash: component.reservationArtifactHash },
+      { sourceKind: "ROUTE_GENERATION_ARTIFACT", sourceHash: component.routeArtifactHash },
+      { sourceKind: "ROUTE_UNIVERSE", sourceHash: component.routeUniverseHash },
+    );
+  }
+  return bindings.sort((left, right) => compareText(left.sourceKind, right.sourceKind)
+    || compareText(left.sourceHash, right.sourceHash));
+}
+
+function canonicalSourceBindingManifestHashOf(admission: PhaseDSourceAdmissionSuccessV1): string {
+  const manifest = admission.canonicalSourceBindingManifest;
+  const multiComponentArtifact = manifest.multiComponentArtifact;
+  const canonicalMultiPayload = {
+    ...payloadWithout(multiComponentArtifact, "artifactHash"),
+    componentRouteFacts: multiComponentArtifact.componentRouteFacts === null
+      ? null : [...multiComponentArtifact.componentRouteFacts].sort(compareCanonicalPayload),
+    andEndpointReferences: multiComponentArtifact.andEndpointReferences === null
+      ? null : [...multiComponentArtifact.andEndpointReferences].sort(compareCanonicalPayload),
+  };
+  const canonicalMultiComponentArtifact = {
+    ...canonicalMultiPayload,
+    artifactHash: canonicalHash(canonicalMultiPayload),
+  };
+  const canonicalManifestPayload = {
+    ...payloadWithout(manifest, "manifestHash"),
+    componentSources: canonicalComponentSources(manifest.componentSources),
+    multiComponentArtifact: canonicalMultiComponentArtifact,
+    multiComponentArtifactHash: canonicalMultiComponentArtifact.artifactHash,
+  };
+  return canonicalHash(canonicalManifestPayload);
+}
+
+function canonicalMultiComponentArtifactHashOf(
+  artifact: StrategicMultiComponentAndBindingArtifactV1,
+): string {
+  const payload = {
+    ...payloadWithout(artifact, "artifactHash"),
+    componentRouteFacts: artifact.componentRouteFacts === null
+      ? null : [...artifact.componentRouteFacts].sort(compareCanonicalPayload),
+    andEndpointReferences: artifact.andEndpointReferences === null
+      ? null : [...artifact.andEndpointReferences].sort(compareCanonicalPayload),
+  };
+  return canonicalHash(payload);
+}
+
+function coverageOf(
+  source: PhaseDRouteOccurrenceUniverseV1,
+  envelopes: readonly RouteCohortMemberEnvelopeV1[],
+  mappings: readonly StrategicRouteCohortMappingFactV1[],
+  proofs: readonly StrategicCohortMembershipProofV1[],
+): StrategicCohortCoverageManifestV1 | null {
+  const sourceRouteIds = [...source.sourceRouteIds].sort(compareText);
+  const coveredRouteIds = unique(envelopes.map((envelope) => envelope.routeId)).sort(compareText);
+  if (canonicalSerialize(sourceRouteIds) !== canonicalSerialize(coveredRouteIds)) return null;
+  const coveredPhysical = envelopes.flatMap((envelope) => envelope.physicalLineageOccurrences
+    .map((occurrence) => [occurrence.routeId, occurrence.physicalCardId] as const));
+  const coveredWildcard = envelopes.flatMap((envelope) => envelope.wildcardLineageOccurrences
+    .map((occurrence) => [occurrence.routeId, occurrence.wildcardCardId, occurrence.allocationVariantHash] as const));
+  const coveredFamily = envelopes.flatMap((envelope) => envelope.familyMemberOccurrences
+    .map((occurrence) => [occurrence.routeId, occurrence.familyId, occurrence.memberId] as const));
+  const coveredReservation = envelopes.flatMap((envelope) => envelope.reservationOccurrences
+    .map((occurrence) => [occurrence.routeId, occurrence.reservationFactId] as const));
+  const coveredConflict = envelopes.flatMap((envelope) => envelope.conflictOccurrences
+    .map((occurrence) => [occurrence.routeId, occurrence.conflictFactId] as const));
+  const coveredEndpoint = envelopes.flatMap((envelope) => envelope.endpointOccurrences
+    .map((occurrence) => [occurrence.routeId, occurrence.componentEndpointId] as const));
+  if (!sameTupleSet(source.physicalOccurrenceKeys, coveredPhysical)
+    || !sameTupleSet(source.wildcardOccurrenceKeys, coveredWildcard)
+    || !sameTupleSet(source.familyMemberOccurrenceKeys, coveredFamily)
+    || !sameTupleSet(source.reservationOccurrenceKeys, coveredReservation)
+    || !sameTupleSet(source.conflictOccurrenceKeys, coveredConflict)
+    || !sameTupleSet(source.endpointOccurrenceKeys, coveredEndpoint)) return null;
+  const mappingByMember = new Map(mappings.map((mapping) => [mapping.memberEnvelopeHash, mapping] as const));
+  const proofByMember = new Map(proofs.map((proof) => [proof.memberEnvelopeHash, proof] as const));
+  const coverageWitnesses: StrategicCohortCoverageWitnessV1[] = [];
+  for (const envelope of envelopes) {
+    const mapping = mappingByMember.get(envelope.memberEnvelopeHash);
+    const proof = proofByMember.get(envelope.memberEnvelopeHash);
+    if (mapping === undefined || proof === undefined) return null;
+    const append = (
+      occurrenceKind: StrategicCohortCoverageWitnessV1["occurrenceKind"],
+      occurrenceKey: readonly string[],
+      occurrenceHash: string,
+    ) => {
+      const payload = {
+        occurrenceKind,
+        occurrenceKey,
+        occurrenceHash,
+        memberEnvelopeHash: envelope.memberEnvelopeHash,
+        mappingHash: mapping.mappingHash,
+        proofHash: proof.proofHash,
+      };
+      coverageWitnesses.push({ ...payload, witnessHash: canonicalHash(payload) });
+    };
+    for (const occurrence of envelope.physicalLineageOccurrences) {
+      append("PHYSICAL", [occurrence.routeId, occurrence.physicalCardId], occurrence.occurrenceHash);
+    }
+    for (const occurrence of envelope.wildcardLineageOccurrences) {
+      append("WILDCARD", [occurrence.routeId, occurrence.wildcardCardId, occurrence.allocationVariantHash], occurrence.occurrenceHash);
+    }
+    for (const occurrence of envelope.familyMemberOccurrences) {
+      append("FAMILY_MEMBER", [occurrence.routeId, occurrence.familyId, occurrence.memberId], occurrence.occurrenceHash);
+    }
+    for (const occurrence of envelope.reservationOccurrences) {
+      append("RESERVATION", [occurrence.routeId, occurrence.reservationFactId], occurrence.occurrenceHash);
+    }
+    for (const occurrence of envelope.conflictOccurrences) {
+      append("CONFLICT", [occurrence.routeId, occurrence.conflictFactId], occurrence.occurrenceHash);
+    }
+    for (const occurrence of envelope.endpointOccurrences) {
+      append("ENDPOINT", [occurrence.routeId, occurrence.componentEndpointId], occurrence.occurrenceHash);
+    }
+  }
+  const canonicalWitnesses = coverageWitnesses.sort(compareCanonicalPayload);
+  const payload = {
+    sourceOccurrenceUniverseHash: source.occurrenceUniverseHash,
+    inputRouteCount: sourceRouteIds.length,
+    coveredRouteCount: coveredRouteIds.length,
+    inputPhysicalOccurrenceCount: source.physicalOccurrenceKeys.length,
+    coveredPhysicalOccurrenceCount: coveredPhysical.length,
+    inputWildcardOccurrenceCount: source.wildcardOccurrenceKeys.length,
+    coveredWildcardOccurrenceCount: coveredWildcard.length,
+    inputFamilyMemberOccurrenceCount: source.familyMemberOccurrenceKeys.length,
+    coveredFamilyMemberOccurrenceCount: coveredFamily.length,
+    inputReservationOccurrenceCount: source.reservationOccurrenceKeys.length,
+    coveredReservationOccurrenceCount: coveredReservation.length,
+    inputConflictOccurrenceCount: source.conflictOccurrenceKeys.length,
+    coveredConflictOccurrenceCount: coveredConflict.length,
+    inputEndpointOccurrenceCount: source.endpointOccurrenceKeys.length,
+    coveredEndpointOccurrenceCount: coveredEndpoint.length,
+    coverageWitnesses: canonicalWitnesses,
+  };
+  return { ...payload, coverageHash: canonicalHash(payload) };
+}
+
+function sameTupleSet(left: readonly (readonly string[])[], right: readonly (readonly string[])[]): boolean {
+  const canonical = (values: readonly (readonly string[])[]) => values.map((value) => canonicalSerialize(value)).sort(compareText);
+  const leftValues = canonical(left);
+  const rightValues = canonical(right);
+  return leftValues.length === rightValues.length && leftValues.every((value, index) => value === rightValues[index]);
+}
+
+function dedupeCanonical<T extends Readonly<Record<string, unknown>>>(values: readonly T[]): readonly T[] {
+  const canonical = new Map<string, T>();
+  for (const value of values) canonical.set(canonicalSerialize(value), value);
+  return [...canonical.values()].sort(compareCanonicalPayload);
+}
+
+function emptyCohortBudgetExecution() {
+  const payload = { measurements: [], exhaustionProvenance: null };
+  return { ...payload, executionHash: canonicalHash(payload) };
+}
+
+function task5Terminal(
+  input: PhaseDTask5InputV1,
+  issue: Task5IssueV1,
+  observedCohortCount: number,
+): HierarchicalStrategicCohortCompressionArtifactV1 {
+  const manifest = input.admission.canonicalSourceBindingManifest;
+  const payload = {
+    schemaVersion: STRATEGIC_COHORT_COMPRESSION_V1_SCHEMA_VERSION,
+    ...manifest.commonBindings,
+    sourceBindingManifestHash: input.admission.sourceBindingManifestHash,
+    sourceComponentIds: input.admission.admittedComponents.map((component) => component.resourceComponentId).sort(compareText),
+    sourceMultiComponentArtifactHash: manifest.multiComponentArtifactHash,
+    sourceAndComponentSetHash: manifest.andComponentSetHash,
+    compressionStatus: issue.status,
+    evidenceBudget: input.evidenceBudget,
+    budgetExecution: emptyCohortBudgetExecution(),
+    cohorts: null,
+    cohortInterfaces: null,
+    routeToCohortMappings: null,
+    memberEnvelopes: null,
+    equivalenceProofs: null,
+    coverageManifest: null,
+    cohortCount: 0,
+    compressionRatioObservation: {
+      inputRouteCount: input.admission.inputRouteCount,
+      observedCohortCount,
+      ratioNumerator: input.admission.inputRouteCount,
+      ratioDenominator: null,
+      cohortCountCompleteness: null,
+      ratioInterpretation: "UNAVAILABLE" as const,
+    },
+    reasonCodes: [issue.reason] as readonly StrategicCohortCompressionReasonCodeV1[],
+    exhaustedDimensions: [] as const,
+    cohortUniverseHash: null,
+    semanticBoundary: "HIERARCHICAL_STRATEGIC_COHORT_FACTS_NOT_DECISION" as const,
+  };
+  return deepFreeze({ ...payload, artifactHash: canonicalHash(payload) });
 }
