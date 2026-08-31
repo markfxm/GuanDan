@@ -422,6 +422,17 @@ const task6CohortAdmissionForTest = (strategicCohortCompressionV1 as unknown as 
   __task6CohortAdmissionForTest?: Task6CohortAdmissionTestSeamV1;
 }).__task6CohortAdmissionForTest;
 
+type Task6StageDTestSeamV1 = (
+  input: PhaseDTask5InputV1,
+) => {
+  result: ReturnType<typeof materializePhaseDTask5V1>;
+  constructedWitnessCount: number;
+};
+
+const task6StageDForTest = (strategicCohortCompressionV1 as unknown as {
+  __task6StageDForTest?: Task6StageDTestSeamV1;
+}).__task6StageDForTest;
+
 describe("Task6.2 Stage-A materialization accounting", () => {
   it("Task6.2 counts all four Stage-A dimensions from one verified route event", () => {
     const { result } = materializeTask5WithBudget(makeValidPhaseDAdmissionInput(), phaseDTask5Budget());
@@ -436,7 +447,7 @@ describe("Task6.2 Stage-A materialization accounting", () => {
     const expectedCohortCount = new Set((result.cohortInterfaces ?? []).map((cohortInterface) =>
       canonicalSerialize(cohortInterface.fourSignatureHashes))).size;
 
-    expect(result.budgetExecution.measurements).toEqual([
+    expect(result.budgetExecution.measurements.slice(0, 4)).toEqual([
       {
         dimension: "MEMBER_ENVELOPE_COUNT",
         limit: phaseDTask5Budget().maxMemberEnvelopeCount,
@@ -841,6 +852,299 @@ describe("Task6.2 Stage-A materialization accounting", () => {
       observedCount: 50,
       measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
     });
+  });
+});
+
+describe("Task6.3 mappings, proofs, and coverage accounting", () => {
+  it("Task6.3 counts mappings in canonical mapping order", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    if (baseline.compressionStatus !== "COMPLETE"
+      || baseline.routeToCohortMappings === null) throw new Error("Expected complete mapping baseline");
+    const totals = stageATotalsOf(baseline);
+    const mappingCount = baseline.routeToCohortMappings.length;
+    const result = materializePhaseDTask5V1({
+      ...prepared.input,
+      evidenceBudget: stageABudgetAboveTotals(totals, { maxRouteMappingCount: mappingCount }),
+    });
+
+    expect(result.compressionStatus).toBe("COMPLETE");
+    if (result.routeToCohortMappings === null) throw new Error("Expected complete mappings");
+    expect(result.routeToCohortMappings).toEqual([...result.routeToCohortMappings].sort((left, right) =>
+      compareTask6Text(left.routeId, right.routeId) || compareTask6Text(left.routeHash, right.routeHash)));
+    expect(result.budgetExecution.measurements.map(({ dimension }) => dimension))
+      .toEqual(TASK6_TEST_DIMENSION_ORDER);
+    expect(stageAMeasurementOf(result, "ROUTE_MAPPING_COUNT")).toEqual({
+      dimension: "ROUTE_MAPPING_COUNT",
+      limit: mappingCount,
+      observedCount: mappingCount,
+      measurementCompleteness: "EXACT",
+    });
+    expect(result.budgetExecution.measurements.every(({ measurementCompleteness }) =>
+      measurementCompleteness === "EXACT")).toBe(true);
+    expect(result.budgetExecution.exhaustionProvenance).toBeNull();
+    expect(result.exhaustedDimensions).toEqual([]);
+  });
+
+  it("Task6.3 counts proofs only after their mappings are complete", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    if (baseline.compressionStatus !== "COMPLETE"
+      || baseline.routeToCohortMappings === null
+      || baseline.equivalenceProofs === null) throw new Error("Expected complete proof baseline");
+    const totals = stageATotalsOf(baseline);
+    const mappingCount = baseline.routeToCohortMappings.length;
+    const proofCount = baseline.equivalenceProofs.length;
+    const result = materializePhaseDTask5V1({
+      ...prepared.input,
+      evidenceBudget: stageABudgetAboveTotals(totals, {
+        maxRouteMappingCount: mappingCount,
+        maxEquivalenceProofCount: proofCount,
+      }),
+    });
+
+    expect(result.compressionStatus).toBe("COMPLETE");
+    expect(stageAMeasurementOf(result, "ROUTE_MAPPING_COUNT")).toMatchObject({
+      observedCount: mappingCount,
+      measurementCompleteness: "EXACT",
+    });
+    expect(stageAMeasurementOf(result, "EQUIVALENCE_PROOF_COUNT")).toEqual({
+      dimension: "EQUIVALENCE_PROOF_COUNT",
+      limit: proofCount,
+      observedCount: proofCount,
+      measurementCompleteness: "EXACT",
+    });
+    expect(result.equivalenceProofs).toHaveLength(proofCount);
+  });
+
+  it("Task6.3 counts one witness per actual coverage occurrence", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    if (baseline.compressionStatus !== "COMPLETE" || baseline.coverageManifest === null) {
+      throw new Error("Expected complete coverage baseline");
+    }
+    const totals = stageATotalsOf(baseline);
+    const witnessCount = coverageWitnessTotalOf(prepared.input);
+    expect(witnessCount).toBe(baseline.coverageManifest.coverageWitnesses.length);
+    const result = materializePhaseDTask5V1({
+      ...prepared.input,
+      evidenceBudget: stageABudgetAboveTotals(totals, {
+        maxLineageOccurrenceWitnessCount: witnessCount,
+      }),
+    });
+
+    expect(result.compressionStatus).toBe("COMPLETE");
+    if (result.coverageManifest === null) throw new Error("Expected complete coverage");
+    expect(result.coverageManifest.coverageWitnesses).toHaveLength(witnessCount);
+    expect(stageAMeasurementOf(result, "LINEAGE_OCCURRENCE_WITNESS_COUNT")).toEqual({
+      dimension: "LINEAGE_OCCURRENCE_WITNESS_COUNT",
+      limit: witnessCount,
+      observedCount: witnessCount,
+      measurementCompleteness: "EXACT",
+    });
+  });
+
+  it("Task6.3 stops Stage-D witness materialization at limit plus one", () => {
+    if (task6StageDForTest === undefined) {
+      throw new Error("Task6.3 missing __task6StageDForTest seam");
+    }
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    if (baseline.compressionStatus !== "COMPLETE") throw new Error("Expected complete Stage-D baseline");
+    const witnessCount = coverageWitnessTotalOf(prepared.input);
+    expect(witnessCount).toBeGreaterThan(3);
+    const observed = task6StageDForTest({
+      ...prepared.input,
+      evidenceBudget: stageABudgetAboveTotals(stageATotalsOf(baseline), {
+        maxLineageOccurrenceWitnessCount: 2,
+      }),
+    });
+    expect(observed.result.compressionStatus).toBe("INCONCLUSIVE");
+    expect(stageAMeasurementOf(observed.result, "LINEAGE_OCCURRENCE_WITNESS_COUNT")).toEqual({
+      dimension: "LINEAGE_OCCURRENCE_WITNESS_COUNT",
+      limit: 2,
+      observedCount: 3,
+      measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+    });
+    expect(observed.constructedWitnessCount).toBe(3);
+  });
+
+  it("Task6.3 reports mapping, proof, and witness limit plus one without partial payload", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    if (baseline.compressionStatus !== "COMPLETE"
+      || baseline.routeToCohortMappings === null
+      || baseline.equivalenceProofs === null
+      || baseline.coverageManifest === null) throw new Error("Expected complete Task6.3 baseline");
+    const totals = stageATotalsOf(baseline);
+    const mappingCount = baseline.routeToCohortMappings.length;
+    const proofCount = baseline.equivalenceProofs.length;
+    const witnessCount = coverageWitnessTotalOf(prepared.input);
+    expect(mappingCount).toBeGreaterThan(1);
+    expect(proofCount).toBeGreaterThan(1);
+    expect(witnessCount).toBeGreaterThan(1);
+
+    const mappingTerminal = materializePhaseDTask5V1({
+      ...prepared.input,
+      evidenceBudget: stageABudgetAboveTotals(totals, { maxRouteMappingCount: mappingCount - 1 }),
+    });
+    expect(mappingTerminal.compressionStatus).toBe("INCONCLUSIVE");
+    expect(mappingTerminal.exhaustedDimensions).toEqual(["ROUTE_MAPPING_COUNT"]);
+    expect(mappingTerminal.budgetExecution.measurements.map(({ dimension }) => dimension))
+      .toEqual(TASK6_TEST_DIMENSION_ORDER.slice(0, 5));
+    expect(stageAMeasurementOf(mappingTerminal, "ROUTE_MAPPING_COUNT")).toEqual({
+      dimension: "ROUTE_MAPPING_COUNT",
+      limit: mappingCount - 1,
+      observedCount: mappingCount,
+      measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+    });
+    expectTask6StageATerminalPayload(mappingTerminal);
+
+    const proofTerminal = materializePhaseDTask5V1({
+      ...prepared.input,
+      evidenceBudget: stageABudgetAboveTotals(totals, {
+        maxRouteMappingCount: mappingCount,
+        maxEquivalenceProofCount: proofCount - 1,
+      }),
+    });
+    expect(proofTerminal.compressionStatus).toBe("INCONCLUSIVE");
+    expect(proofTerminal.exhaustedDimensions).toEqual(["EQUIVALENCE_PROOF_COUNT"]);
+    expect(proofTerminal.budgetExecution.measurements.map(({ dimension }) => dimension))
+      .toEqual(TASK6_TEST_DIMENSION_ORDER.slice(0, 6));
+    expect(stageAMeasurementOf(proofTerminal, "ROUTE_MAPPING_COUNT")).toMatchObject({
+      observedCount: mappingCount,
+      measurementCompleteness: "EXACT",
+    });
+    expect(stageAMeasurementOf(proofTerminal, "EQUIVALENCE_PROOF_COUNT")).toEqual({
+      dimension: "EQUIVALENCE_PROOF_COUNT",
+      limit: proofCount - 1,
+      observedCount: proofCount,
+      measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+    });
+    expectTask6StageATerminalPayload(proofTerminal);
+
+    const witnessTerminal = materializePhaseDTask5V1({
+      ...prepared.input,
+      evidenceBudget: stageABudgetAboveTotals(totals, {
+        maxRouteMappingCount: mappingCount,
+        maxEquivalenceProofCount: proofCount,
+        maxLineageOccurrenceWitnessCount: witnessCount - 1,
+      }),
+    });
+    expect(witnessTerminal.compressionStatus).toBe("INCONCLUSIVE");
+    expect(witnessTerminal.exhaustedDimensions).toEqual(["LINEAGE_OCCURRENCE_WITNESS_COUNT"]);
+    expect(witnessTerminal.budgetExecution.measurements.map(({ dimension }) => dimension))
+      .toEqual(TASK6_TEST_DIMENSION_ORDER);
+    expect(stageAMeasurementOf(witnessTerminal, "EQUIVALENCE_PROOF_COUNT")).toMatchObject({
+      observedCount: proofCount,
+      measurementCompleteness: "EXACT",
+    });
+    expect(stageAMeasurementOf(witnessTerminal, "LINEAGE_OCCURRENCE_WITNESS_COUNT")).toEqual({
+      dimension: "LINEAGE_OCCURRENCE_WITNESS_COUNT",
+      limit: witnessCount - 1,
+      observedCount: witnessCount,
+      measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+    });
+    expectTask6StageATerminalPayload(witnessTerminal);
+  });
+
+  it("Task6.3 gives missing mapping evidence precedence over later proof counting", () => {
+    const evidence = publicationEvidenceOf();
+    const missingMapping = __validateTask5PublicationForTest(
+      evidence.envelopes,
+      evidence.mappings.slice(1),
+      evidence.proofs,
+      evidence.cohortInterfaces,
+    );
+    expect(missingMapping).toEqual({ status: "INCONCLUSIVE", reason: "INCOMPLETE_ROUTE_MAPPING" });
+
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    if (task4.task4Status !== "COMPLETE" || task4.occurrenceUniverse === null) {
+      throw new Error("Expected complete Task 4 evidence");
+    }
+    const { occurrenceUniverseHash: _occurrenceUniverseHash, ...universePayload } = task4.occurrenceUniverse;
+    const forgedUniversePayload = {
+      ...universePayload,
+      endpointOccurrenceKeys: universePayload.endpointOccurrenceKeys.slice(1),
+    };
+    const forgedUniverse = {
+      ...forgedUniversePayload,
+      occurrenceUniverseHash: canonicalHash(forgedUniversePayload),
+    };
+    const { artifactHash: _artifactHash, ...task4Payload } = task4;
+    const forgedTask4Payload = { ...task4Payload, occurrenceUniverse: forgedUniverse };
+    const forgedTask4 = { ...forgedTask4Payload, artifactHash: canonicalHash(forgedTask4Payload) };
+    const result = materializePhaseDTask5V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+      task4: forgedTask4,
+      evidenceBudget: phaseDTask5Budget(),
+    });
+    expect(result.compressionStatus).toBe("INCONCLUSIVE");
+    expect(result.reasonCodes).toContain("INCOMPLETE_LINEAGE_COVERAGE");
+    expect(result.budgetExecution.measurements).toEqual([]);
+    expect(result.equivalenceProofs).toBeNull();
+    expect(result.coverageManifest).toBeNull();
+  });
+
+  it("Task6.3 does not replace coverage evidence with a count-only shortcut", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    if (baseline.compressionStatus !== "COMPLETE" || baseline.coverageManifest === null) {
+      throw new Error("Expected complete coverage baseline");
+    }
+    const totals = stageATotalsOf(baseline);
+    const witnessCount = coverageWitnessTotalOf(prepared.input);
+    expect(baseline.coverageManifest.coverageWitnesses.length).toBe(witnessCount);
+    const result = materializePhaseDTask5V1({
+      ...prepared.input,
+      evidenceBudget: stageABudgetAboveTotals(totals),
+    });
+    expect(result.compressionStatus).toBe("COMPLETE");
+    expect(result.coverageManifest?.coverageWitnesses.length).toBe(witnessCount);
+    expect(stageAMeasurementOf(result, "LINEAGE_OCCURRENCE_WITNESS_COUNT").observedCount)
+      .toBe(result.coverageManifest?.coverageWitnesses.length);
+  });
+
+  it("Task6.3 preserves seven-dimensional terminal output under ordering permutation", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    if (baseline.compressionStatus !== "COMPLETE" || baseline.routeToCohortMappings === null) {
+      throw new Error("Expected complete ordering baseline");
+    }
+    const totals = stageATotalsOf(baseline);
+    const mappingCount = baseline.routeToCohortMappings.length;
+    expect(mappingCount).toBeGreaterThan(1);
+    const budget = stageABudgetAboveTotals(totals, { maxRouteMappingCount: mappingCount - 1 });
+    const canonical = materializePhaseDTask5V1({ ...prepared.input, evidenceBudget: budget });
+    const permuted = materializePhaseDTask5V1({
+      ...prepared.input,
+      normalizedMemberDrafts: [...prepared.input.normalizedMemberDrafts].reverse(),
+      task4: task4WithReversedClosures(prepared.input.task4),
+      evidenceBudget: budget,
+    });
+
+    expect(permuted.compressionStatus).toBe(canonical.compressionStatus);
+    expect(permuted.budgetExecution).toEqual(canonical.budgetExecution);
+    expect(permuted.exhaustedDimensions).toEqual(canonical.exhaustedDimensions);
+    expect(permuted.reasonCodes).toEqual(canonical.reasonCodes);
+    expect(permuted.budgetExecution.exhaustionProvenance?.provenanceHash)
+      .toBe(canonical.budgetExecution.exhaustionProvenance?.provenanceHash);
+    expect(permuted.budgetExecution.executionHash).toBe(canonical.budgetExecution.executionHash);
+  });
+
+  it("Task6.3 preserves Task5 substantive payloads with generous budgets", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    if (baseline.compressionStatus !== "COMPLETE") throw new Error("Expected complete Task5 baseline");
+    const generous = materializePhaseDTask5V1({
+      ...prepared.input,
+      evidenceBudget: stageABudgetAboveTotals(stageATotalsOf(baseline)),
+    });
+    expect(generous.compressionStatus).toBe("COMPLETE");
+    expect(task5SubstantivePayloadOf(generous)).toEqual(task5SubstantivePayloadOf(baseline));
   });
 });
 
@@ -2598,6 +2902,30 @@ function stageATotalsOf(
     conflictClosureEdgeCount: result.memberEnvelopes.reduce((total, envelope) =>
       total + envelope.routeRelevantConflictClosure.traversedReferenceEdges.length, 0),
     cohortCount: result.cohortCount,
+  };
+}
+
+function coverageWitnessTotalOf(input: PhaseDTask5InputV1): number {
+  const source = input.task4.occurrenceUniverse;
+  if (source === null) throw new Error("Expected a complete occurrence universe");
+  return source.physicalOccurrenceKeys.length
+    + source.wildcardOccurrenceKeys.length
+    + source.familyMemberOccurrenceKeys.length
+    + source.reservationOccurrenceKeys.length
+    + source.conflictOccurrenceKeys.length
+    + source.endpointOccurrenceKeys.length;
+}
+
+function task5SubstantivePayloadOf(result: ReturnType<typeof materializePhaseDTask5V1>) {
+  return {
+    cohorts: result.cohorts,
+    cohortInterfaces: result.cohortInterfaces,
+    routeToCohortMappings: result.routeToCohortMappings,
+    memberEnvelopes: result.memberEnvelopes,
+    equivalenceProofs: result.equivalenceProofs,
+    coverageManifest: result.coverageManifest,
+    cohortCount: result.cohortCount,
+    cohortUniverseHash: result.cohortUniverseHash,
   };
 }
 

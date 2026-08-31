@@ -2618,6 +2618,7 @@ type Task6StageAResultV1 =
     envelopes: readonly RouteCohortMemberEnvelopeV1[];
     cohortInterfaceByHash: ReadonlyMap<string, StrategicCohortInterfaceV1>;
     memberCohort: ReadonlyMap<string, StrategicCohortInterfaceV1>;
+    accumulator: Task6MeasurementAccumulatorV1;
     snapshot: Task6AccumulatorSnapshotV1;
   }>;
 
@@ -2709,6 +2710,7 @@ function materializeTask6StageAV1(
     envelopes,
     cohortInterfaceByHash,
     memberCohort,
+    accumulator,
     snapshot: accumulator.terminalSnapshot(),
   };
 }
@@ -2763,6 +2765,113 @@ function task6CohortAdmissionOf(
     };
   }
   return { issue: null, isNewCohort: previous === undefined };
+}
+
+type Task6MappingResultV1 =
+  | Readonly<{ value: StrategicRouteCohortMappingFactV1 }>
+  | Readonly<{ issue: Task5IssueV1 }>;
+
+function task6MappingOf(
+  envelope: RouteCohortMemberEnvelopeV1,
+  cohortInterface: StrategicCohortInterfaceV1,
+  sourceHashBindings: readonly StrategicCohortSourceHashBindingV1[],
+): Task6MappingResultV1 {
+  const mappingPayload = {
+    routeId: envelope.routeId,
+    routeHash: envelope.routeHash,
+    memberEnvelopeHash: envelope.memberEnvelopeHash,
+    cohortId: cohortIdOf(cohortInterface),
+    cohortInterfaceHash: cohortInterface.cohortInterfaceHash,
+    fourSignatureHashes: cohortInterface.fourSignatureHashes,
+    sourceHashBindings,
+  };
+  const mapping = { ...mappingPayload, mappingHash: canonicalHash(mappingPayload) };
+  if (mapping.routeId !== envelope.routeId
+    || mapping.routeHash !== envelope.routeHash
+    || mapping.memberEnvelopeHash !== envelope.memberEnvelopeHash
+    || mapping.cohortInterfaceHash !== cohortInterface.cohortInterfaceHash
+    || canonicalSerialize(mapping.fourSignatureHashes) !== canonicalSerialize(cohortInterface.fourSignatureHashes)
+    || canonicalSerialize(mapping.sourceHashBindings) !== canonicalSerialize(sourceHashBindings)
+    || canonicalSerialize(cohortInterfaceOf(envelope)) !== canonicalSerialize(cohortInterface)
+    || mapping.mappingHash !== canonicalHash(payloadWithout(mapping, "mappingHash"))) {
+    return { issue: { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" } };
+  }
+  return { value: mapping };
+}
+
+type Task6ProofResultV1 =
+  | Readonly<{ value: StrategicCohortMembershipProofV1 }>
+  | Readonly<{ issue: Task5IssueV1 }>;
+
+type Task6StageDObserverV1 = (witness: StrategicCohortCoverageWitnessV1) => void;
+
+type Task6CoverageWitnessSeedV1 = Readonly<{
+  occurrenceKind: StrategicCohortCoverageWitnessV1["occurrenceKind"];
+  occurrenceKey: readonly string[];
+  occurrenceHash: string;
+  memberEnvelopeHash: string;
+  mappingHash: string;
+  proofHash: string;
+  sourceRouteUniverseHash: string;
+  routeId: string;
+  routeHash: string;
+}>;
+
+type Task6CoveragePreparationV1 = Readonly<{
+  sourceOccurrenceUniverseHash: string;
+  sourceRouteIds: readonly string[];
+  coveredRouteIds: readonly string[];
+  inputPhysicalOccurrenceCount: number;
+  coveredPhysical: readonly (readonly string[])[];
+  inputWildcardOccurrenceCount: number;
+  coveredWildcard: readonly (readonly string[])[];
+  inputFamilyMemberOccurrenceCount: number;
+  coveredFamily: readonly (readonly string[])[];
+  inputReservationOccurrenceCount: number;
+  coveredReservation: readonly (readonly string[])[];
+  inputConflictOccurrenceCount: number;
+  coveredConflict: readonly (readonly string[])[];
+  inputEndpointOccurrenceCount: number;
+  coveredEndpoint: readonly (readonly string[])[];
+  seeds: readonly Task6CoverageWitnessSeedV1[];
+}>;
+
+type Task6StageDResultV1 =
+  | Readonly<{ kind: "ISSUE"; issue: Task5IssueV1 }>
+  | Readonly<{ kind: "BUDGET_TERMINAL"; snapshot: Task6AccumulatorSnapshotV1 }>
+  | Readonly<{ kind: "COMPLETE"; coverage: StrategicCohortCoverageManifestV1 }>;
+
+function task6ProofOf(
+  envelope: RouteCohortMemberEnvelopeV1,
+  cohortInterface: StrategicCohortInterfaceV1,
+  mapping: StrategicRouteCohortMappingFactV1,
+  sourceHashBindings: readonly StrategicCohortSourceHashBindingV1[],
+): Task6ProofResultV1 {
+  const canonicalRolePositionBijectionWitness = canonicalRoleWitnessOf(envelope);
+  const proofPayload = {
+    routeId: envelope.routeId,
+    routeHash: envelope.routeHash,
+    memberEnvelopeHash: envelope.memberEnvelopeHash,
+    cohortInterfaceHash: cohortInterface.cohortInterfaceHash,
+    fourSignatureHashes: cohortInterface.fourSignatureHashes,
+    mappingHash: mapping.mappingHash,
+    canonicalRolePositionBijectionWitness,
+    sourceHashBindings,
+  };
+  const proof = { ...proofPayload, proofHash: canonicalHash(proofPayload) };
+  if (proof.routeId !== envelope.routeId
+    || proof.routeHash !== envelope.routeHash
+    || proof.memberEnvelopeHash !== envelope.memberEnvelopeHash
+    || proof.cohortInterfaceHash !== mapping.cohortInterfaceHash
+    || proof.mappingHash !== mapping.mappingHash
+    || canonicalSerialize(proof.fourSignatureHashes) !== canonicalSerialize(cohortInterface.fourSignatureHashes)
+    || canonicalSerialize(proof.canonicalRolePositionBijectionWitness)
+      !== canonicalSerialize(canonicalRolePositionBijectionWitness)
+    || canonicalSerialize(proof.sourceHashBindings) !== canonicalSerialize(sourceHashBindings)
+    || proof.proofHash !== canonicalHash(payloadWithout(proof, "proofHash"))) {
+    return { issue: { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" } };
+  }
+  return { value: proof };
 }
 
 type HardCohortGateResultV1 = Readonly<{
@@ -2827,7 +2936,10 @@ export function applyHardCohortGateV1(
 }
 
 /** Task 5 materializes established facts while Task 6 accounts the verified Stage-A pass. */
-export const materializePhaseDTask5V1: PhaseDTask5MaterializerV1 = (input) => {
+function materializePhaseDTask5Internal(
+  input: PhaseDTask5InputV1,
+  onStageDWitnessConstructed?: Task6StageDObserverV1,
+): HierarchicalStrategicCohortCompressionArtifactV1 {
   const stageA = materializeTask6StageAV1(input);
   if (stageA.kind === "ISSUE") return task5Terminal(input, stageA.issue, 0);
   if (stageA.kind === "BUDGET_TERMINAL") return task6Terminal(input, stageA.snapshot);
@@ -2835,55 +2947,79 @@ export const materializePhaseDTask5V1: PhaseDTask5MaterializerV1 = (input) => {
   const envelopes = [...stageA.envelopes];
   const cohortInterfaceByHash = new Map(stageA.cohortInterfaceByHash);
   const memberCohort = new Map(stageA.memberCohort);
+  const accumulator = stageA.accumulator;
 
   const sourceBindings = sourceBindingsOf(input.admission);
   const mappings: StrategicRouteCohortMappingFactV1[] = [];
-  const proofs: StrategicCohortMembershipProofV1[] = [];
+  const mappingByMember = new Map<string, StrategicRouteCohortMappingFactV1>();
   const membersByCohort = new Map<string, RouteCohortMemberEnvelopeV1[]>();
   const proofHashesByCohort = new Map<string, string[]>();
   for (const envelope of envelopes) {
     const cohortInterface = memberCohort.get(envelope.memberEnvelopeHash)!;
-    const cohortId = canonicalHash({ kind: "hierarchical-strategic-cohort-v1", cohortInterfaceHash: cohortInterface.cohortInterfaceHash });
-    const fourSignatureHashes = cohortInterface.fourSignatureHashes;
-    const mappingPayload = {
+    const mappingResult = task6MappingOf(envelope, cohortInterface, sourceBindings);
+    if ("issue" in mappingResult) return task5Terminal(input, mappingResult.issue, cohortInterfaceByHash.size);
+    const mapping = mappingResult.value;
+    const applyResult = accumulator.applyVerifiedEvent({ ROUTE_MAPPING_COUNT: 1 }, {
+      stage: "STAGE_B_MAPPING",
+      sourceRouteUniverseHash: envelope.sourceRouteUniverseHash,
       routeId: envelope.routeId,
       routeHash: envelope.routeHash,
-      memberEnvelopeHash: envelope.memberEnvelopeHash,
-      cohortId,
-      cohortInterfaceHash: cohortInterface.cohortInterfaceHash,
-      fourSignatureHashes,
-      sourceHashBindings: sourceBindings,
-    };
-    const mapping = { ...mappingPayload, mappingHash: canonicalHash(mappingPayload) };
+    });
+    if (applyResult.terminal) {
+      if (applyResult.snapshot === null) throw new Error("Task6 Stage-B terminal snapshot missing");
+      return task6Terminal(input, applyResult.snapshot);
+    }
     mappings.push(mapping);
-    const witness = canonicalRoleWitnessOf(envelope);
-    const proofPayload = {
-      routeId: envelope.routeId,
-      routeHash: envelope.routeHash,
-      memberEnvelopeHash: envelope.memberEnvelopeHash,
-      cohortInterfaceHash: cohortInterface.cohortInterfaceHash,
-      fourSignatureHashes,
-      mappingHash: mapping.mappingHash,
-      canonicalRolePositionBijectionWitness: witness,
-      sourceHashBindings: sourceBindings,
-    };
-    proofs.push({ ...proofPayload, proofHash: canonicalHash(proofPayload) });
-    const proofHashes = proofHashesByCohort.get(cohortInterface.cohortInterfaceHash);
-    if (proofHashes === undefined) proofHashesByCohort.set(cohortInterface.cohortInterfaceHash, [proofs[proofs.length - 1]!.proofHash]);
-    else proofHashes.push(proofs[proofs.length - 1]!.proofHash);
+    mappingByMember.set(envelope.memberEnvelopeHash, mapping);
     const members = membersByCohort.get(cohortInterface.cohortInterfaceHash);
     if (members === undefined) membersByCohort.set(cohortInterface.cohortInterfaceHash, [envelope]);
     else members.push(envelope);
   }
-  if (mappings.length !== records.length || proofs.length !== records.length) {
-    return task5Terminal(input, { status: "INCONCLUSIVE", reason: "INCOMPLETE_EQUIVALENCE_PROOF" }, cohortInterfaceByHash.size);
+  accumulator.finalizeExactDimension("ROUTE_MAPPING_COUNT");
+
+  const proofs: StrategicCohortMembershipProofV1[] = [];
+  const proofByMember = new Map<string, StrategicCohortMembershipProofV1>();
+  for (const envelope of envelopes) {
+    const cohortInterface = memberCohort.get(envelope.memberEnvelopeHash)!;
+    const mapping = mappingByMember.get(envelope.memberEnvelopeHash);
+    if (mapping === undefined) {
+      return task5Terminal(input, { status: "INCONCLUSIVE", reason: "INCOMPLETE_ROUTE_MAPPING" }, cohortInterfaceByHash.size);
+    }
+    const proofResult = task6ProofOf(envelope, cohortInterface, mapping, sourceBindings);
+    if ("issue" in proofResult) return task5Terminal(input, proofResult.issue, cohortInterfaceByHash.size);
+    const proof = proofResult.value;
+    const applyResult = accumulator.applyVerifiedEvent({ EQUIVALENCE_PROOF_COUNT: 1 }, {
+      stage: "STAGE_C_PROOF",
+      sourceRouteUniverseHash: envelope.sourceRouteUniverseHash,
+      routeId: envelope.routeId,
+      routeHash: envelope.routeHash,
+    });
+    if (applyResult.terminal) {
+      if (applyResult.snapshot === null) throw new Error("Task6 Stage-C terminal snapshot missing");
+      return task6Terminal(input, applyResult.snapshot);
+    }
+    proofs.push(proof);
+    proofByMember.set(envelope.memberEnvelopeHash, proof);
+    const proofHashes = proofHashesByCohort.get(cohortInterface.cohortInterfaceHash);
+    if (proofHashes === undefined) proofHashesByCohort.set(cohortInterface.cohortInterfaceHash, [proof.proofHash]);
+    else proofHashes.push(proof.proofHash);
   }
+  accumulator.finalizeExactDimension("EQUIVALENCE_PROOF_COUNT");
+
   const publicationIssue = validateTask5Publication(envelopes, mappings, proofs, cohortInterfaceByHash);
   if (publicationIssue !== null) return task5Terminal(input, publicationIssue, 0);
-  const coverage = coverageOf(input.task4.occurrenceUniverse!, envelopes, mappings, proofs);
-  if (coverage === null) {
-    return task5Terminal(input, { status: "INCONCLUSIVE", reason: "INCOMPLETE_LINEAGE_COVERAGE" }, cohortInterfaceByHash.size);
-  }
+  const stageD = materializeTask6StageDV1(
+    input.task4.occurrenceUniverse!,
+    envelopes,
+    mappingByMember,
+    proofByMember,
+    accumulator,
+    onStageDWitnessConstructed,
+  );
+  if (stageD.kind === "ISSUE") return task5Terminal(input, stageD.issue, cohortInterfaceByHash.size);
+  if (stageD.kind === "BUDGET_TERMINAL") return task6Terminal(input, stageD.snapshot);
+  const coverage = stageD.coverage;
+  const completeSnapshot = accumulator.completeSnapshot();
   const cohorts = [...cohortInterfaceByHash.values()].map((cohortInterface) => {
     const cohortId = canonicalHash({ kind: "hierarchical-strategic-cohort-v1", cohortInterfaceHash: cohortInterface.cohortInterfaceHash });
     const memberEnvelopes = (membersByCohort.get(cohortInterface.cohortInterfaceHash) ?? [])
@@ -2908,7 +3044,7 @@ export const materializePhaseDTask5V1: PhaseDTask5MaterializerV1 = (input) => {
     sourceAndComponentSetHash: input.admission.canonicalSourceBindingManifest.andComponentSetHash,
     compressionStatus: "COMPLETE" as const,
     evidenceBudget: input.evidenceBudget,
-    budgetExecution: stageA.snapshot.budgetExecution,
+    budgetExecution: completeSnapshot.budgetExecution,
     cohorts,
     cohortInterfaces,
     routeToCohortMappings: canonicalMappings,
@@ -2930,7 +3066,10 @@ export const materializePhaseDTask5V1: PhaseDTask5MaterializerV1 = (input) => {
     semanticBoundary: "HIERARCHICAL_STRATEGIC_COHORT_FACTS_NOT_DECISION" as const,
   };
   return deepFreeze({ ...payload, artifactHash: canonicalHash(payload) });
-};
+}
+
+export const materializePhaseDTask5V1: PhaseDTask5MaterializerV1 = (input) =>
+  materializePhaseDTask5Internal(input);
 
 /** Internal Task 6 Stage-A test seam; production materialization uses the same private pass without tampering. */
 export function __task6StageAForTest(
@@ -2941,6 +3080,19 @@ export function __task6StageAForTest(
   if (stageA.kind === "ISSUE") return task5Terminal(input, stageA.issue, 0);
   if (stageA.kind === "BUDGET_TERMINAL") return task6Terminal(input, stageA.snapshot);
   throw new Error("Task6 Stage-A test seam requires a terminal outcome");
+}
+
+export function __task6StageDForTest(
+  input: PhaseDTask5InputV1,
+): Readonly<{
+  result: HierarchicalStrategicCohortCompressionArtifactV1;
+  constructedWitnessCount: number;
+}> {
+  let constructedWitnessCount = 0;
+  const result = materializePhaseDTask5Internal(input, () => {
+    constructedWitnessCount += 1;
+  });
+  return { result, constructedWitnessCount };
 }
 
 type Task6CohortAdmissionTestResultV1 = Readonly<{
@@ -3749,12 +3901,24 @@ function canonicalMultiComponentArtifactHashOf(
   return canonicalHash(payload);
 }
 
-function coverageOf(
+function compareTask6CoverageWitnessSeed(
+  left: Task6CoverageWitnessSeedV1,
+  right: Task6CoverageWitnessSeedV1,
+): number {
+  return compareText(left.occurrenceKind, right.occurrenceKind)
+    || compareCanonicalPayload(left.occurrenceKey, right.occurrenceKey)
+    || compareText(left.memberEnvelopeHash, right.memberEnvelopeHash)
+    || compareText(left.mappingHash, right.mappingHash)
+    || compareText(left.proofHash, right.proofHash)
+    || compareText(left.occurrenceHash, right.occurrenceHash);
+}
+
+function coverageWitnessSeedsOf(
   source: PhaseDRouteOccurrenceUniverseV1,
   envelopes: readonly RouteCohortMemberEnvelopeV1[],
-  mappings: readonly StrategicRouteCohortMappingFactV1[],
-  proofs: readonly StrategicCohortMembershipProofV1[],
-): StrategicCohortCoverageManifestV1 | null {
+  mappingByMember: ReadonlyMap<string, StrategicRouteCohortMappingFactV1>,
+  proofByMember: ReadonlyMap<string, StrategicCohortMembershipProofV1>,
+): Task6CoveragePreparationV1 | null {
   const sourceRouteIds = [...source.sourceRouteIds].sort(compareText);
   const coveredRouteIds = unique(envelopes.map((envelope) => envelope.routeId)).sort(compareText);
   if (canonicalSerialize(sourceRouteIds) !== canonicalSerialize(coveredRouteIds)) return null;
@@ -3776,27 +3940,33 @@ function coverageOf(
     || !sameTupleSet(source.reservationOccurrenceKeys, coveredReservation)
     || !sameTupleSet(source.conflictOccurrenceKeys, coveredConflict)
     || !sameTupleSet(source.endpointOccurrenceKeys, coveredEndpoint)) return null;
-  const mappingByMember = new Map(mappings.map((mapping) => [mapping.memberEnvelopeHash, mapping] as const));
-  const proofByMember = new Map(proofs.map((proof) => [proof.memberEnvelopeHash, proof] as const));
-  const coverageWitnesses: StrategicCohortCoverageWitnessV1[] = [];
+
+  for (const envelope of envelopes) {
+    if (mappingByMember.get(envelope.memberEnvelopeHash) === undefined
+      || proofByMember.get(envelope.memberEnvelopeHash) === undefined) return null;
+  }
+
+  const seeds: Task6CoverageWitnessSeedV1[] = [];
   for (const envelope of envelopes) {
     const mapping = mappingByMember.get(envelope.memberEnvelopeHash);
     const proof = proofByMember.get(envelope.memberEnvelopeHash);
-    if (mapping === undefined || proof === undefined) return null;
+    if (mapping === undefined || proof === undefined) throw new Error("Task6 Stage-D coverage preparation missing evidence");
     const append = (
       occurrenceKind: StrategicCohortCoverageWitnessV1["occurrenceKind"],
       occurrenceKey: readonly string[],
       occurrenceHash: string,
     ) => {
-      const payload = {
+      seeds.push({
         occurrenceKind,
         occurrenceKey,
         occurrenceHash,
         memberEnvelopeHash: envelope.memberEnvelopeHash,
         mappingHash: mapping.mappingHash,
         proofHash: proof.proofHash,
-      };
-      coverageWitnesses.push({ ...payload, witnessHash: canonicalHash(payload) });
+        sourceRouteUniverseHash: envelope.sourceRouteUniverseHash,
+        routeId: envelope.routeId,
+        routeHash: envelope.routeHash,
+      });
     };
     for (const occurrence of envelope.physicalLineageOccurrences) {
       append("PHYSICAL", [occurrence.routeId, occurrence.physicalCardId], occurrence.occurrenceHash);
@@ -3817,23 +3987,105 @@ function coverageOf(
       append("ENDPOINT", [occurrence.routeId, occurrence.componentEndpointId], occurrence.occurrenceHash);
     }
   }
-  const canonicalWitnesses = coverageWitnesses.sort(compareCanonicalPayload);
-  const payload = {
+
+  seeds.sort(compareTask6CoverageWitnessSeed);
+  return {
     sourceOccurrenceUniverseHash: source.occurrenceUniverseHash,
-    inputRouteCount: sourceRouteIds.length,
-    coveredRouteCount: coveredRouteIds.length,
+    sourceRouteIds,
+    coveredRouteIds,
     inputPhysicalOccurrenceCount: source.physicalOccurrenceKeys.length,
-    coveredPhysicalOccurrenceCount: coveredPhysical.length,
+    coveredPhysical,
     inputWildcardOccurrenceCount: source.wildcardOccurrenceKeys.length,
-    coveredWildcardOccurrenceCount: coveredWildcard.length,
+    coveredWildcard,
     inputFamilyMemberOccurrenceCount: source.familyMemberOccurrenceKeys.length,
-    coveredFamilyMemberOccurrenceCount: coveredFamily.length,
+    coveredFamily,
     inputReservationOccurrenceCount: source.reservationOccurrenceKeys.length,
-    coveredReservationOccurrenceCount: coveredReservation.length,
+    coveredReservation,
     inputConflictOccurrenceCount: source.conflictOccurrenceKeys.length,
-    coveredConflictOccurrenceCount: coveredConflict.length,
+    coveredConflict,
     inputEndpointOccurrenceCount: source.endpointOccurrenceKeys.length,
-    coveredEndpointOccurrenceCount: coveredEndpoint.length,
+    coveredEndpoint,
+    seeds,
+  };
+}
+
+function materializeTask6StageDV1(
+  source: PhaseDRouteOccurrenceUniverseV1,
+  envelopes: readonly RouteCohortMemberEnvelopeV1[],
+  mappingByMember: ReadonlyMap<string, StrategicRouteCohortMappingFactV1>,
+  proofByMember: ReadonlyMap<string, StrategicCohortMembershipProofV1>,
+  accumulator: Task6MeasurementAccumulatorV1,
+  onWitnessConstructed?: Task6StageDObserverV1,
+): Task6StageDResultV1 {
+  const preparation = coverageWitnessSeedsOf(source, envelopes, mappingByMember, proofByMember);
+  if (preparation === null) {
+    return { kind: "ISSUE", issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_LINEAGE_COVERAGE" } };
+  }
+
+  const envelopeByMember = new Map(envelopes.map((envelope) => [envelope.memberEnvelopeHash, envelope] as const));
+  const coverageWitnesses: StrategicCohortCoverageWitnessV1[] = [];
+  for (const seed of preparation.seeds) {
+    const envelope = envelopeByMember.get(seed.memberEnvelopeHash);
+    const mapping = mappingByMember.get(seed.memberEnvelopeHash);
+    const proof = proofByMember.get(seed.memberEnvelopeHash);
+    if (envelope === undefined || mapping === undefined || proof === undefined) {
+      return { kind: "ISSUE", issue: { status: "INCONCLUSIVE", reason: "INCOMPLETE_LINEAGE_COVERAGE" } };
+    }
+    const payload = {
+      occurrenceKind: seed.occurrenceKind,
+      occurrenceKey: seed.occurrenceKey,
+      occurrenceHash: seed.occurrenceHash,
+      memberEnvelopeHash: seed.memberEnvelopeHash,
+      mappingHash: seed.mappingHash,
+      proofHash: seed.proofHash,
+    };
+    const witness = { ...payload, witnessHash: canonicalHash(payload) };
+    if (witness.memberEnvelopeHash !== envelope.memberEnvelopeHash
+      || witness.mappingHash !== mapping.mappingHash
+      || witness.proofHash !== proof.proofHash
+      || witness.witnessHash !== canonicalHash(payloadWithout(witness, "witnessHash"))) {
+      return { kind: "ISSUE", issue: { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" } };
+    }
+
+    onWitnessConstructed?.(witness);
+    const applyResult = accumulator.applyVerifiedEvent({ LINEAGE_OCCURRENCE_WITNESS_COUNT: 1 }, {
+      stage: "STAGE_D_COVERAGE",
+      sourceRouteUniverseHash: seed.sourceRouteUniverseHash,
+      routeId: seed.routeId,
+      routeHash: seed.routeHash,
+    });
+    if (applyResult.terminal) {
+      if (applyResult.snapshot === null) throw new Error("Task6 Stage-D terminal snapshot missing");
+      return { kind: "BUDGET_TERMINAL", snapshot: applyResult.snapshot };
+    }
+    coverageWitnesses.push(witness);
+  }
+
+  accumulator.finalizeExactDimension("LINEAGE_OCCURRENCE_WITNESS_COUNT");
+  return { kind: "COMPLETE", coverage: coverageManifestOf(preparation, coverageWitnesses) };
+}
+
+function coverageManifestOf(
+  preparation: Task6CoveragePreparationV1,
+  coverageWitnesses: readonly StrategicCohortCoverageWitnessV1[],
+): StrategicCohortCoverageManifestV1 {
+  const canonicalWitnesses = [...coverageWitnesses].sort(compareCanonicalPayload);
+  const payload = {
+    sourceOccurrenceUniverseHash: preparation.sourceOccurrenceUniverseHash,
+    inputRouteCount: preparation.sourceRouteIds.length,
+    coveredRouteCount: preparation.coveredRouteIds.length,
+    inputPhysicalOccurrenceCount: preparation.inputPhysicalOccurrenceCount,
+    coveredPhysicalOccurrenceCount: preparation.coveredPhysical.length,
+    inputWildcardOccurrenceCount: preparation.inputWildcardOccurrenceCount,
+    coveredWildcardOccurrenceCount: preparation.coveredWildcard.length,
+    inputFamilyMemberOccurrenceCount: preparation.inputFamilyMemberOccurrenceCount,
+    coveredFamilyMemberOccurrenceCount: preparation.coveredFamily.length,
+    inputReservationOccurrenceCount: preparation.inputReservationOccurrenceCount,
+    coveredReservationOccurrenceCount: preparation.coveredReservation.length,
+    inputConflictOccurrenceCount: preparation.inputConflictOccurrenceCount,
+    coveredConflictOccurrenceCount: preparation.coveredConflict.length,
+    inputEndpointOccurrenceCount: preparation.inputEndpointOccurrenceCount,
+    coveredEndpointOccurrenceCount: preparation.coveredEndpoint.length,
     coverageWitnesses: canonicalWitnesses,
   };
   return { ...payload, coverageHash: canonicalHash(payload) };
