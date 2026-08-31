@@ -412,6 +412,7 @@ type Task6CohortAdmissionTestResultV1 = {
   budgetExecution: Task6TestSnapshotV1["budgetExecution"];
   exhaustedDimensions: readonly string[];
   reasonCodes: readonly string[];
+  positiveCohortLowerBound: number | null;
 };
 
 type Task6CohortAdmissionTestSeamV1 = (
@@ -432,6 +433,25 @@ type Task6StageDTestSeamV1 = (
 const task6StageDForTest = (strategicCohortCompressionV1 as unknown as {
   __task6StageDForTest?: Task6StageDTestSeamV1;
 }).__task6StageDForTest;
+
+type Task6RatioObservationTestSeamV1 = (
+  inputRouteCount: number,
+  compressionStatus: "COMPLETE" | "INCONCLUSIVE" | "REJECTED",
+  positiveCohortLowerBound: number | null,
+  budgetExhaustion: boolean,
+  exactCompleteCohortCount?: number,
+) => {
+  inputRouteCount: number;
+  observedCohortCount: number;
+  ratioNumerator: number;
+  ratioDenominator: number | null;
+  cohortCountCompleteness: string | null;
+  ratioInterpretation: string;
+};
+
+const task6RatioObservationForTest = (strategicCohortCompressionV1 as unknown as {
+  __task6RatioObservationForTest?: Task6RatioObservationTestSeamV1;
+}).__task6RatioObservationForTest;
 
 describe("Task6.2 Stage-A materialization accounting", () => {
   it("Task6.2 counts all four Stage-A dimensions from one verified route event", () => {
@@ -1145,6 +1165,245 @@ describe("Task6.3 mappings, proofs, and coverage accounting", () => {
     });
     expect(generous.compressionStatus).toBe("COMPLETE");
     expect(task5SubstantivePayloadOf(generous)).toEqual(task5SubstantivePayloadOf(baseline));
+  });
+});
+
+describe("Task6.4 budget execution and ratio publication", () => {
+  it("Task6.4 COMPLETE contains seven exact measurements and null exhaustion provenance", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const result = prepared.result;
+
+    expect(result.compressionStatus).toBe("COMPLETE");
+    expect(result.budgetExecution.measurements).toHaveLength(7);
+    expect(result.budgetExecution.measurements.map(({ dimension }) => dimension))
+      .toEqual(TASK6_TEST_DIMENSION_ORDER);
+    expect(result.budgetExecution.measurements.every(({ measurementCompleteness }) =>
+      measurementCompleteness === "EXACT")).toBe(true);
+    expect(result.budgetExecution.exhaustionProvenance).toBeNull();
+    expect(result.exhaustedDimensions).toEqual([]);
+    expect(result.reasonCodes).toEqual([]);
+  });
+
+  it("Task6.4 uses an exact cohort denominator on COMPLETE", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const result = prepared.result;
+    expect(result.compressionStatus).toBe("COMPLETE");
+    expect(result.cohortCount).toBeGreaterThan(0);
+
+    expect(result.compressionRatioObservation).toEqual({
+      inputRouteCount: prepared.input.admission.inputRouteCount,
+      observedCohortCount: result.cohortCount,
+      ratioNumerator: prepared.input.admission.inputRouteCount,
+      ratioDenominator: result.cohortCount,
+      cohortCountCompleteness: "EXACT",
+      ratioInterpretation: "EXACT",
+    });
+  });
+
+  it("Task6.4 uses lower-bound ratio completeness for the 50th-cohort Stage-A exhaustion", () => {
+    if (task6CohortAdmissionForTest === undefined || task6RatioObservationForTest === undefined) {
+      throw new Error("Task6.4 missing verified cohort admission or ratio seam");
+    }
+    const baseline = materializeTask5WithBudget(makeValidPhaseDAdmissionInput(), phaseDTask5Budget()).result;
+    if (baseline.compressionStatus !== "COMPLETE" || baseline.cohortInterfaces === null) {
+      throw new Error("Expected a real verified cohort interface");
+    }
+    const baseInterface = baseline.cohortInterfaces[0];
+    if (baseInterface === undefined) throw new Error("Expected a real cohort interface");
+    const interfaces = Array.from({ length: 50 }, (_, ordinal) =>
+      task6CohortVariantOf(baseInterface, ordinal));
+    const terminal = task6CohortAdmissionForTest(interfaces);
+    const cohortMeasurement = terminal.budgetExecution.measurements.find(({ dimension }) =>
+      dimension === "COHORT_COUNT");
+    if (cohortMeasurement === undefined) throw new Error("Expected exhausted cohort measurement");
+
+    expect(cohortMeasurement).toEqual({
+      dimension: "COHORT_COUNT",
+      limit: HARD_MAX_COHORT_COUNT_V1,
+      observedCount: 50,
+      measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+    });
+    expect(terminal.status).toBe("INCONCLUSIVE");
+    expect(terminal.positiveCohortLowerBound).toBe(50);
+    expect(task6RatioObservationForTest(
+      73,
+      "INCONCLUSIVE",
+      terminal.positiveCohortLowerBound,
+      true,
+    )).toEqual({
+      inputRouteCount: 73,
+      observedCohortCount: 50,
+      ratioNumerator: 73,
+      ratioDenominator: 50,
+      cohortCountCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+      ratioInterpretation: "UPPER_BOUND_FROM_COHORT_LOWER_BOUND",
+    });
+  });
+
+  it("Task6.4 uses a proven cohort lower bound on Stage-A non-cohort exhaustion", () => {
+    const prepared = task5InputOf(makeSameRankDifferentCopyPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    expect(baseline.compressionStatus).toBe("COMPLETE");
+    expect(baseline.memberEnvelopes).toHaveLength(2);
+    expect(baseline.cohortCount).toBe(1);
+    if (baseline.routeToCohortMappings === null || baseline.equivalenceProofs === null) {
+      throw new Error("Expected complete Task6.4 Stage-A baseline");
+    }
+    const totals = stageATotalsOf(baseline);
+    const result = materializePhaseDTask5V1({
+      ...prepared.input,
+      evidenceBudget: stageABudgetAboveTotals(totals, {
+        maxMemberEnvelopeCount: 1,
+        maxRouteMappingCount: baseline.routeToCohortMappings.length + 1,
+        maxEquivalenceProofCount: baseline.equivalenceProofs.length + 1,
+        maxLineageOccurrenceWitnessCount: coverageWitnessTotalOf(prepared.input) + 1,
+      }),
+    });
+
+    expect(result.compressionStatus).toBe("INCONCLUSIVE");
+    expect(result.exhaustedDimensions).toEqual(["MEMBER_ENVELOPE_COUNT"]);
+    expect(result.compressionRatioObservation).toEqual({
+      inputRouteCount: prepared.input.admission.inputRouteCount,
+      observedCohortCount: 1,
+      ratioNumerator: prepared.input.admission.inputRouteCount,
+      ratioDenominator: 1,
+      cohortCountCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+      ratioInterpretation: "UPPER_BOUND_FROM_COHORT_LOWER_BOUND",
+    });
+    expectTask6StageATerminalPayload(result);
+  });
+
+  it("Task6.4 uses lower-bound ratio completeness after Stage-B C and D exhaustion with Stage-A exact cohort measurement", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    if (baseline.compressionStatus !== "COMPLETE"
+      || baseline.routeToCohortMappings === null
+      || baseline.equivalenceProofs === null) throw new Error("Expected complete Task6.4 baseline");
+    const totals = stageATotalsOf(baseline);
+    const mappingCount = baseline.routeToCohortMappings.length;
+    const proofCount = baseline.equivalenceProofs.length;
+    const witnessCount = coverageWitnessTotalOf(prepared.input);
+    const cohortCount = baseline.cohortCount;
+    expect(cohortCount).toBeGreaterThan(0);
+
+    const cases = [
+      ["mapping", { maxRouteMappingCount: mappingCount - 1 }],
+      ["proof", {
+        maxRouteMappingCount: mappingCount,
+        maxEquivalenceProofCount: proofCount - 1,
+      }],
+      ["witness", {
+        maxRouteMappingCount: mappingCount,
+        maxEquivalenceProofCount: proofCount,
+        maxLineageOccurrenceWitnessCount: witnessCount - 1,
+      }],
+    ] as const;
+
+    for (const [stage, overrides] of cases) {
+      const result = materializePhaseDTask5V1({
+        ...prepared.input,
+        evidenceBudget: stageABudgetAboveTotals(totals, overrides),
+      });
+      expect(result.compressionStatus, stage).toBe("INCONCLUSIVE");
+      expect(stageAMeasurementOf(result, "COHORT_COUNT")).toEqual({
+        dimension: "COHORT_COUNT",
+        limit: HARD_MAX_COHORT_COUNT_V1,
+        observedCount: cohortCount,
+        measurementCompleteness: "EXACT",
+      });
+      expect(result.compressionRatioObservation).toEqual({
+        inputRouteCount: prepared.input.admission.inputRouteCount,
+        observedCohortCount: cohortCount,
+        ratioNumerator: prepared.input.admission.inputRouteCount,
+        ratioDenominator: cohortCount,
+        cohortCountCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+        ratioInterpretation: "UPPER_BOUND_FROM_COHORT_LOWER_BOUND",
+      });
+      expect(result.budgetExecution.exhaustionProvenance).not.toBeNull();
+      expectTask6StageATerminalPayload(result);
+    }
+  });
+
+  it("Task6.4 makes the ratio unavailable after non-cohort exhaustion with no positive cohort lower bound", () => {
+    if (task6RatioObservationForTest === undefined) {
+      throw new Error("Task6.4 missing ratio seam");
+    }
+    expect(task6RatioObservationForTest(17, "INCONCLUSIVE", null, true)).toEqual({
+      inputRouteCount: 17,
+      observedCohortCount: 0,
+      ratioNumerator: 17,
+      ratioDenominator: null,
+      cohortCountCompleteness: null,
+      ratioInterpretation: "UNAVAILABLE",
+    });
+  });
+
+  it("Task6.4 makes every REJECTED ratio unavailable", () => {
+    const budgetCases = [
+      ["maxRouteMappingCount", 1],
+      ["maxEquivalenceProofCount", 1],
+      ["maxLineageOccurrenceWitnessCount", 1],
+    ] as const;
+    for (const [budgetField, limit] of budgetCases) {
+      const input = makeManifestHashMismatchFixture();
+      const artifact = terminalArtifactOf(compressHierarchicalStrategicCohortsV1({
+        ...input,
+        evidenceBudget: {
+          ...input.evidenceBudget,
+          [budgetField]: limit,
+        },
+      }));
+
+      expect(artifact.compressionStatus, budgetField).toBe("REJECTED");
+      expect(artifact.reasonCodes, budgetField).toContain("SOURCE_HASH_PAYLOAD_MISMATCH");
+      expect(artifact.compressionRatioObservation.ratioDenominator, budgetField).toBeNull();
+      expect(artifact.compressionRatioObservation.cohortCountCompleteness, budgetField).toBeNull();
+      expect(artifact.compressionRatioObservation.ratioInterpretation, budgetField).toBe("UNAVAILABLE");
+    }
+    if (task6RatioObservationForTest === undefined) {
+      throw new Error("Task6.4 missing ratio seam");
+    }
+    expect(task6RatioObservationForTest(5, "REJECTED", 4, true)).toMatchObject({
+      observedCohortCount: 0,
+      ratioDenominator: null,
+      cohortCountCompleteness: null,
+      ratioInterpretation: "UNAVAILABLE",
+    });
+  });
+
+  it("Task6.4 retains only legitimate measurements at exhaustion", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    if (baseline.compressionStatus !== "COMPLETE"
+      || baseline.routeToCohortMappings === null) throw new Error("Expected complete mapping baseline");
+    const totals = stageATotalsOf(baseline);
+    const mappingCount = baseline.routeToCohortMappings.length;
+    const result = materializePhaseDTask5V1({
+      ...prepared.input,
+      evidenceBudget: stageABudgetAboveTotals(totals, {
+        maxRouteMappingCount: mappingCount - 1,
+      }),
+    });
+
+    expect(result.compressionStatus).toBe("INCONCLUSIVE");
+    expect(result.budgetExecution.measurements.map(({ dimension }) => dimension))
+      .toEqual(TASK6_TEST_DIMENSION_ORDER.slice(0, 5));
+    const provenance = result.budgetExecution.exhaustionProvenance;
+    if (provenance === null) throw new Error("Expected budget exhaustion provenance");
+    const exhaustedMeasurements = result.budgetExecution.measurements.filter(({ dimension }) =>
+      result.exhaustedDimensions.includes(dimension));
+    expect(provenance.exhaustedMeasurements).toEqual(exhaustedMeasurements);
+    expect(provenance.sourceHashBindings).toEqual([...provenance.sourceHashBindings].sort((left, right) =>
+      compareTask6Text(left.sourceKind, right.sourceKind)
+      || compareTask6Text(left.sourceHash, right.sourceHash)));
+    expect(provenance.provenanceHash).toBe(canonicalHash({
+      exhaustedMeasurements: provenance.exhaustedMeasurements,
+      sourceHashBindings: provenance.sourceHashBindings,
+    }));
+    expect(result.budgetExecution.executionHash).toBe(canonicalHash({
+      measurements: result.budgetExecution.measurements,
+      exhaustionProvenance: provenance,
+    }));
   });
 });
 

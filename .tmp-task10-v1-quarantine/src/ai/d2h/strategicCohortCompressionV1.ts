@@ -2941,7 +2941,7 @@ function materializePhaseDTask5Internal(
   onStageDWitnessConstructed?: Task6StageDObserverV1,
 ): HierarchicalStrategicCohortCompressionArtifactV1 {
   const stageA = materializeTask6StageAV1(input);
-  if (stageA.kind === "ISSUE") return task5Terminal(input, stageA.issue, 0);
+  if (stageA.kind === "ISSUE") return task5Terminal(input, stageA.issue);
   if (stageA.kind === "BUDGET_TERMINAL") return task6Terminal(input, stageA.snapshot);
   const records = stageA.records;
   const envelopes = [...stageA.envelopes];
@@ -2957,7 +2957,7 @@ function materializePhaseDTask5Internal(
   for (const envelope of envelopes) {
     const cohortInterface = memberCohort.get(envelope.memberEnvelopeHash)!;
     const mappingResult = task6MappingOf(envelope, cohortInterface, sourceBindings);
-    if ("issue" in mappingResult) return task5Terminal(input, mappingResult.issue, cohortInterfaceByHash.size);
+    if ("issue" in mappingResult) return task5Terminal(input, mappingResult.issue);
     const mapping = mappingResult.value;
     const applyResult = accumulator.applyVerifiedEvent({ ROUTE_MAPPING_COUNT: 1 }, {
       stage: "STAGE_B_MAPPING",
@@ -2983,10 +2983,10 @@ function materializePhaseDTask5Internal(
     const cohortInterface = memberCohort.get(envelope.memberEnvelopeHash)!;
     const mapping = mappingByMember.get(envelope.memberEnvelopeHash);
     if (mapping === undefined) {
-      return task5Terminal(input, { status: "INCONCLUSIVE", reason: "INCOMPLETE_ROUTE_MAPPING" }, cohortInterfaceByHash.size);
+      return task5Terminal(input, { status: "INCONCLUSIVE", reason: "INCOMPLETE_ROUTE_MAPPING" });
     }
     const proofResult = task6ProofOf(envelope, cohortInterface, mapping, sourceBindings);
-    if ("issue" in proofResult) return task5Terminal(input, proofResult.issue, cohortInterfaceByHash.size);
+    if ("issue" in proofResult) return task5Terminal(input, proofResult.issue);
     const proof = proofResult.value;
     const applyResult = accumulator.applyVerifiedEvent({ EQUIVALENCE_PROOF_COUNT: 1 }, {
       stage: "STAGE_C_PROOF",
@@ -3007,7 +3007,7 @@ function materializePhaseDTask5Internal(
   accumulator.finalizeExactDimension("EQUIVALENCE_PROOF_COUNT");
 
   const publicationIssue = validateTask5Publication(envelopes, mappings, proofs, cohortInterfaceByHash);
-  if (publicationIssue !== null) return task5Terminal(input, publicationIssue, 0);
+  if (publicationIssue !== null) return task5Terminal(input, publicationIssue);
   const stageD = materializeTask6StageDV1(
     input.task4.occurrenceUniverse!,
     envelopes,
@@ -3016,7 +3016,7 @@ function materializePhaseDTask5Internal(
     accumulator,
     onStageDWitnessConstructed,
   );
-  if (stageD.kind === "ISSUE") return task5Terminal(input, stageD.issue, cohortInterfaceByHash.size);
+  if (stageD.kind === "ISSUE") return task5Terminal(input, stageD.issue);
   if (stageD.kind === "BUDGET_TERMINAL") return task6Terminal(input, stageD.snapshot);
   const coverage = stageD.coverage;
   const completeSnapshot = accumulator.completeSnapshot();
@@ -3035,6 +3035,13 @@ function materializePhaseDTask5Internal(
     || compareText(left.routeHash, right.routeHash));
   const canonicalProofs = [...proofs].sort((left, right) => compareText(left.routeId, right.routeId)
     || compareText(left.routeHash, right.routeHash));
+  const compressionRatioObservation = task6RatioObservationOf(
+    input.admission.inputRouteCount,
+    "COMPLETE",
+    null,
+    false,
+    cohorts.length,
+  );
   const payload = {
     schemaVersion: STRATEGIC_COHORT_COMPRESSION_V1_SCHEMA_VERSION,
     ...input.admission.canonicalSourceBindingManifest.commonBindings,
@@ -3052,14 +3059,7 @@ function materializePhaseDTask5Internal(
     equivalenceProofs: canonicalProofs,
     coverageManifest: coverage,
     cohortCount: cohorts.length,
-    compressionRatioObservation: {
-      inputRouteCount: records.length,
-      observedCohortCount: cohorts.length,
-      ratioNumerator: records.length,
-      ratioDenominator: cohorts.length,
-      cohortCountCompleteness: "EXACT" as const,
-      ratioInterpretation: "EXACT" as const,
-    },
+    compressionRatioObservation,
     reasonCodes: [] as readonly StrategicCohortCompressionReasonCodeV1[],
     exhaustedDimensions: [] as const,
     cohortUniverseHash: canonicalHash({ cohorts, cohortInterfaces, mappings: canonicalMappings }),
@@ -3077,7 +3077,7 @@ export function __task6StageAForTest(
   cohortInterfaceTamper: Task6StageATamperV1,
 ): HierarchicalStrategicCohortCompressionArtifactV1 {
   const stageA = materializeTask6StageAV1(input, cohortInterfaceTamper);
-  if (stageA.kind === "ISSUE") return task5Terminal(input, stageA.issue, 0);
+  if (stageA.kind === "ISSUE") return task5Terminal(input, stageA.issue);
   if (stageA.kind === "BUDGET_TERMINAL") return task6Terminal(input, stageA.snapshot);
   throw new Error("Task6 Stage-A test seam requires a terminal outcome");
 }
@@ -3095,11 +3095,28 @@ export function __task6StageDForTest(
   return { result, constructedWitnessCount };
 }
 
+export function __task6RatioObservationForTest(
+  inputRouteCount: number,
+  compressionStatus: StrategicCohortCompressionStatusV1,
+  positiveCohortLowerBound: number | null,
+  budgetExhaustion: boolean,
+  exactCompleteCohortCount?: number,
+): HierarchicalStrategicCohortCompressionArtifactV1["compressionRatioObservation"] {
+  return task6RatioObservationOf(
+    inputRouteCount,
+    compressionStatus,
+    positiveCohortLowerBound,
+    budgetExhaustion,
+    exactCompleteCohortCount,
+  );
+}
+
 type Task6CohortAdmissionTestResultV1 = Readonly<{
   status: "COMPLETE" | "INCONCLUSIVE" | "REJECTED";
   budgetExecution: StrategicCohortBudgetExecutionArtifactV1;
   exhaustedDimensions: readonly StrategicCohortBudgetDimensionV1[];
   reasonCodes: readonly StrategicCohortCompressionReasonCodeV1[];
+  positiveCohortLowerBound: number | null;
 }>;
 
 /** Internal test-support seam for the same verified cohort admission operation used by Stage A. */
@@ -3118,20 +3135,24 @@ export function __task6CohortAdmissionForTest(
 
   for (const cohortInterface of cohortInterfaces) {
     if (!validTask6CohortInterface(cohortInterface)) {
+      const snapshot = accumulator.terminalSnapshot();
       return {
         status: "REJECTED",
-        budgetExecution: accumulator.terminalSnapshot().budgetExecution,
+        budgetExecution: snapshot.budgetExecution,
         exhaustedDimensions: [],
         reasonCodes: ["SOURCE_HASH_PAYLOAD_MISMATCH"],
+        positiveCohortLowerBound: snapshot.positiveCohortLowerBound,
       };
     }
     const cohortAdmission = task6CohortAdmissionOf(cohortInterfaceByHash, cohortInterface);
     if (cohortAdmission.issue !== null) {
+      const snapshot = accumulator.terminalSnapshot();
       return {
         status: cohortAdmission.issue.status,
-        budgetExecution: accumulator.terminalSnapshot().budgetExecution,
+        budgetExecution: snapshot.budgetExecution,
         exhaustedDimensions: [],
         reasonCodes: [cohortAdmission.issue.reason],
+        positiveCohortLowerBound: snapshot.positiveCohortLowerBound,
       };
     }
     const applyResult = accumulator.applyVerifiedEvent(
@@ -3150,6 +3171,7 @@ export function __task6CohortAdmissionForTest(
         budgetExecution: applyResult.snapshot.budgetExecution,
         exhaustedDimensions: applyResult.snapshot.exhaustedDimensions,
         reasonCodes: applyResult.snapshot.reasonCodes,
+        positiveCohortLowerBound: applyResult.snapshot.positiveCohortLowerBound,
       };
     }
     if (cohortAdmission.isNewCohort) {
@@ -3164,6 +3186,7 @@ export function __task6CohortAdmissionForTest(
     budgetExecution: snapshot.budgetExecution,
     exhaustedDimensions: snapshot.exhaustedDimensions,
     reasonCodes: snapshot.reasonCodes,
+    positiveCohortLowerBound: snapshot.positiveCohortLowerBound,
   };
 }
 
@@ -4109,25 +4132,89 @@ function emptyCohortBudgetExecution() {
   return { ...payload, executionHash: canonicalHash(payload) };
 }
 
+function task6RatioObservationOf(
+  inputRouteCount: number,
+  compressionStatus: StrategicCohortCompressionStatusV1,
+  positiveCohortLowerBound: number | null,
+  budgetExhaustion: boolean,
+  exactCompleteCohortCount?: number,
+): HierarchicalStrategicCohortCompressionArtifactV1["compressionRatioObservation"] {
+  if (compressionStatus === "COMPLETE") {
+    if (exactCompleteCohortCount === undefined || exactCompleteCohortCount <= 0) {
+      throw new Error("Task6 COMPLETE ratio requires a positive exact cohort count");
+    }
+    return {
+      inputRouteCount,
+      observedCohortCount: exactCompleteCohortCount,
+      ratioNumerator: inputRouteCount,
+      ratioDenominator: exactCompleteCohortCount,
+      cohortCountCompleteness: "EXACT",
+      ratioInterpretation: "EXACT",
+    };
+  }
+
+  if (compressionStatus === "INCONCLUSIVE"
+    && budgetExhaustion
+    && positiveCohortLowerBound !== null
+    && positiveCohortLowerBound > 0) {
+    return {
+      inputRouteCount,
+      observedCohortCount: positiveCohortLowerBound,
+      ratioNumerator: inputRouteCount,
+      ratioDenominator: positiveCohortLowerBound,
+      cohortCountCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+      ratioInterpretation: "UPPER_BOUND_FROM_COHORT_LOWER_BOUND",
+    };
+  }
+
+  return {
+    inputRouteCount,
+    observedCohortCount: 0,
+    ratioNumerator: inputRouteCount,
+    ratioDenominator: null,
+    cohortCountCompleteness: null,
+    ratioInterpretation: "UNAVAILABLE",
+  };
+}
+
+type Task5TerminalOptionsV1 = Readonly<{
+  budgetExecution?: StrategicCohortBudgetExecutionArtifactV1;
+  exhaustedDimensions?: readonly StrategicCohortBudgetDimensionV1[];
+  reasonCodes?: readonly StrategicCohortCompressionReasonCodeV1[];
+  ratioObservation?: HierarchicalStrategicCohortCompressionArtifactV1["compressionRatioObservation"];
+}>;
+
 function task6Terminal(
   input: PhaseDTask5InputV1,
   snapshot: Task6AccumulatorSnapshotV1,
 ): HierarchicalStrategicCohortCompressionArtifactV1 {
   const reason = snapshot.reasonCodes[0];
   if (reason === undefined) throw new Error("Task6 terminal snapshot has no exhaustion reason");
-  return task5Terminal(input, { status: "INCONCLUSIVE", reason }, 0,
-    snapshot.budgetExecution, snapshot.exhaustedDimensions, snapshot.reasonCodes);
+  return task5Terminal(input, { status: "INCONCLUSIVE", reason }, {
+    budgetExecution: snapshot.budgetExecution,
+    exhaustedDimensions: snapshot.exhaustedDimensions,
+    reasonCodes: snapshot.reasonCodes,
+    ratioObservation: task6RatioObservationOf(
+      input.admission.inputRouteCount,
+      "INCONCLUSIVE",
+      snapshot.positiveCohortLowerBound,
+      true,
+    ),
+  });
 }
 
 function task5Terminal(
   input: PhaseDTask5InputV1,
   issue: Task5IssueV1,
-  observedCohortCount: number,
-  budgetExecution: StrategicCohortBudgetExecutionArtifactV1 = emptyCohortBudgetExecution(),
-  exhaustedDimensions: readonly StrategicCohortBudgetDimensionV1[] = [],
-  reasonCodes: readonly StrategicCohortCompressionReasonCodeV1[] = [issue.reason],
+  options: Task5TerminalOptionsV1 = {},
 ): HierarchicalStrategicCohortCompressionArtifactV1 {
   const manifest = input.admission.canonicalSourceBindingManifest;
+  const ratioObservation = options.ratioObservation ?? task6RatioObservationOf(
+    input.admission.inputRouteCount,
+    issue.status,
+    null,
+    false,
+  );
   const payload = {
     schemaVersion: STRATEGIC_COHORT_COMPRESSION_V1_SCHEMA_VERSION,
     ...manifest.commonBindings,
@@ -4137,7 +4224,7 @@ function task5Terminal(
     sourceAndComponentSetHash: manifest.andComponentSetHash,
     compressionStatus: issue.status,
     evidenceBudget: input.evidenceBudget,
-    budgetExecution,
+    budgetExecution: options.budgetExecution ?? emptyCohortBudgetExecution(),
     cohorts: null,
     cohortInterfaces: null,
     routeToCohortMappings: null,
@@ -4145,16 +4232,9 @@ function task5Terminal(
     equivalenceProofs: null,
     coverageManifest: null,
     cohortCount: 0,
-    compressionRatioObservation: {
-      inputRouteCount: input.admission.inputRouteCount,
-      observedCohortCount,
-      ratioNumerator: input.admission.inputRouteCount,
-      ratioDenominator: null,
-      cohortCountCompleteness: null,
-      ratioInterpretation: "UNAVAILABLE" as const,
-    },
-    reasonCodes,
-    exhaustedDimensions,
+    compressionRatioObservation: ratioObservation,
+    reasonCodes: options.reasonCodes ?? [issue.reason],
+    exhaustedDimensions: options.exhaustedDimensions ?? [],
     cohortUniverseHash: null,
     semanticBoundary: "HIERARCHICAL_STRATEGIC_COHORT_FACTS_NOT_DECISION" as const,
   };
