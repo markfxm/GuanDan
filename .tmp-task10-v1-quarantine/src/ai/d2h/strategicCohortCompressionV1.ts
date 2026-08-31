@@ -2604,6 +2604,125 @@ type Task5RecordV1 = Readonly<{
   closure: RouteRelevantConflictClosureV1;
 }>;
 
+type Task6StageATamperV1 = (
+  index: number,
+  cohortInterface: StrategicCohortInterfaceV1,
+) => StrategicCohortInterfaceV1;
+
+type Task6StageAResultV1 =
+  | Readonly<{ kind: "ISSUE"; issue: Task5IssueV1 }>
+  | Readonly<{ kind: "BUDGET_TERMINAL"; snapshot: Task6AccumulatorSnapshotV1 }>
+  | Readonly<{
+    kind: "COMPLETE";
+    records: readonly Task5RecordV1[];
+    envelopes: readonly RouteCohortMemberEnvelopeV1[];
+    cohortInterfaceByHash: ReadonlyMap<string, StrategicCohortInterfaceV1>;
+    memberCohort: ReadonlyMap<string, StrategicCohortInterfaceV1>;
+    snapshot: Task6AccumulatorSnapshotV1;
+  }>;
+
+function materializeTask6StageAV1(
+  input: PhaseDTask5InputV1,
+  cohortInterfaceTamper?: Task6StageATamperV1,
+): Task6StageAResultV1 {
+  const issueOrRecords = task5RecordsOf(input);
+  if ("issue" in issueOrRecords) return { kind: "ISSUE", issue: issueOrRecords.issue };
+  const records = issueOrRecords.records;
+  if (records.length === 0) {
+    return { kind: "ISSUE", issue: { status: "INCONCLUSIVE", reason: "EMPTY_SOURCE_ROUTE_UNIVERSE" } };
+  }
+
+  let accumulator: Task6MeasurementAccumulatorV1;
+  try {
+    accumulator = createTask6MeasurementAccumulatorV1(input.evidenceBudget, sourceBindingsOf(input.admission));
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Invalid Task6 limit for ")) {
+      return { kind: "ISSUE", issue: { status: "INCONCLUSIVE", reason: "INVALID_BUDGET" } };
+    }
+    throw error;
+  }
+
+  const endpointIndex = endpointIndexOf(input.admission);
+  const stageARecords = [...records].sort(compareTask6StageARecord);
+  const envelopes: RouteCohortMemberEnvelopeV1[] = [];
+  const envelopeIdentity = new Map<string, string>();
+  const cohortInterfaceByHash = new Map<string, StrategicCohortInterfaceV1>();
+  const memberCohort = new Map<string, StrategicCohortInterfaceV1>();
+
+  for (let index = 0; index < stageARecords.length; index += 1) {
+    const record = stageARecords[index]!;
+    const result = memberEnvelopeOf(record, input.admission, endpointIndex.endpointProjectionsByRoute);
+    if ("issue" in result) return { kind: "ISSUE", issue: result.issue };
+    const envelope = result.value;
+    if (envelope.memberEnvelopeHash !== canonicalHash(payloadWithout(envelope, "memberEnvelopeHash"))) {
+      return { kind: "ISSUE", issue: { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" } };
+    }
+
+    const priorRouteHash = envelopeIdentity.get(envelope.routeId);
+    if (priorRouteHash !== undefined && priorRouteHash !== envelope.routeHash) {
+      return { kind: "ISSUE", issue: { status: "REJECTED", reason: "ROUTE_ID_HASH_CONFLICT" } };
+    }
+    envelopeIdentity.set(envelope.routeId, envelope.routeHash);
+
+    const derivedCohortInterface = cohortInterfaceOf(envelope);
+    if (!validTask6CohortInterface(derivedCohortInterface)) {
+      return { kind: "ISSUE", issue: { status: "REJECTED", reason: "SOURCE_HASH_PAYLOAD_MISMATCH" } };
+    }
+    const cohortInterface = cohortInterfaceTamper === undefined
+      ? derivedCohortInterface
+      : cohortInterfaceTamper(index, derivedCohortInterface);
+    const cohortAdmission = task6CohortAdmissionOf(cohortInterfaceByHash, cohortInterface);
+    if (cohortAdmission.issue !== null) return { kind: "ISSUE", issue: cohortAdmission.issue };
+    const applyResult = accumulator.applyVerifiedEvent({
+      MEMBER_ENVELOPE_COUNT: 1,
+      RESOURCE_ROLE_SLOT_COUNT: envelope.resourceInterface.canonicalRoleSlots.length,
+      CONFLICT_CLOSURE_EDGE_COUNT: record.closure.traversedReferenceEdges.length,
+      COHORT_COUNT: cohortAdmission.isNewCohort ? 1 : 0,
+    }, {
+      stage: "STAGE_A_ROUTE",
+      sourceRouteUniverseHash: envelope.sourceRouteUniverseHash,
+      routeId: envelope.routeId,
+      routeHash: envelope.routeHash,
+    });
+    if (applyResult.terminal) {
+      if (applyResult.snapshot === null) throw new Error("Task6 Stage-A terminal snapshot missing");
+      return { kind: "BUDGET_TERMINAL", snapshot: applyResult.snapshot };
+    }
+
+    envelopes.push(envelope);
+    memberCohort.set(envelope.memberEnvelopeHash, cohortInterface);
+    if (cohortAdmission.isNewCohort) cohortInterfaceByHash.set(cohortInterface.cohortInterfaceHash, cohortInterface);
+  }
+
+  for (const dimension of [
+    "MEMBER_ENVELOPE_COUNT",
+    "RESOURCE_ROLE_SLOT_COUNT",
+    "CONFLICT_CLOSURE_EDGE_COUNT",
+    "COHORT_COUNT",
+  ] as const) {
+    accumulator.finalizeExactDimension(dimension);
+  }
+
+  return {
+    kind: "COMPLETE",
+    records: stageARecords,
+    envelopes,
+    cohortInterfaceByHash,
+    memberCohort,
+    snapshot: accumulator.terminalSnapshot(),
+  };
+}
+
+function compareTask6StageARecord(left: Task5RecordV1, right: Task5RecordV1): number {
+  return compareText(left.draft.sourceRouteUniverseHash, right.draft.sourceRouteUniverseHash)
+    || compareText(left.route.routeId, right.route.routeId)
+    || compareText(left.route.routeHash, right.route.routeHash);
+}
+
+function validTask6CohortInterface(cohortInterface: StrategicCohortInterfaceV1): boolean {
+  return cohortInterface.cohortInterfaceHash === canonicalHash(payloadWithout(cohortInterface, "cohortInterfaceHash"));
+}
+
 type Task5EndpointProjectionV1 = Readonly<{
   componentEndpointId: string;
   resourceComponentId: string;
@@ -2626,6 +2745,25 @@ type Task5IssueV1 = Readonly<{
   status: "INCONCLUSIVE" | "REJECTED";
   reason: StrategicCohortCompressionReasonCodeV1;
 }>;
+
+type Task6CohortAdmissionV1 = Readonly<{
+  issue: Task5IssueV1 | null;
+  isNewCohort: boolean;
+}>;
+
+function task6CohortAdmissionOf(
+  cohortInterfaceByHash: ReadonlyMap<string, StrategicCohortInterfaceV1>,
+  cohortInterface: StrategicCohortInterfaceV1,
+): Task6CohortAdmissionV1 {
+  const previous = cohortInterfaceByHash.get(cohortInterface.cohortInterfaceHash);
+  if (previous !== undefined && canonicalSerialize(previous) !== canonicalSerialize(cohortInterface)) {
+    return {
+      issue: { status: "REJECTED", reason: "SIGNATURE_HASH_PAYLOAD_CONFLICT" },
+      isNewCohort: false,
+    };
+  }
+  return { issue: null, isNewCohort: previous === undefined };
+}
 
 type HardCohortGateResultV1 = Readonly<{
   gateStatus: "COMPLETE" | "INCONCLUSIVE";
@@ -2688,51 +2826,15 @@ export function applyHardCohortGateV1(
   };
 }
 
-/** Task 5 only materializes established facts; Task 6 owns configurable budget execution. */
+/** Task 5 materializes established facts while Task 6 accounts the verified Stage-A pass. */
 export const materializePhaseDTask5V1: PhaseDTask5MaterializerV1 = (input) => {
-  const issueOrRecords = task5RecordsOf(input);
-  if ("issue" in issueOrRecords) return task5Terminal(input, issueOrRecords.issue, 0);
-  const records = issueOrRecords.records;
-  if (records.length === 0) {
-    return task5Terminal(input, { status: "INCONCLUSIVE", reason: "EMPTY_SOURCE_ROUTE_UNIVERSE" }, 0);
-  }
-
-  const envelopes: RouteCohortMemberEnvelopeV1[] = [];
-  const endpointIndex = endpointIndexOf(input.admission);
-  for (const record of records) {
-    const result = memberEnvelopeOf(record, input.admission, endpointIndex.endpointProjectionsByRoute);
-    if ("issue" in result) return task5Terminal(input, result.issue, 0);
-    envelopes.push(result.value);
-  }
-  const envelopeIdentity = new Map<string, string>();
-  for (const envelope of envelopes) {
-    const prior = envelopeIdentity.get(envelope.routeId);
-    if (prior !== undefined && prior !== envelope.routeHash) {
-      return task5Terminal(input, { status: "REJECTED", reason: "ROUTE_ID_HASH_CONFLICT" }, 0);
-    }
-    envelopeIdentity.set(envelope.routeId, envelope.routeHash);
-  }
-
-  const derivedCohortInterfaces = envelopes.map(cohortInterfaceOf);
-  const postDerivationGate = __task5PostDerivationHardGateV1(derivedCohortInterfaces
-    .map((cohortInterface) => cohortInterface.cohortInterfaceHash));
-  const hardGate = postDerivationGate.gate;
-  if (hardGate.gateStatus === "INCONCLUSIVE") {
-    return task5Terminal(input, { status: "INCONCLUSIVE", reason: "COHORT_COUNT_EXHAUSTED" },
-      hardGate.observedDistinctCohortLowerBound);
-  }
-  const cohortInterfaceByHash = new Map<string, StrategicCohortInterfaceV1>();
-  const memberCohort = new Map<string, StrategicCohortInterfaceV1>();
-  for (let index = 0; index < envelopes.length; index += 1) {
-    const envelope = envelopes[index]!;
-    const cohortInterface = derivedCohortInterfaces[index]!;
-    const previous = cohortInterfaceByHash.get(cohortInterface.cohortInterfaceHash);
-    if (previous !== undefined && canonicalSerialize(previous) !== canonicalSerialize(cohortInterface)) {
-      return task5Terminal(input, { status: "REJECTED", reason: "SIGNATURE_HASH_PAYLOAD_CONFLICT" }, 0);
-    }
-    cohortInterfaceByHash.set(cohortInterface.cohortInterfaceHash, cohortInterface);
-    memberCohort.set(envelope.memberEnvelopeHash, cohortInterface);
-  }
+  const stageA = materializeTask6StageAV1(input);
+  if (stageA.kind === "ISSUE") return task5Terminal(input, stageA.issue, 0);
+  if (stageA.kind === "BUDGET_TERMINAL") return task6Terminal(input, stageA.snapshot);
+  const records = stageA.records;
+  const envelopes = [...stageA.envelopes];
+  const cohortInterfaceByHash = new Map(stageA.cohortInterfaceByHash);
+  const memberCohort = new Map(stageA.memberCohort);
 
   const sourceBindings = sourceBindingsOf(input.admission);
   const mappings: StrategicRouteCohortMappingFactV1[] = [];
@@ -2806,7 +2908,7 @@ export const materializePhaseDTask5V1: PhaseDTask5MaterializerV1 = (input) => {
     sourceAndComponentSetHash: input.admission.canonicalSourceBindingManifest.andComponentSetHash,
     compressionStatus: "COMPLETE" as const,
     evidenceBudget: input.evidenceBudget,
-    budgetExecution: emptyCohortBudgetExecution(),
+    budgetExecution: stageA.snapshot.budgetExecution,
     cohorts,
     cohortInterfaces,
     routeToCohortMappings: canonicalMappings,
@@ -2829,6 +2931,89 @@ export const materializePhaseDTask5V1: PhaseDTask5MaterializerV1 = (input) => {
   };
   return deepFreeze({ ...payload, artifactHash: canonicalHash(payload) });
 };
+
+/** Internal Task 6 Stage-A test seam; production materialization uses the same private pass without tampering. */
+export function __task6StageAForTest(
+  input: PhaseDTask5InputV1,
+  cohortInterfaceTamper: Task6StageATamperV1,
+): HierarchicalStrategicCohortCompressionArtifactV1 {
+  const stageA = materializeTask6StageAV1(input, cohortInterfaceTamper);
+  if (stageA.kind === "ISSUE") return task5Terminal(input, stageA.issue, 0);
+  if (stageA.kind === "BUDGET_TERMINAL") return task6Terminal(input, stageA.snapshot);
+  throw new Error("Task6 Stage-A test seam requires a terminal outcome");
+}
+
+type Task6CohortAdmissionTestResultV1 = Readonly<{
+  status: "COMPLETE" | "INCONCLUSIVE" | "REJECTED";
+  budgetExecution: StrategicCohortBudgetExecutionArtifactV1;
+  exhaustedDimensions: readonly StrategicCohortBudgetDimensionV1[];
+  reasonCodes: readonly StrategicCohortCompressionReasonCodeV1[];
+}>;
+
+/** Internal test-support seam for the same verified cohort admission operation used by Stage A. */
+export function __task6CohortAdmissionForTest(
+  cohortInterfaces: readonly StrategicCohortInterfaceV1[],
+): Task6CohortAdmissionTestResultV1 {
+  const accumulator = createTask6MeasurementAccumulatorV1({
+    maxMemberEnvelopeCount: 1000,
+    maxResourceRoleSlotCount: 1000,
+    maxConflictClosureEdgeCount: 1000,
+    maxRouteMappingCount: 1000,
+    maxEquivalenceProofCount: 1000,
+    maxLineageOccurrenceWitnessCount: 1000,
+  });
+  const cohortInterfaceByHash = new Map<string, StrategicCohortInterfaceV1>();
+
+  for (const cohortInterface of cohortInterfaces) {
+    if (!validTask6CohortInterface(cohortInterface)) {
+      return {
+        status: "REJECTED",
+        budgetExecution: accumulator.terminalSnapshot().budgetExecution,
+        exhaustedDimensions: [],
+        reasonCodes: ["SOURCE_HASH_PAYLOAD_MISMATCH"],
+      };
+    }
+    const cohortAdmission = task6CohortAdmissionOf(cohortInterfaceByHash, cohortInterface);
+    if (cohortAdmission.issue !== null) {
+      return {
+        status: cohortAdmission.issue.status,
+        budgetExecution: accumulator.terminalSnapshot().budgetExecution,
+        exhaustedDimensions: [],
+        reasonCodes: [cohortAdmission.issue.reason],
+      };
+    }
+    const applyResult = accumulator.applyVerifiedEvent(
+      { COHORT_COUNT: cohortAdmission.isNewCohort ? 1 : 0 },
+      {
+        stage: "STAGE_A_ROUTE",
+        sourceRouteUniverseHash: null,
+        routeId: cohortInterface.cohortInterfaceHash,
+        routeHash: cohortInterface.cohortInterfaceHash,
+      },
+    );
+    if (applyResult.terminal) {
+      if (applyResult.snapshot === null) throw new Error("Task6 cohort admission terminal snapshot missing");
+      return {
+        status: "INCONCLUSIVE",
+        budgetExecution: applyResult.snapshot.budgetExecution,
+        exhaustedDimensions: applyResult.snapshot.exhaustedDimensions,
+        reasonCodes: applyResult.snapshot.reasonCodes,
+      };
+    }
+    if (cohortAdmission.isNewCohort) {
+      cohortInterfaceByHash.set(cohortInterface.cohortInterfaceHash, cohortInterface);
+    }
+  }
+
+  accumulator.finalizeExactDimension("COHORT_COUNT");
+  const snapshot = accumulator.terminalSnapshot();
+  return {
+    status: "COMPLETE",
+    budgetExecution: snapshot.budgetExecution,
+    exhaustedDimensions: snapshot.exhaustedDimensions,
+    reasonCodes: snapshot.reasonCodes,
+  };
+}
 
 /** Internal test-support seam; validates already materialized publication evidence. */
 export function __validateTask5PublicationForTest(
@@ -3672,10 +3857,23 @@ function emptyCohortBudgetExecution() {
   return { ...payload, executionHash: canonicalHash(payload) };
 }
 
+function task6Terminal(
+  input: PhaseDTask5InputV1,
+  snapshot: Task6AccumulatorSnapshotV1,
+): HierarchicalStrategicCohortCompressionArtifactV1 {
+  const reason = snapshot.reasonCodes[0];
+  if (reason === undefined) throw new Error("Task6 terminal snapshot has no exhaustion reason");
+  return task5Terminal(input, { status: "INCONCLUSIVE", reason }, 0,
+    snapshot.budgetExecution, snapshot.exhaustedDimensions, snapshot.reasonCodes);
+}
+
 function task5Terminal(
   input: PhaseDTask5InputV1,
   issue: Task5IssueV1,
   observedCohortCount: number,
+  budgetExecution: StrategicCohortBudgetExecutionArtifactV1 = emptyCohortBudgetExecution(),
+  exhaustedDimensions: readonly StrategicCohortBudgetDimensionV1[] = [],
+  reasonCodes: readonly StrategicCohortCompressionReasonCodeV1[] = [issue.reason],
 ): HierarchicalStrategicCohortCompressionArtifactV1 {
   const manifest = input.admission.canonicalSourceBindingManifest;
   const payload = {
@@ -3687,7 +3885,7 @@ function task5Terminal(
     sourceAndComponentSetHash: manifest.andComponentSetHash,
     compressionStatus: issue.status,
     evidenceBudget: input.evidenceBudget,
-    budgetExecution: emptyCohortBudgetExecution(),
+    budgetExecution,
     cohorts: null,
     cohortInterfaces: null,
     routeToCohortMappings: null,
@@ -3703,8 +3901,8 @@ function task5Terminal(
       cohortCountCompleteness: null,
       ratioInterpretation: "UNAVAILABLE" as const,
     },
-    reasonCodes: [issue.reason] as readonly StrategicCohortCompressionReasonCodeV1[],
-    exhaustedDimensions: [] as const,
+    reasonCodes,
+    exhaustedDimensions,
     cohortUniverseHash: null,
     semanticBoundary: "HIERARCHICAL_STRATEGIC_COHORT_FACTS_NOT_DECISION" as const,
   };

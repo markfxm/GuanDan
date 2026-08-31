@@ -1,14 +1,16 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { canonicalHash } from "../../../src/ai/d2h/strategicEvidenceCanonicalSerializer";
+import { canonicalHash, canonicalSerialize } from "../../../src/ai/d2h/strategicEvidenceCanonicalSerializer";
 import {
   HARD_MAX_COHORT_COUNT_V1,
   type NormalizedRouteCohortMemberDraftV1,
   type PhaseDComponentSourceBindingV1,
+  type PhaseDTask5InputV1,
   type PhaseDTask4ArtifactV1,
   type PhaseDSourceAdmissionSuccessV1,
   type RouteCohortMemberEnvelopeV1,
   type StrategicCohortCompressionEvidenceBudgetV1,
   type StrategicCohortCompressionReasonCodeV1,
+  type StrategicCohortInterfaceV1,
 } from "../../../src/ai/d2h/strategicCohortCompressionV1Contracts";
 import {
   compressHierarchicalStrategicCohortsV1,
@@ -388,6 +390,457 @@ describe("Task6.1 measurement accumulator", () => {
       .toBe(secondResult.snapshot?.budgetExecution.exhaustionProvenance?.provenanceHash);
     expect(firstResult.snapshot?.budgetExecution.executionHash)
       .toBe(secondResult.snapshot?.budgetExecution.executionHash);
+  });
+});
+
+type Task6StageATestTamperV1 = (
+  index: number,
+  cohortInterface: StrategicCohortInterfaceV1,
+) => StrategicCohortInterfaceV1;
+
+type Task6StageATestSeamV1 = (
+  input: PhaseDTask5InputV1,
+  tamper: Task6StageATestTamperV1,
+) => ReturnType<typeof materializePhaseDTask5V1>;
+
+const task6StageAForTest = (strategicCohortCompressionV1 as unknown as {
+  __task6StageAForTest?: Task6StageATestSeamV1;
+}).__task6StageAForTest;
+
+type Task6CohortAdmissionTestResultV1 = {
+  status: string;
+  budgetExecution: Task6TestSnapshotV1["budgetExecution"];
+  exhaustedDimensions: readonly string[];
+  reasonCodes: readonly string[];
+};
+
+type Task6CohortAdmissionTestSeamV1 = (
+  cohortInterfaces: readonly StrategicCohortInterfaceV1[],
+) => Task6CohortAdmissionTestResultV1;
+
+const task6CohortAdmissionForTest = (strategicCohortCompressionV1 as unknown as {
+  __task6CohortAdmissionForTest?: Task6CohortAdmissionTestSeamV1;
+}).__task6CohortAdmissionForTest;
+
+describe("Task6.2 Stage-A materialization accounting", () => {
+  it("Task6.2 counts all four Stage-A dimensions from one verified route event", () => {
+    const { result } = materializeTask5WithBudget(makeValidPhaseDAdmissionInput(), phaseDTask5Budget());
+    expect(result.compressionStatus).toBe("COMPLETE");
+    if (result.memberEnvelopes === null) throw new Error("Expected verified member envelopes");
+
+    const expectedMemberCount = result.memberEnvelopes.length;
+    const expectedSlotCount = result.memberEnvelopes.reduce((total, envelope) =>
+      total + envelope.resourceInterface.canonicalRoleSlots.length, 0);
+    const expectedClosureEdgeCount = result.memberEnvelopes.reduce((total, envelope) =>
+      total + envelope.routeRelevantConflictClosure.traversedReferenceEdges.length, 0);
+    const expectedCohortCount = new Set((result.cohortInterfaces ?? []).map((cohortInterface) =>
+      canonicalSerialize(cohortInterface.fourSignatureHashes))).size;
+
+    expect(result.budgetExecution.measurements).toEqual([
+      {
+        dimension: "MEMBER_ENVELOPE_COUNT",
+        limit: phaseDTask5Budget().maxMemberEnvelopeCount,
+        observedCount: expectedMemberCount,
+        measurementCompleteness: "EXACT",
+      },
+      {
+        dimension: "RESOURCE_ROLE_SLOT_COUNT",
+        limit: phaseDTask5Budget().maxResourceRoleSlotCount,
+        observedCount: expectedSlotCount,
+        measurementCompleteness: "EXACT",
+      },
+      {
+        dimension: "CONFLICT_CLOSURE_EDGE_COUNT",
+        limit: phaseDTask5Budget().maxConflictClosureEdgeCount,
+        observedCount: expectedClosureEdgeCount,
+        measurementCompleteness: "EXACT",
+      },
+      {
+        dimension: "COHORT_COUNT",
+        limit: HARD_MAX_COHORT_COUNT_V1,
+        observedCount: expectedCohortCount,
+        measurementCompleteness: "EXACT",
+      },
+    ]);
+
+    const reversed = materializeTask5WithBudget(
+      makeReversedComponentSourceInput(makeValidPhaseDAdmissionInput()),
+      phaseDTask5Budget(),
+    ).result;
+    expect(reversed.budgetExecution).toEqual(result.budgetExecution);
+    expect(reversed.budgetExecution.executionHash).toBe(result.budgetExecution.executionHash);
+  });
+
+  it("Task6.2 records simultaneous Stage-A exhaustion before terminal publication", () => {
+    const sourceInput = makeValidPhaseDAdmissionInput();
+    const baseline = materializeTask5WithBudget(sourceInput, phaseDTask5Budget()).result;
+    expect(baseline.compressionStatus).toBe("COMPLETE");
+    if (baseline.memberEnvelopes === null || baseline.memberEnvelopes.length < 2) {
+      throw new Error("Expected at least two verified routes");
+    }
+    const ordered = [...baseline.memberEnvelopes].sort(compareTask6StageAEnvelope);
+    const first = ordered[0]!;
+    const budget = phaseDTask5Budget({
+      maxMemberEnvelopeCount: 1,
+      maxResourceRoleSlotCount: first.resourceInterface.canonicalRoleSlots.length,
+    });
+    const { result } = materializeTask5WithBudget(sourceInput, budget);
+
+    expect(result.compressionStatus).toBe("INCONCLUSIVE");
+    expect(result.exhaustedDimensions).toEqual([
+      "MEMBER_ENVELOPE_COUNT",
+      "RESOURCE_ROLE_SLOT_COUNT",
+    ]);
+    expect(result.reasonCodes).toEqual([
+      "MEMBER_ENVELOPE_COUNT_EXHAUSTED",
+      "RESOURCE_ROLE_SLOT_COUNT_EXHAUSTED",
+    ]);
+    expect(result.budgetExecution.measurements).toEqual([
+      {
+        dimension: "MEMBER_ENVELOPE_COUNT",
+        limit: 1,
+        observedCount: 2,
+        measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+      },
+      {
+        dimension: "RESOURCE_ROLE_SLOT_COUNT",
+        limit: first.resourceInterface.canonicalRoleSlots.length,
+        observedCount: first.resourceInterface.canonicalRoleSlots.length + 1,
+        measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+      },
+    ]);
+    expect(result.cohorts).toBeNull();
+    expect(result.cohortInterfaces).toBeNull();
+    expect(result.routeToCohortMappings).toBeNull();
+    expect(result.memberEnvelopes).toBeNull();
+    expect(result.equivalenceProofs).toBeNull();
+    expect(result.coverageManifest).toBeNull();
+    expect(result.cohortCount).toBe(0);
+    expect(result.cohortUniverseHash).toBeNull();
+
+    const reversed = materializeTask5WithBudget(
+      makeReversedComponentSourceInput(sourceInput),
+      budget,
+    ).result;
+    expect(reversed.compressionStatus).toBe("INCONCLUSIVE");
+    expect(reversed.budgetExecution).toEqual(result.budgetExecution);
+    expect(reversed.exhaustedDimensions).toEqual(result.exhaustedDimensions);
+    expect(reversed.reasonCodes).toEqual(result.reasonCodes);
+  });
+
+  it("Task6.2 uses distinct canonical four-part cohort keys", () => {
+    const { result } = materializeTask5WithBudget(makeSameRankDifferentCopyPhaseDAdmissionInput(), phaseDTask5Budget());
+    expect(result.compressionStatus).toBe("COMPLETE");
+    expect(result.memberEnvelopes).toHaveLength(2);
+    expect(result.cohortCount).toBe(1);
+    expect(result.budgetExecution.measurements).toContainEqual({
+      dimension: "MEMBER_ENVELOPE_COUNT",
+      limit: phaseDTask5Budget().maxMemberEnvelopeCount,
+      observedCount: 2,
+      measurementCompleteness: "EXACT",
+    });
+    expect(result.budgetExecution.measurements).toContainEqual({
+      dimension: "COHORT_COUNT",
+      limit: HARD_MAX_COHORT_COUNT_V1,
+      observedCount: 1,
+      measurementCompleteness: "EXACT",
+    });
+  });
+
+  it("Task6.2 preserves the 49 and 50 cohort hard-gate observations", () => {
+    const completeKeys = Array.from({ length: 49 }, (_, ordinal) => canonicalHash({
+      kind: "task6-stage-a-cohort-fixture",
+      ordinal,
+    }));
+    const exhaustedKeys = [...completeKeys, canonicalHash({
+      kind: "task6-stage-a-cohort-fixture",
+      ordinal: 49,
+    })];
+    expect(__task5PostDerivationHardGateV1(completeKeys).gate).toMatchObject({
+      gateStatus: "COMPLETE",
+      distinctCohortCount: 49,
+      observedDistinctCohortLowerBound: 49,
+      exhausted: false,
+    });
+    expect(__task5PostDerivationHardGateV1(exhaustedKeys).gate).toMatchObject({
+      gateStatus: "INCONCLUSIVE",
+      observedDistinctCohortLowerBound: 50,
+      exhausted: true,
+    });
+
+    const completeAccumulator = task6AccumulatorForTest(task6TestBudget());
+    for (const key of completeKeys) {
+      completeAccumulator.applyVerifiedEvent({ COHORT_COUNT: 1 }, {
+        ...task6TestEvent(),
+        routeHash: key,
+      });
+    }
+    completeAccumulator.finalizeExactDimension("COHORT_COUNT");
+    expect(completeAccumulator.terminalSnapshot().budgetExecution.measurements).toContainEqual({
+      dimension: "COHORT_COUNT",
+      limit: HARD_MAX_COHORT_COUNT_V1,
+      observedCount: 49,
+      measurementCompleteness: "EXACT",
+    });
+
+    const exhaustedAccumulator = task6AccumulatorForTest(task6TestBudget());
+    for (const key of completeKeys) {
+      exhaustedAccumulator.applyVerifiedEvent({ COHORT_COUNT: 1 }, {
+        ...task6TestEvent(),
+        routeHash: key,
+      });
+    }
+    const terminal = exhaustedAccumulator.applyVerifiedEvent({ COHORT_COUNT: 1 }, {
+      ...task6TestEvent(),
+      routeHash: exhaustedKeys[exhaustedKeys.length - 1]!,
+    });
+    expect(terminal.snapshot?.budgetExecution.measurements).toContainEqual({
+      dimension: "COHORT_COUNT",
+      limit: HARD_MAX_COHORT_COUNT_V1,
+      observedCount: 50,
+      measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+    });
+
+    const materialized = materializeTask5WithBudget(makeValidPhaseDAdmissionInput(), phaseDTask5Budget()).result;
+    const materializedCohortMeasurement = materialized.budgetExecution.measurements
+      .find(({ dimension }) => dimension === "COHORT_COUNT");
+    const materializedGate = __task5PostDerivationHardGateV1(
+      (materialized.cohortInterfaces ?? []).map((cohortInterface) => cohortInterface.cohortInterfaceHash),
+    ).gate;
+    expect(materializedGate.distinctCohortCount).toBe(materialized.cohortCount);
+    expect(materializedCohortMeasurement).toMatchObject({
+      observedCount: materialized.cohortCount,
+      measurementCompleteness: "EXACT",
+    });
+  });
+
+  it("Task6.2 does not count an unverified member envelope", () => {
+    const admission = admittedOf(makeValidPhaseDAdmissionInput());
+    const normalized = normalizedOf(admission);
+    const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+    if (task4.task4Status !== "COMPLETE" || task4.routeRelevantConflictClosures === null) {
+      throw new Error("Expected complete Task 4 evidence");
+    }
+    const originalClosure = task4.routeRelevantConflictClosures[0]!;
+    const { closureHash: _closureHash, ...originalClosurePayload } = originalClosure;
+    const closurePayload = {
+      ...originalClosurePayload,
+      conflictFactIds: [...originalClosure.conflictFactIds, "missing-conflict-reference"].sort(),
+    };
+    const forgedClosure = {
+      ...closurePayload,
+      closureHash: canonicalHash(closurePayload),
+    };
+    const forgedTask4Payload = {
+      ...task4,
+      routeRelevantConflictClosures: [forgedClosure, ...task4.routeRelevantConflictClosures.slice(1)],
+    };
+    const { artifactHash: _artifactHash, ...forgedTask4WithoutHash } = forgedTask4Payload;
+    const forgedTask4 = {
+      ...forgedTask4WithoutHash,
+      artifactHash: canonicalHash({
+        ...forgedTask4WithoutHash,
+        routeRelevantConflictClosures: [...forgedTask4WithoutHash.routeRelevantConflictClosures]
+          .sort((left, right) => compareTask6Text(canonicalSerialize(left), canonicalSerialize(right))),
+      }),
+    };
+    const result = materializePhaseDTask5V1({
+      admission,
+      normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+      task4: forgedTask4,
+      evidenceBudget: phaseDTask5Budget({ maxMemberEnvelopeCount: 1 }),
+    });
+
+    expect(result.compressionStatus).toBe("INCONCLUSIVE");
+    expect(result.reasonCodes).toContain("INCOMPLETE_CONFLICT_CLOSURE");
+    expect(result.budgetExecution.measurements).toEqual([]);
+    expect(result.memberEnvelopes).toBeNull();
+  });
+
+  it("Task6.2 rejects a cohort hash payload contradiction before Stage-A budget counting", () => {
+    if (task6StageAForTest === undefined) {
+      throw new Error("Task6.2 missing __task6StageAForTest seam");
+    }
+    const { input } = task5InputOf(makeSameRankDifferentCopyPhaseDAdmissionInput(), {
+      maxMemberEnvelopeCount: 1,
+    });
+    const result = task6StageAForTest(input, (index, cohortInterface) => index === 1
+      ? {
+        ...cohortInterface,
+        endpointInterface: {
+          ...cohortInterface.endpointInterface,
+          endpointArity: cohortInterface.endpointInterface.endpointArity + 1,
+        },
+      }
+      : cohortInterface);
+
+    expect(result.compressionStatus).toBe("REJECTED");
+    expect(result.reasonCodes).toContain("SIGNATURE_HASH_PAYLOAD_CONFLICT");
+    expect(result.reasonCodes.some((reason) => reason.endsWith("_EXHAUSTED"))).toBe(false);
+    expect(result.budgetExecution.measurements).toEqual([]);
+    expect(result.compressionRatioObservation.ratioDenominator).toBeNull();
+    expect(result.compressionRatioObservation.ratioInterpretation).toBe("UNAVAILABLE");
+  });
+
+  it("Task6.2 enforces the independent member-envelope boundary", () => {
+    const sourceInput = makeValidPhaseDAdmissionInput();
+    const baseline = materializeTask5WithBudget(sourceInput, phaseDTask5Budget()).result;
+    const totals = stageATotalsOf(baseline);
+    expect(totals.memberEnvelopeCount).toBeGreaterThan(1);
+
+    const exact = materializeTask5WithBudget(sourceInput, stageABudgetAboveTotals(totals, {
+      maxMemberEnvelopeCount: totals.memberEnvelopeCount,
+    })).result;
+    expect(exact.compressionStatus).toBe("COMPLETE");
+    expect(exact.exhaustedDimensions).toEqual([]);
+    expect(stageAMeasurementOf(exact, "MEMBER_ENVELOPE_COUNT")).toEqual({
+      dimension: "MEMBER_ENVELOPE_COUNT",
+      limit: totals.memberEnvelopeCount,
+      observedCount: totals.memberEnvelopeCount,
+      measurementCompleteness: "EXACT",
+    });
+
+    const exhausted = materializeTask5WithBudget(sourceInput, stageABudgetAboveTotals(totals, {
+      maxMemberEnvelopeCount: totals.memberEnvelopeCount - 1,
+    })).result;
+    expect(exhausted.compressionStatus).toBe("INCONCLUSIVE");
+    expect(exhausted.exhaustedDimensions).toEqual(["MEMBER_ENVELOPE_COUNT"]);
+    expect(exhausted.reasonCodes).toEqual(["MEMBER_ENVELOPE_COUNT_EXHAUSTED"]);
+    expect(stageAMeasurementOf(exhausted, "MEMBER_ENVELOPE_COUNT")).toEqual({
+      dimension: "MEMBER_ENVELOPE_COUNT",
+      limit: totals.memberEnvelopeCount - 1,
+      observedCount: totals.memberEnvelopeCount,
+      measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+    });
+    expectTask6StageATerminalPayload(exhausted);
+  });
+
+  it("Task6.2 enforces the independent resource-role-slot boundary", () => {
+    const sourceInput = makeValidPhaseDAdmissionInput();
+    const baseline = materializeTask5WithBudget(sourceInput, phaseDTask5Budget()).result;
+    const totals = stageATotalsOf(baseline);
+    expect(totals.resourceRoleSlotCount).toBeGreaterThan(1);
+
+    const exact = materializeTask5WithBudget(sourceInput, stageABudgetAboveTotals(totals, {
+      maxResourceRoleSlotCount: totals.resourceRoleSlotCount,
+    })).result;
+    expect(exact.compressionStatus).toBe("COMPLETE");
+    expect(exact.exhaustedDimensions).toEqual([]);
+    expect(stageAMeasurementOf(exact, "RESOURCE_ROLE_SLOT_COUNT")).toEqual({
+      dimension: "RESOURCE_ROLE_SLOT_COUNT",
+      limit: totals.resourceRoleSlotCount,
+      observedCount: totals.resourceRoleSlotCount,
+      measurementCompleteness: "EXACT",
+    });
+
+    const exhausted = materializeTask5WithBudget(sourceInput, stageABudgetAboveTotals(totals, {
+      maxResourceRoleSlotCount: totals.resourceRoleSlotCount - 1,
+    })).result;
+    expect(exhausted.compressionStatus).toBe("INCONCLUSIVE");
+    expect(exhausted.exhaustedDimensions).toEqual(["RESOURCE_ROLE_SLOT_COUNT"]);
+    expect(exhausted.reasonCodes).toEqual(["RESOURCE_ROLE_SLOT_COUNT_EXHAUSTED"]);
+    expect(stageAMeasurementOf(exhausted, "RESOURCE_ROLE_SLOT_COUNT")).toEqual({
+      dimension: "RESOURCE_ROLE_SLOT_COUNT",
+      limit: totals.resourceRoleSlotCount - 1,
+      observedCount: totals.resourceRoleSlotCount,
+      measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+    });
+    expectTask6StageATerminalPayload(exhausted);
+  });
+
+  it("Task6.2 enforces the independent conflict-closure-edge boundary", () => {
+    const sourceInput = makeValidPhaseDAdmissionInput();
+    const baseline = materializeTask5WithBudget(sourceInput, phaseDTask5Budget()).result;
+    const totals = stageATotalsOf(baseline);
+    expect(totals.conflictClosureEdgeCount).toBeGreaterThan(1);
+
+    const exact = materializeTask5WithBudget(sourceInput, stageABudgetAboveTotals(totals, {
+      maxConflictClosureEdgeCount: totals.conflictClosureEdgeCount,
+    })).result;
+    expect(exact.compressionStatus).toBe("COMPLETE");
+    expect(exact.exhaustedDimensions).toEqual([]);
+    expect(stageAMeasurementOf(exact, "CONFLICT_CLOSURE_EDGE_COUNT")).toEqual({
+      dimension: "CONFLICT_CLOSURE_EDGE_COUNT",
+      limit: totals.conflictClosureEdgeCount,
+      observedCount: totals.conflictClosureEdgeCount,
+      measurementCompleteness: "EXACT",
+    });
+
+    const exhausted = materializeTask5WithBudget(sourceInput, stageABudgetAboveTotals(totals, {
+      maxConflictClosureEdgeCount: totals.conflictClosureEdgeCount - 1,
+    })).result;
+    expect(exhausted.compressionStatus).toBe("INCONCLUSIVE");
+    expect(exhausted.exhaustedDimensions).toEqual(["CONFLICT_CLOSURE_EDGE_COUNT"]);
+    expect(exhausted.reasonCodes).toEqual(["CONFLICT_CLOSURE_EDGE_COUNT_EXHAUSTED"]);
+    expect(stageAMeasurementOf(exhausted, "CONFLICT_CLOSURE_EDGE_COUNT")).toEqual({
+      dimension: "CONFLICT_CLOSURE_EDGE_COUNT",
+      limit: totals.conflictClosureEdgeCount - 1,
+      observedCount: totals.conflictClosureEdgeCount,
+      measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+    });
+    expectTask6StageATerminalPayload(exhausted);
+  });
+
+  it("Task6.2 preserves Stage-A measurements under draft and closure permutation", () => {
+    const sourceInput = makeValidPhaseDAdmissionInput();
+    const prepared = task5InputOf(sourceInput);
+    const baseline = prepared.result;
+    const totals = stageATotalsOf(baseline);
+    const budget = stageABudgetAboveTotals(totals, {
+      maxMemberEnvelopeCount: totals.memberEnvelopeCount - 1,
+    });
+    const canonical = materializePhaseDTask5V1({ ...prepared.input, evidenceBudget: budget });
+    const permutedTask4 = task4WithReversedClosures(prepared.input.task4);
+    const permuted = materializePhaseDTask5V1({
+      ...prepared.input,
+      normalizedMemberDrafts: [...prepared.input.normalizedMemberDrafts].reverse(),
+      task4: permutedTask4,
+      evidenceBudget: budget,
+    });
+
+    expect(permuted.compressionStatus).toBe(canonical.compressionStatus);
+    expect(permuted.budgetExecution).toEqual(canonical.budgetExecution);
+    expect(permuted.exhaustedDimensions).toEqual(canonical.exhaustedDimensions);
+    expect(permuted.reasonCodes).toEqual(canonical.reasonCodes);
+    expect(permuted.budgetExecution.exhaustionProvenance?.provenanceHash)
+      .toBe(canonical.budgetExecution.exhaustionProvenance?.provenanceHash);
+    expect(permuted.budgetExecution.executionHash).toBe(canonical.budgetExecution.executionHash);
+  });
+
+  it("Task6.2 integrates the Stage-A 49 and 50 verified cohort boundaries", () => {
+    if (task6CohortAdmissionForTest === undefined) {
+      throw new Error("Task6.2 missing __task6CohortAdmissionForTest seam");
+    }
+    const baseline = materializeTask5WithBudget(makeValidPhaseDAdmissionInput(), phaseDTask5Budget()).result;
+    if (baseline.compressionStatus !== "COMPLETE" || baseline.cohortInterfaces === null) {
+      throw new Error("Expected a real verified cohort interface");
+    }
+    const baseInterface = baseline.cohortInterfaces[0];
+    if (baseInterface === undefined) throw new Error("Expected a real cohort interface");
+    const interfaces = Array.from({ length: 50 }, (_, ordinal) =>
+      task6CohortVariantOf(baseInterface, ordinal));
+
+    const complete = task6CohortAdmissionForTest(interfaces.slice(0, 49));
+    expect(complete.status).toBe("COMPLETE");
+    expect(complete.exhaustedDimensions).toEqual([]);
+    expect(complete.reasonCodes).toEqual([]);
+    expect(complete.budgetExecution.measurements).toContainEqual({
+      dimension: "COHORT_COUNT",
+      limit: HARD_MAX_COHORT_COUNT_V1,
+      observedCount: 49,
+      measurementCompleteness: "EXACT",
+    });
+
+    const terminal = task6CohortAdmissionForTest(interfaces);
+    expect(terminal.status).toBe("INCONCLUSIVE");
+    expect(terminal.exhaustedDimensions).toEqual(["COHORT_COUNT"]);
+    expect(terminal.reasonCodes).toEqual(["COHORT_COUNT_EXHAUSTED"]);
+    expect(terminal.budgetExecution.measurements).toContainEqual({
+      dimension: "COHORT_COUNT",
+      limit: HARD_MAX_COHORT_COUNT_V1,
+      observedCount: 50,
+      measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+    });
   });
 });
 
@@ -2088,7 +2541,9 @@ function compareIdentityTuple(
   return 0;
 }
 
-function phaseDTask5Budget(): StrategicCohortCompressionEvidenceBudgetV1 {
+function phaseDTask5Budget(
+  overrides: Partial<StrategicCohortCompressionEvidenceBudgetV1> = {},
+): StrategicCohortCompressionEvidenceBudgetV1 {
   return {
     maxMemberEnvelopeCount: 100,
     maxResourceRoleSlotCount: 1000,
@@ -2096,7 +2551,146 @@ function phaseDTask5Budget(): StrategicCohortCompressionEvidenceBudgetV1 {
     maxRouteMappingCount: 100,
     maxEquivalenceProofCount: 100,
     maxLineageOccurrenceWitnessCount: 5000,
+    ...overrides,
   };
+}
+
+function task5InputOf(
+  input: Parameters<typeof compressHierarchicalStrategicCohortsV1>[0],
+  budgetOverrides: Partial<StrategicCohortCompressionEvidenceBudgetV1> = {},
+): { input: PhaseDTask5InputV1; result: ReturnType<typeof materializePhaseDTask5V1> } {
+  const admission = admittedOf(input);
+  const normalized = normalizedOf(admission);
+  const task4 = materializePhaseDTask4V1({ admission, normalizedMemberDrafts: normalized.normalizedMemberDrafts });
+  const task5Input: PhaseDTask5InputV1 = {
+    admission,
+    normalizedMemberDrafts: normalized.normalizedMemberDrafts,
+    task4,
+    evidenceBudget: phaseDTask5Budget(budgetOverrides),
+  };
+  return { input: task5Input, result: materializePhaseDTask5V1(task5Input) };
+}
+
+function materializeTask5WithBudget(
+  input: Parameters<typeof compressHierarchicalStrategicCohortsV1>[0],
+  budget: StrategicCohortCompressionEvidenceBudgetV1,
+): { input: PhaseDTask5InputV1; result: ReturnType<typeof materializePhaseDTask5V1> } {
+  return task5InputOf(input, budget);
+}
+
+type Task6StageATotalsV1 = {
+  memberEnvelopeCount: number;
+  resourceRoleSlotCount: number;
+  conflictClosureEdgeCount: number;
+  cohortCount: number;
+};
+
+function stageATotalsOf(
+  result: ReturnType<typeof materializePhaseDTask5V1>,
+): Task6StageATotalsV1 {
+  if (result.compressionStatus !== "COMPLETE" || result.memberEnvelopes === null) {
+    throw new Error("Expected complete Stage-A baseline");
+  }
+  return {
+    memberEnvelopeCount: result.memberEnvelopes.length,
+    resourceRoleSlotCount: result.memberEnvelopes.reduce((total, envelope) =>
+      total + envelope.resourceInterface.canonicalRoleSlots.length, 0),
+    conflictClosureEdgeCount: result.memberEnvelopes.reduce((total, envelope) =>
+      total + envelope.routeRelevantConflictClosure.traversedReferenceEdges.length, 0),
+    cohortCount: result.cohortCount,
+  };
+}
+
+function stageABudgetAboveTotals(
+  totals: Task6StageATotalsV1,
+  overrides: Partial<StrategicCohortCompressionEvidenceBudgetV1> = {},
+): StrategicCohortCompressionEvidenceBudgetV1 {
+  return phaseDTask5Budget({
+    maxMemberEnvelopeCount: totals.memberEnvelopeCount + 1,
+    maxResourceRoleSlotCount: totals.resourceRoleSlotCount + 1,
+    maxConflictClosureEdgeCount: totals.conflictClosureEdgeCount + 1,
+    maxRouteMappingCount: totals.memberEnvelopeCount + 1,
+    maxEquivalenceProofCount: totals.memberEnvelopeCount + 1,
+    maxLineageOccurrenceWitnessCount: 5000,
+    ...overrides,
+  });
+}
+
+function stageAMeasurementOf(
+  result: ReturnType<typeof materializePhaseDTask5V1>,
+  dimension: string,
+): Task6TestMeasurementV1 {
+  const measurement = result.budgetExecution.measurements.find((value) => value.dimension === dimension);
+  if (measurement === undefined) throw new Error(`Missing Stage-A measurement ${dimension}`);
+  return measurement;
+}
+
+function expectTask6StageATerminalPayload(
+  result: ReturnType<typeof materializePhaseDTask5V1>,
+): void {
+  expect(result.cohorts).toBeNull();
+  expect(result.cohortInterfaces).toBeNull();
+  expect(result.routeToCohortMappings).toBeNull();
+  expect(result.memberEnvelopes).toBeNull();
+  expect(result.equivalenceProofs).toBeNull();
+  expect(result.coverageManifest).toBeNull();
+  expect(result.cohortCount).toBe(0);
+  expect(result.cohortUniverseHash).toBeNull();
+}
+
+function task4WithReversedClosures(task4: PhaseDTask4ArtifactV1): PhaseDTask4ArtifactV1 {
+  if (task4.routeRelevantConflictClosures === null) {
+    throw new Error("Expected Task 4 closures");
+  }
+  const { artifactHash: _artifactHash, ...payload } = task4;
+  const reversedPayload = {
+    ...payload,
+    routeRelevantConflictClosures: [...task4.routeRelevantConflictClosures].reverse(),
+  };
+  const canonicalPayload = {
+    ...reversedPayload,
+    routeRelevantConflictClosures: [...reversedPayload.routeRelevantConflictClosures]
+      .sort((left, right) => compareTask6Text(canonicalSerialize(left), canonicalSerialize(right))),
+  };
+  return { ...reversedPayload, artifactHash: canonicalHash(canonicalPayload) };
+}
+
+function task6CohortVariantOf(
+  base: StrategicCohortInterfaceV1,
+  ordinal: number,
+): StrategicCohortInterfaceV1 {
+  const { endpointSignatureHash: _endpointSignatureHash, ...endpointPayload } = base.endpointInterface;
+  const changedEndpointPayload = {
+    ...endpointPayload,
+    endpointArity: endpointPayload.endpointArity + ordinal + 1,
+  };
+  const endpointInterface = {
+    ...changedEndpointPayload,
+    endpointSignatureHash: canonicalHash(changedEndpointPayload),
+  };
+  const payload = {
+    ...base,
+    endpointInterface,
+    fourSignatureHashes: {
+      ...base.fourSignatureHashes,
+      endpointSignatureHash: endpointInterface.endpointSignatureHash,
+    },
+  };
+  const { cohortInterfaceHash: _cohortInterfaceHash, ...withoutHash } = payload;
+  return { ...withoutHash, cohortInterfaceHash: canonicalHash(withoutHash) };
+}
+
+function compareTask6StageAEnvelope(
+  left: RouteCohortMemberEnvelopeV1,
+  right: RouteCohortMemberEnvelopeV1,
+): number {
+  return compareTask6Text(left.sourceRouteUniverseHash, right.sourceRouteUniverseHash)
+    || compareTask6Text(left.routeId, right.routeId)
+    || compareTask6Text(left.routeHash, right.routeHash);
+}
+
+function compareTask6Text(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function publicationEvidenceOf() {
