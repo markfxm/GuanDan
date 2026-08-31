@@ -21,6 +21,8 @@ import {
   normalizeAdmittedStrategicRoutesV1,
 } from
   "../../../src/ai/d2h/strategicCohortCompressionV1";
+import * as strategicCohortCompressionV1 from
+  "../../../src/ai/d2h/strategicCohortCompressionV1";
 import {
   makeCommonBindingMismatchFixture,
   makeBrokenClosureReferenceFixture,
@@ -53,6 +55,341 @@ const STANDALONE_INCONCLUSIVE_REASON_CODES = [
   "DETERMINISTIC_REPLAY_UNPROVEN",
   "INCOMPLETE_EQUIVALENCE_PROOF",
 ] as const satisfies readonly StrategicCohortCompressionReasonCodeV1[];
+
+type Task6TestMeasurementV1 = {
+  dimension: string;
+  limit: number;
+  observedCount: number;
+  measurementCompleteness: string;
+};
+
+type Task6TestSnapshotV1 = {
+  budgetExecution: {
+    measurements: readonly Task6TestMeasurementV1[];
+    exhaustionProvenance: {
+      exhaustedMeasurements: readonly Task6TestMeasurementV1[];
+      sourceHashBindings: readonly { sourceKind: string; sourceHash: string }[];
+      provenanceHash: string;
+    } | null;
+    executionHash: string;
+  };
+  exhaustedDimensions: readonly string[];
+  reasonCodes: readonly string[];
+  positiveCohortLowerBound: number | null;
+};
+
+type Task6TestAccumulatorV1 = {
+  applyVerifiedEvent(
+    incrementsByDimension: Readonly<Record<string, number>>,
+    event: Readonly<Record<string, string | null>>,
+  ): { terminal: boolean; snapshot: Task6TestSnapshotV1 | null };
+  finalizeExactDimension(dimension: string): void;
+  terminalSnapshot(): Task6TestSnapshotV1;
+  completeSnapshot(): Task6TestSnapshotV1;
+};
+
+const task6AccumulatorForTest = (strategicCohortCompressionV1 as unknown as {
+  __task6MeasurementAccumulatorForTest: (
+    evidenceBudget: StrategicCohortCompressionEvidenceBudgetV1,
+    sourceHashBindings?: readonly { sourceKind: string; sourceHash: string }[],
+  ) => Task6TestAccumulatorV1;
+}).__task6MeasurementAccumulatorForTest;
+
+const task6TestBudget = (
+  overrides: Partial<StrategicCohortCompressionEvidenceBudgetV1> = {},
+): StrategicCohortCompressionEvidenceBudgetV1 => ({
+  maxMemberEnvelopeCount: 10,
+  maxResourceRoleSlotCount: 10,
+  maxConflictClosureEdgeCount: 10,
+  maxRouteMappingCount: 10,
+  maxEquivalenceProofCount: 10,
+  maxLineageOccurrenceWitnessCount: 10,
+  ...overrides,
+});
+
+const task6TestEvent = (): Readonly<Record<string, string>> => ({
+  stage: "STAGE_A_ROUTE",
+  sourceRouteUniverseHash: "route-universe-hash",
+  routeId: "route-id",
+  routeHash: "route-hash",
+});
+
+const task6TestSourceBindings = [
+  {
+    sourceKind: "PHASE_D_SOURCE_BINDING_MANIFEST",
+    sourceHash: "manifest-hash",
+  },
+  {
+    sourceKind: "ROUTE_UNIVERSE",
+    sourceHash: "route-universe-hash",
+  },
+] as const;
+
+const TASK6_TEST_DIMENSION_ORDER = [
+  "MEMBER_ENVELOPE_COUNT",
+  "RESOURCE_ROLE_SLOT_COUNT",
+  "CONFLICT_CLOSURE_EDGE_COUNT",
+  "COHORT_COUNT",
+  "ROUTE_MAPPING_COUNT",
+  "EQUIVALENCE_PROOF_COUNT",
+  "LINEAGE_OCCURRENCE_WITNESS_COUNT",
+] as const;
+
+describe("Task6.1 measurement accumulator", () => {
+  it("Task6.1 keeps the fixed seven-dimension order and immutable cohort limit", () => {
+    const accumulator = task6AccumulatorForTest(task6TestBudget());
+
+    accumulator.applyVerifiedEvent({
+      MEMBER_ENVELOPE_COUNT: 1,
+      RESOURCE_ROLE_SLOT_COUNT: 1,
+      CONFLICT_CLOSURE_EDGE_COUNT: 1,
+      COHORT_COUNT: HARD_MAX_COHORT_COUNT_V1,
+      ROUTE_MAPPING_COUNT: 1,
+      EQUIVALENCE_PROOF_COUNT: 1,
+      LINEAGE_OCCURRENCE_WITNESS_COUNT: 1,
+    }, task6TestEvent());
+    for (const dimension of TASK6_TEST_DIMENSION_ORDER) {
+      accumulator.finalizeExactDimension(dimension);
+    }
+
+    const snapshot = accumulator.completeSnapshot();
+    expect(snapshot.budgetExecution.measurements.map(({ dimension }) => dimension))
+      .toEqual(TASK6_TEST_DIMENSION_ORDER);
+    expect(snapshot.budgetExecution.measurements.find(({ dimension }) => dimension === "COHORT_COUNT"))
+      .toMatchObject({ limit: HARD_MAX_COHORT_COUNT_V1, observedCount: 49 });
+  });
+
+  it("Task6.1 reports exact-at-limit without exhaustion", () => {
+    const accumulator = task6AccumulatorForTest(task6TestBudget());
+
+    accumulator.applyVerifiedEvent(
+      { RESOURCE_ROLE_SLOT_COUNT: 10 },
+      task6TestEvent(),
+    );
+    accumulator.finalizeExactDimension("RESOURCE_ROLE_SLOT_COUNT");
+
+    const snapshot = accumulator.terminalSnapshot();
+    expect(snapshot.budgetExecution.measurements).toEqual([
+      {
+        dimension: "RESOURCE_ROLE_SLOT_COUNT",
+        limit: 10,
+        observedCount: 10,
+        measurementCompleteness: "EXACT",
+      },
+    ]);
+    expect(snapshot.exhaustedDimensions).toEqual([]);
+    expect(snapshot.budgetExecution.exhaustionProvenance).toBeNull();
+  });
+
+  it("Task6.1 rejects an increment after exact finalization", () => {
+    const accumulator = task6AccumulatorForTest(task6TestBudget());
+
+    accumulator.applyVerifiedEvent(
+      { RESOURCE_ROLE_SLOT_COUNT: 5 },
+      task6TestEvent(),
+    );
+    accumulator.finalizeExactDimension("RESOURCE_ROLE_SLOT_COUNT");
+    const beforeRejectedIncrement = accumulator.terminalSnapshot();
+
+    expect(() => accumulator.applyVerifiedEvent(
+      { RESOURCE_ROLE_SLOT_COUNT: 1 },
+      task6TestEvent(),
+    )).toThrow("Task6 finalized measurement cannot receive another increment");
+    expect(accumulator.terminalSnapshot()).toEqual(beforeRejectedIncrement);
+    expect(accumulator.terminalSnapshot().budgetExecution.measurements).toEqual([
+      {
+        dimension: "RESOURCE_ROLE_SLOT_COUNT",
+        limit: 10,
+        observedCount: 5,
+        measurementCompleteness: "EXACT",
+      },
+    ]);
+  });
+
+  it("Task6.1 does not turn a finalized exact limit into exhaustion", () => {
+    const accumulator = task6AccumulatorForTest(task6TestBudget());
+
+    accumulator.applyVerifiedEvent(
+      { RESOURCE_ROLE_SLOT_COUNT: 10 },
+      task6TestEvent(),
+    );
+    accumulator.finalizeExactDimension("RESOURCE_ROLE_SLOT_COUNT");
+
+    expect(() => accumulator.applyVerifiedEvent(
+      { RESOURCE_ROLE_SLOT_COUNT: 1 },
+      task6TestEvent(),
+    )).toThrow("Task6 finalized measurement cannot receive another increment");
+    expect(accumulator.terminalSnapshot().budgetExecution.measurements).toEqual([
+      {
+        dimension: "RESOURCE_ROLE_SLOT_COUNT",
+        limit: 10,
+        observedCount: 10,
+        measurementCompleteness: "EXACT",
+      },
+    ]);
+    expect(accumulator.terminalSnapshot().exhaustedDimensions).toEqual([]);
+  });
+
+  it("Task6.1 requires all seven exact finalizations for a complete snapshot", () => {
+    const accumulator = task6AccumulatorForTest(task6TestBudget());
+
+    for (const dimension of TASK6_TEST_DIMENSION_ORDER.slice(0, -1)) {
+      accumulator.finalizeExactDimension(dimension);
+    }
+
+    expect(() => accumulator.completeSnapshot())
+      .toThrow("Task6 complete snapshot requires seven exact measurements");
+  });
+
+  it("Task6.1 rejects exact finalization after exhaustion", () => {
+    const accumulator = task6AccumulatorForTest(task6TestBudget({
+      maxMemberEnvelopeCount: 1,
+    }));
+
+    accumulator.applyVerifiedEvent(
+      { MEMBER_ENVELOPE_COUNT: 2 },
+      task6TestEvent(),
+    );
+
+    expect(() => accumulator.finalizeExactDimension("RESOURCE_ROLE_SLOT_COUNT"))
+      .toThrow("Task6 measurements cannot be finalized after exhaustion");
+  });
+
+  it("Task6.1 saturates one multi-unit event at limit plus one", () => {
+    const accumulator = task6AccumulatorForTest(task6TestBudget());
+
+    accumulator.applyVerifiedEvent(
+      { RESOURCE_ROLE_SLOT_COUNT: 8 },
+      task6TestEvent(),
+    );
+    const result = accumulator.applyVerifiedEvent(
+      { RESOURCE_ROLE_SLOT_COUNT: 5 },
+      task6TestEvent(),
+    );
+
+    expect(result.terminal).toBe(true);
+    expect(result.snapshot?.budgetExecution.measurements).toEqual([
+      {
+        dimension: "RESOURCE_ROLE_SLOT_COUNT",
+        limit: 10,
+        observedCount: 11,
+        measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+      },
+    ]);
+    expect(result.snapshot?.budgetExecution.measurements[0]?.observedCount)
+      .not.toBe(13);
+    expect(accumulator.applyVerifiedEvent(
+      { RESOURCE_ROLE_SLOT_COUNT: 100 },
+      task6TestEvent(),
+    )).toEqual({ terminal: true, snapshot: result.snapshot });
+  });
+
+  it("Task6.1 records every dimension crossed by one atomic event", () => {
+    const accumulator = task6AccumulatorForTest(task6TestBudget({
+      maxMemberEnvelopeCount: 1,
+      maxResourceRoleSlotCount: 3,
+    }));
+
+    const result = accumulator.applyVerifiedEvent({
+      RESOURCE_ROLE_SLOT_COUNT: 5,
+      MEMBER_ENVELOPE_COUNT: 2,
+    }, task6TestEvent());
+
+    expect(result.terminal).toBe(true);
+    expect(result.snapshot?.exhaustedDimensions).toEqual([
+      "MEMBER_ENVELOPE_COUNT",
+      "RESOURCE_ROLE_SLOT_COUNT",
+    ]);
+    expect(result.snapshot?.reasonCodes).toEqual([
+      "MEMBER_ENVELOPE_COUNT_EXHAUSTED",
+      "RESOURCE_ROLE_SLOT_COUNT_EXHAUSTED",
+    ]);
+    expect(result.snapshot?.budgetExecution.measurements).toEqual([
+      {
+        dimension: "MEMBER_ENVELOPE_COUNT",
+        limit: 1,
+        observedCount: 2,
+        measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+      },
+      {
+        dimension: "RESOURCE_ROLE_SLOT_COUNT",
+        limit: 3,
+        observedCount: 4,
+        measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+      },
+    ]);
+  });
+
+  it("Task6.1 publishes no exhaustion provenance on a complete snapshot", () => {
+    const accumulator = task6AccumulatorForTest(
+      task6TestBudget(),
+      task6TestSourceBindings,
+    );
+
+    accumulator.applyVerifiedEvent({
+      MEMBER_ENVELOPE_COUNT: 1,
+      RESOURCE_ROLE_SLOT_COUNT: 1,
+      CONFLICT_CLOSURE_EDGE_COUNT: 1,
+      COHORT_COUNT: 1,
+      ROUTE_MAPPING_COUNT: 1,
+      EQUIVALENCE_PROOF_COUNT: 1,
+      LINEAGE_OCCURRENCE_WITNESS_COUNT: 1,
+    }, task6TestEvent());
+    for (const dimension of TASK6_TEST_DIMENSION_ORDER) {
+      accumulator.finalizeExactDimension(dimension);
+    }
+
+    const snapshot = accumulator.completeSnapshot();
+    expect(snapshot.budgetExecution.measurements).toHaveLength(7);
+    expect(snapshot.budgetExecution.measurements.every(
+      ({ measurementCompleteness }) => measurementCompleteness === "EXACT",
+    )).toBe(true);
+    expect(snapshot.exhaustedDimensions).toEqual([]);
+    expect(snapshot.reasonCodes).toEqual([]);
+    expect(snapshot.budgetExecution.exhaustionProvenance).toBeNull();
+    expect(snapshot.budgetExecution.executionHash).toBe(canonicalHash({
+      measurements: snapshot.budgetExecution.measurements,
+      exhaustionProvenance: null,
+    }));
+  });
+
+  it("Task6.1 is deterministic for increment-object and source-binding order", () => {
+    const first = task6AccumulatorForTest(
+      task6TestBudget({
+        maxMemberEnvelopeCount: 1,
+        maxResourceRoleSlotCount: 1,
+      }),
+      task6TestSourceBindings,
+    );
+    const second = task6AccumulatorForTest(
+      task6TestBudget({
+        maxMemberEnvelopeCount: 1,
+        maxResourceRoleSlotCount: 1,
+      }),
+      [...task6TestSourceBindings].reverse(),
+    );
+
+    const firstResult = first.applyVerifiedEvent({
+      RESOURCE_ROLE_SLOT_COUNT: 2,
+      MEMBER_ENVELOPE_COUNT: 2,
+    }, task6TestEvent());
+    const secondResult = second.applyVerifiedEvent({
+      MEMBER_ENVELOPE_COUNT: 2,
+      RESOURCE_ROLE_SLOT_COUNT: 2,
+    }, task6TestEvent());
+
+    expect(firstResult.snapshot?.budgetExecution.measurements)
+      .toEqual(secondResult.snapshot?.budgetExecution.measurements);
+    expect(firstResult.snapshot?.exhaustedDimensions)
+      .toEqual(secondResult.snapshot?.exhaustedDimensions);
+    expect(firstResult.snapshot?.reasonCodes)
+      .toEqual(secondResult.snapshot?.reasonCodes);
+    expect(firstResult.snapshot?.budgetExecution.exhaustionProvenance?.provenanceHash)
+      .toBe(secondResult.snapshot?.budgetExecution.exhaustionProvenance?.provenanceHash);
+    expect(firstResult.snapshot?.budgetExecution.executionHash)
+      .toBe(secondResult.snapshot?.budgetExecution.executionHash);
+  });
+});
 
 describe("Strategic cohort compression V1 contracts", () => {
   it("freezes the cohort hard gate outside caller budget", () => {

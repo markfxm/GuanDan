@@ -1,5 +1,7 @@
 import { canonicalHash, canonicalSerialize } from "./strategicEvidenceCanonicalSerializer";
 import { materializeStrategicBudgetExecutionV1 } from "./strategicBudgetExecutionV1";
+import type { StrategicBudgetMeasurementCompletenessV1 } from
+  "./strategicBudgetExecutionV1Contracts";
 import { classifyStrategicHierarchyBatchV1 } from "./strategicHierarchyClassifierV1";
 import { materializeStrategicResourceReservationsV1 } from "./strategicResourceReservationV1";
 import { generateStrategicRouteCandidateFactsV1 } from "./strategicRouteCandidateFactsV1";
@@ -71,6 +73,11 @@ import {
   type StrategicCohortCoverageManifestV1,
   type StrategicCohortCoverageWitnessV1,
   type StrategicCohortSourceHashBindingV1,
+  type StrategicCohortBudgetDimensionV1,
+  type StrategicCohortCompressionEvidenceBudgetV1,
+  type StrategicCohortBudgetMeasurementV1,
+  type StrategicCohortBudgetExhaustionProvenanceV1,
+  type StrategicCohortBudgetExecutionArtifactV1,
   type CanonicalRolePositionBijectionWitnessV1,
   type StrategicConflictClosureEdgeV1,
   type StrategicConflictClosureReferenceV1,
@@ -86,6 +93,302 @@ import {
   type StrategicCohortCompressionReasonCodeV1,
   type StrategicCohortCompressionStatusV1,
 } from "./strategicCohortCompressionV1Contracts";
+
+const TASK6_DIMENSION_ORDER = [
+  "MEMBER_ENVELOPE_COUNT",
+  "RESOURCE_ROLE_SLOT_COUNT",
+  "CONFLICT_CLOSURE_EDGE_COUNT",
+  "COHORT_COUNT",
+  "ROUTE_MAPPING_COUNT",
+  "EQUIVALENCE_PROOF_COUNT",
+  "LINEAGE_OCCURRENCE_WITNESS_COUNT",
+] as const satisfies readonly StrategicCohortBudgetDimensionV1[];
+
+type Task6StageV1 =
+  | "STAGE_A_ROUTE"
+  | "STAGE_B_MAPPING"
+  | "STAGE_C_PROOF"
+  | "STAGE_D_COVERAGE";
+
+type Task6IncrementVectorV1 = Readonly<Partial<Record<
+  StrategicCohortBudgetDimensionV1,
+  number
+>>>;
+
+type Task6VerifiedEventV1 = Readonly<{
+  stage: Task6StageV1;
+  sourceRouteUniverseHash: string | null;
+  routeId: string | null;
+  routeHash: string | null;
+}>;
+
+type Task6AccumulatorSnapshotV1 = Readonly<{
+  budgetExecution: StrategicCohortBudgetExecutionArtifactV1;
+  exhaustedDimensions: readonly StrategicCohortBudgetDimensionV1[];
+  reasonCodes: readonly StrategicCohortCompressionReasonCodeV1[];
+  positiveCohortLowerBound: number | null;
+}>;
+
+type Task6ApplyResultV1 = Readonly<{
+  terminal: boolean;
+  snapshot: Task6AccumulatorSnapshotV1 | null;
+}>;
+
+type Task6MeasurementAccumulatorV1 = Readonly<{
+  applyVerifiedEvent(
+    incrementsByDimension: Task6IncrementVectorV1,
+    event: Task6VerifiedEventV1,
+  ): Task6ApplyResultV1;
+  finalizeExactDimension(dimension: StrategicCohortBudgetDimensionV1): void;
+  terminalSnapshot(): Task6AccumulatorSnapshotV1;
+  completeSnapshot(): Task6AccumulatorSnapshotV1;
+}>;
+
+const TASK6_REASON_CODE_BY_DIMENSION: Readonly<Record<
+  StrategicCohortBudgetDimensionV1,
+  StrategicCohortCompressionReasonCodeV1
+>> = {
+  MEMBER_ENVELOPE_COUNT: "MEMBER_ENVELOPE_COUNT_EXHAUSTED",
+  RESOURCE_ROLE_SLOT_COUNT: "RESOURCE_ROLE_SLOT_COUNT_EXHAUSTED",
+  CONFLICT_CLOSURE_EDGE_COUNT: "CONFLICT_CLOSURE_EDGE_COUNT_EXHAUSTED",
+  COHORT_COUNT: "COHORT_COUNT_EXHAUSTED",
+  ROUTE_MAPPING_COUNT: "ROUTE_MAPPING_COUNT_EXHAUSTED",
+  EQUIVALENCE_PROOF_COUNT: "EQUIVALENCE_PROOF_COUNT_EXHAUSTED",
+  LINEAGE_OCCURRENCE_WITNESS_COUNT: "LINEAGE_OCCURRENCE_WITNESS_COUNT_EXHAUSTED",
+};
+
+type Task6DimensionCountsV1 = Record<StrategicCohortBudgetDimensionV1, number>;
+
+function createTask6MeasurementAccumulatorV1(
+  evidenceBudget: StrategicCohortCompressionEvidenceBudgetV1,
+  sourceHashBindings: readonly StrategicCohortSourceHashBindingV1[] = [],
+): Task6MeasurementAccumulatorV1 {
+  const limits = task6LimitsOf(evidenceBudget);
+  const canonicalSourceHashBindings = canonicalTask6SourceHashBindingsOf(sourceHashBindings);
+  const provenCounts: Task6DimensionCountsV1 = task6ZeroCounts();
+  const exactDimensions = new Set<StrategicCohortBudgetDimensionV1>();
+  let terminalSnapshotValue: Task6AccumulatorSnapshotV1 | null = null;
+
+  const applyVerifiedEvent = (
+    incrementsByDimension: Task6IncrementVectorV1,
+    event: Task6VerifiedEventV1,
+  ): Task6ApplyResultV1 => {
+    if (terminalSnapshotValue !== null) {
+      return deepFreeze({ terminal: true, snapshot: terminalSnapshotValue });
+    }
+
+    void event;
+    validateTask6Increments(incrementsByDimension);
+    for (const dimension of TASK6_DIMENSION_ORDER) {
+      const increment = incrementsByDimension[dimension] ?? 0;
+      if (increment > 0 && exactDimensions.has(dimension)) {
+        throw new Error("Task6 finalized measurement cannot receive another increment");
+      }
+    }
+    const nextCounts = { ...provenCounts };
+    const crossedDimensions = new Set<StrategicCohortBudgetDimensionV1>();
+
+    for (const dimension of TASK6_DIMENSION_ORDER) {
+      const increment = incrementsByDimension[dimension] ?? 0;
+      const candidate = provenCounts[dimension] + increment;
+      if (candidate > limits[dimension]) {
+        crossedDimensions.add(dimension);
+        nextCounts[dimension] = limits[dimension] + 1;
+      } else {
+        nextCounts[dimension] = candidate;
+      }
+    }
+
+    for (const dimension of TASK6_DIMENSION_ORDER) {
+      provenCounts[dimension] = nextCounts[dimension];
+      if ((incrementsByDimension[dimension] ?? 0) > 0) {
+        exactDimensions.delete(dimension);
+      }
+    }
+
+    if (crossedDimensions.size === 0) {
+      return deepFreeze({ terminal: false, snapshot: null });
+    }
+
+    terminalSnapshotValue = task6SnapshotOf(
+      limits,
+      provenCounts,
+      exactDimensions,
+      crossedDimensions,
+      canonicalSourceHashBindings,
+    );
+    return deepFreeze({ terminal: true, snapshot: terminalSnapshotValue });
+  };
+
+  const finalizeExactDimension = (
+    dimension: StrategicCohortBudgetDimensionV1,
+  ): void => {
+    assertTask6Dimension(dimension);
+    if (terminalSnapshotValue !== null) {
+      throw new Error("Task6 measurements cannot be finalized after exhaustion");
+    }
+    if (provenCounts[dimension] > limits[dimension]) {
+      throw new Error("Task6 exhausted measurements cannot be finalized as exact");
+    }
+    exactDimensions.add(dimension);
+  };
+
+  const terminalSnapshot = (): Task6AccumulatorSnapshotV1 => terminalSnapshotValue
+    ?? task6SnapshotOf(
+      limits,
+      provenCounts,
+      exactDimensions,
+      new Set<StrategicCohortBudgetDimensionV1>(),
+      canonicalSourceHashBindings,
+    );
+
+  const completeSnapshot = (): Task6AccumulatorSnapshotV1 => {
+    if (terminalSnapshotValue !== null || exactDimensions.size !== TASK6_DIMENSION_ORDER.length) {
+      throw new Error("Task6 complete snapshot requires seven exact measurements");
+    }
+    return task6SnapshotOf(
+      limits,
+      provenCounts,
+      exactDimensions,
+      new Set<StrategicCohortBudgetDimensionV1>(),
+      canonicalSourceHashBindings,
+    );
+  };
+
+  return Object.freeze({
+    applyVerifiedEvent,
+    finalizeExactDimension,
+    terminalSnapshot,
+    completeSnapshot,
+  });
+}
+
+export function __task6MeasurementAccumulatorForTest(
+  evidenceBudget: StrategicCohortCompressionEvidenceBudgetV1,
+  sourceHashBindings: readonly StrategicCohortSourceHashBindingV1[] = [],
+): Task6MeasurementAccumulatorV1 {
+  return createTask6MeasurementAccumulatorV1(evidenceBudget, sourceHashBindings);
+}
+
+function task6LimitsOf(
+  evidenceBudget: StrategicCohortCompressionEvidenceBudgetV1,
+): Task6DimensionCountsV1 {
+  const limits: Task6DimensionCountsV1 = {
+    MEMBER_ENVELOPE_COUNT: evidenceBudget.maxMemberEnvelopeCount,
+    RESOURCE_ROLE_SLOT_COUNT: evidenceBudget.maxResourceRoleSlotCount,
+    CONFLICT_CLOSURE_EDGE_COUNT: evidenceBudget.maxConflictClosureEdgeCount,
+    COHORT_COUNT: HARD_MAX_COHORT_COUNT_V1,
+    ROUTE_MAPPING_COUNT: evidenceBudget.maxRouteMappingCount,
+    EQUIVALENCE_PROOF_COUNT: evidenceBudget.maxEquivalenceProofCount,
+    LINEAGE_OCCURRENCE_WITNESS_COUNT: evidenceBudget.maxLineageOccurrenceWitnessCount,
+  };
+  for (const dimension of TASK6_DIMENSION_ORDER) {
+    const limit = limits[dimension];
+    if (!Number.isFinite(limit) || !Number.isInteger(limit) || limit <= 0) {
+      throw new Error(`Invalid Task6 limit for ${dimension}`);
+    }
+  }
+  return limits;
+}
+
+function task6ZeroCounts(): Task6DimensionCountsV1 {
+  return {
+    MEMBER_ENVELOPE_COUNT: 0,
+    RESOURCE_ROLE_SLOT_COUNT: 0,
+    CONFLICT_CLOSURE_EDGE_COUNT: 0,
+    COHORT_COUNT: 0,
+    ROUTE_MAPPING_COUNT: 0,
+    EQUIVALENCE_PROOF_COUNT: 0,
+    LINEAGE_OCCURRENCE_WITNESS_COUNT: 0,
+  };
+}
+
+function validateTask6Increments(incrementsByDimension: Task6IncrementVectorV1): void {
+  for (const [dimension, increment] of Object.entries(incrementsByDimension)) {
+    assertTask6Dimension(dimension);
+    if (!Number.isFinite(increment) || !Number.isInteger(increment) || increment < 0) {
+      throw new Error(`Invalid Task6 increment for ${dimension}`);
+    }
+  }
+}
+
+function assertTask6Dimension(
+  dimension: string,
+): asserts dimension is StrategicCohortBudgetDimensionV1 {
+  if (!(TASK6_DIMENSION_ORDER as readonly string[]).includes(dimension)) {
+    throw new Error(`Unknown Task6 dimension: ${dimension}`);
+  }
+}
+
+function canonicalTask6SourceHashBindingsOf(
+  sourceHashBindings: readonly StrategicCohortSourceHashBindingV1[],
+): readonly StrategicCohortSourceHashBindingV1[] {
+  return deepFreeze(sourceHashBindings
+    .map(({ sourceKind, sourceHash }) => ({ sourceKind, sourceHash }))
+    .sort((left, right) => compareText(left.sourceKind, right.sourceKind)
+      || compareText(left.sourceHash, right.sourceHash)));
+}
+
+function task6SnapshotOf(
+  limits: Task6DimensionCountsV1,
+  provenCounts: Task6DimensionCountsV1,
+  exactDimensions: ReadonlySet<StrategicCohortBudgetDimensionV1>,
+  exhaustedDimensions: ReadonlySet<StrategicCohortBudgetDimensionV1>,
+  sourceHashBindings: readonly StrategicCohortSourceHashBindingV1[],
+): Task6AccumulatorSnapshotV1 {
+  const canonicalExhaustedDimensions = TASK6_DIMENSION_ORDER
+    .filter((dimension) => exhaustedDimensions.has(dimension));
+  const measurements = TASK6_DIMENSION_ORDER
+    .filter((dimension) => exactDimensions.has(dimension) || exhaustedDimensions.has(dimension))
+    .map((dimension) => task6MeasurementOf(
+      dimension,
+      limits[dimension],
+      provenCounts[dimension],
+      exhaustedDimensions.has(dimension) ? "LOWER_BOUND_AT_EXHAUSTION" : "EXACT",
+    ));
+  const exhaustedMeasurements = measurements
+    .filter(({ dimension }) => exhaustedDimensions.has(dimension));
+  const exhaustionProvenance = exhaustedMeasurements.length === 0
+    ? null
+    : task6ExhaustionProvenanceOf(exhaustedMeasurements, sourceHashBindings);
+  const budgetExecutionPayload = {
+    measurements,
+    exhaustionProvenance,
+  };
+  const budgetExecution = deepFreeze({
+    ...budgetExecutionPayload,
+    executionHash: canonicalHash(budgetExecutionPayload),
+  });
+  const cohortCount = provenCounts.COHORT_COUNT;
+
+  return deepFreeze({
+    budgetExecution,
+    exhaustedDimensions: canonicalExhaustedDimensions,
+    reasonCodes: canonicalExhaustedDimensions
+      .map((dimension) => TASK6_REASON_CODE_BY_DIMENSION[dimension]),
+    positiveCohortLowerBound: cohortCount > 0 ? cohortCount : null,
+  });
+}
+
+function task6MeasurementOf(
+  dimension: StrategicCohortBudgetDimensionV1,
+  limit: number,
+  observedCount: number,
+  measurementCompleteness: StrategicBudgetMeasurementCompletenessV1,
+): StrategicCohortBudgetMeasurementV1 {
+  return { dimension, limit, observedCount, measurementCompleteness };
+}
+
+function task6ExhaustionProvenanceOf(
+  exhaustedMeasurements: readonly StrategicCohortBudgetMeasurementV1[],
+  sourceHashBindings: readonly StrategicCohortSourceHashBindingV1[],
+): StrategicCohortBudgetExhaustionProvenanceV1 {
+  const payload = {
+    exhaustedMeasurements: [...exhaustedMeasurements],
+    sourceHashBindings: [...sourceHashBindings],
+  };
+  return deepFreeze({ ...payload, provenanceHash: canonicalHash(payload) });
+}
 
 type ValidationResultV1 =
   | "VALID"
