@@ -1407,6 +1407,279 @@ describe("Task6.4 budget execution and ratio publication", () => {
   });
 });
 
+describe("Task6.5 final verification and hardening", () => {
+  it("Task6.5 source corruption beats invalid or exhausted budget", () => {
+    const corrupted = makeManifestHashMismatchFixture();
+    const cases = [
+      ["invalid", makeCorruptedSourceWithInvalidPhaseDEvidenceBudgetFixture()],
+      ["stage-a", {
+        ...corrupted,
+        evidenceBudget: { ...corrupted.evidenceBudget, maxMemberEnvelopeCount: 1 },
+      }],
+      ["stage-b", {
+        ...corrupted,
+        evidenceBudget: { ...corrupted.evidenceBudget, maxRouteMappingCount: 1 },
+      }],
+      ["stage-c", {
+        ...corrupted,
+        evidenceBudget: { ...corrupted.evidenceBudget, maxEquivalenceProofCount: 1 },
+      }],
+      ["stage-d", {
+        ...corrupted,
+        evidenceBudget: { ...corrupted.evidenceBudget, maxLineageOccurrenceWitnessCount: 1 },
+      }],
+    ] as const;
+
+    for (const [label, input] of cases) {
+      const artifact = terminalArtifactOf(compressHierarchicalStrategicCohortsV1(input));
+      expect(artifact.compressionStatus, label).toBe("REJECTED");
+      expect(artifact.reasonCodes, label).toContain("SOURCE_HASH_PAYLOAD_MISMATCH");
+      expect(artifact.reasonCodes, label).not.toContain("INVALID_BUDGET");
+      expect(artifact.reasonCodes.some((reason) => reason.endsWith("_EXHAUSTED")), label).toBe(false);
+      expect(artifact.budgetExecution.measurements, label).toEqual([]);
+      expect(artifact.compressionRatioObservation.ratioDenominator, label).toBeNull();
+      expect(artifact.compressionRatioObservation.cohortCountCompleteness, label).toBeNull();
+      expect(artifact.compressionRatioObservation.ratioInterpretation, label).toBe("UNAVAILABLE");
+      expect(artifact.cohortCount, label).toBe(0);
+      expect(artifact.cohortUniverseHash, label).toBeNull();
+    }
+  });
+
+  it("Task6.5 route order reversal preserves budget execution and artifact hash", () => {
+    const source = makeValidPhaseDAdmissionInput();
+    const canonical = materializeTask5WithBudget(source, phaseDTask5Budget()).result;
+    const reversed = materializeTask5WithBudget(
+      makeReversedComponentSourceInput(source),
+      phaseDTask5Budget(),
+    ).result;
+
+    expect(reversed.compressionStatus).toBe(canonical.compressionStatus);
+    expect(reversed.budgetExecution).toEqual(canonical.budgetExecution);
+    expect(reversed.compressionRatioObservation).toEqual(canonical.compressionRatioObservation);
+    expect(reversed.exhaustedDimensions).toEqual(canonical.exhaustedDimensions);
+    expect(reversed.reasonCodes).toEqual(canonical.reasonCodes);
+    expect(reversed.cohortUniverseHash).toBe(canonical.cohortUniverseHash);
+    expect(reversed.artifactHash).toBe(canonical.artifactHash);
+    expect(task5SubstantivePayloadOf(reversed)).toEqual(task5SubstantivePayloadOf(canonical));
+  });
+
+  it("Task6.5 member and draft order reversal preserves all seven measurements", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const canonical = prepared.result;
+    const reversed = materializePhaseDTask5V1({
+      ...prepared.input,
+      normalizedMemberDrafts: [...prepared.input.normalizedMemberDrafts].reverse(),
+      task4: task4WithReversedClosures(prepared.input.task4),
+    });
+
+    expect(canonical.compressionStatus).toBe("COMPLETE");
+    expect(reversed.compressionStatus).toBe("COMPLETE");
+    expect(reversed.budgetExecution.measurements).toEqual(canonical.budgetExecution.measurements);
+    expect(reversed.budgetExecution.measurements).toHaveLength(7);
+    expect(reversed.budgetExecution.measurements.every((measurement) =>
+      measurement.measurementCompleteness === "EXACT")).toBe(true);
+    expect(reversed.budgetExecution.executionHash).toBe(canonical.budgetExecution.executionHash);
+    expect(reversed.compressionRatioObservation).toEqual(canonical.compressionRatioObservation);
+    expect(reversed.artifactHash).toBe(canonical.artifactHash);
+  });
+
+  it("Task6.5 cohort-key discovery permutation preserves cohort lower bound", () => {
+    if (task6CohortAdmissionForTest === undefined) {
+      throw new Error("Task6.5 missing __task6CohortAdmissionForTest seam");
+    }
+    const baseline = materializeTask5WithBudget(makeValidPhaseDAdmissionInput(), phaseDTask5Budget()).result;
+    if (baseline.compressionStatus !== "COMPLETE" || baseline.cohortInterfaces === null) {
+      throw new Error("Expected a real verified cohort interface");
+    }
+    const baseInterface = baseline.cohortInterfaces[0];
+    if (baseInterface === undefined) throw new Error("Expected a real cohort interface");
+    const interfaces = Array.from({ length: 50 }, (_, ordinal) =>
+      task6CohortVariantOf(baseInterface, ordinal));
+    const deterministicPermutation = [
+      ...interfaces.filter((_, index) => index % 2 === 1),
+      ...interfaces.filter((_, index) => index % 2 === 0),
+    ];
+    const results = [
+      task6CohortAdmissionForTest(interfaces),
+      task6CohortAdmissionForTest([...interfaces].reverse()),
+      task6CohortAdmissionForTest(deterministicPermutation),
+    ];
+    const canonical = results[0]!;
+
+    for (const result of results) {
+      expect(result.status).toBe("INCONCLUSIVE");
+      expect(result.budgetExecution.measurements).toContainEqual({
+        dimension: "COHORT_COUNT",
+        limit: HARD_MAX_COHORT_COUNT_V1,
+        observedCount: 50,
+        measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+      });
+      expect(result.positiveCohortLowerBound).toBe(50);
+      expect(result.exhaustedDimensions).toEqual(["COHORT_COUNT"]);
+      expect(result.reasonCodes).toEqual(["COHORT_COUNT_EXHAUSTED"]);
+      expect(result.budgetExecution.measurements).toEqual(canonical.budgetExecution.measurements);
+      expect(result.budgetExecution.exhaustionProvenance?.provenanceHash)
+        .toBe(canonical.budgetExecution.exhaustionProvenance?.provenanceHash);
+      expect(result.budgetExecution.executionHash).toBe(canonical.budgetExecution.executionHash);
+    }
+  });
+
+  it("Task6.5 coverage occurrence permutation preserves witness measurement and coverage hash", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const canonical = prepared.result;
+    const permutedInput: PhaseDTask5InputV1 = {
+      ...prepared.input,
+      normalizedMemberDrafts: [...prepared.input.normalizedMemberDrafts].reverse(),
+      task4: task4WithReversedOccurrences(prepared.input.task4),
+    };
+    const permuted = materializePhaseDTask5V1(permutedInput);
+    const canonicalWitness = stageAMeasurementOf(canonical, "LINEAGE_OCCURRENCE_WITNESS_COUNT");
+    const permutedWitness = stageAMeasurementOf(permuted, "LINEAGE_OCCURRENCE_WITNESS_COUNT");
+
+    expect(canonical.compressionStatus).toBe("COMPLETE");
+    expect(permuted.compressionStatus).toBe("COMPLETE");
+    expect(permutedWitness).toEqual(canonicalWitness);
+    expect(permuted.coverageManifest).toEqual(canonical.coverageManifest);
+    expect(permuted.coverageManifest?.coverageHash).toBe(canonical.coverageManifest?.coverageHash);
+    expect(permuted.artifactHash).toBe(canonical.artifactHash);
+
+    const witnessTotal = coverageWitnessTotalOf(prepared.input);
+    expect(witnessTotal).toBeGreaterThan(1);
+    const exhaustedBudget = phaseDTask5Budget({
+      maxLineageOccurrenceWitnessCount: witnessTotal - 1,
+    });
+    const canonicalExhausted = materializePhaseDTask5V1({
+      ...prepared.input,
+      evidenceBudget: exhaustedBudget,
+    });
+    const permutedExhausted = materializePhaseDTask5V1({
+      ...permutedInput,
+      evidenceBudget: exhaustedBudget,
+    });
+    expect(permutedExhausted.budgetExecution).toEqual(canonicalExhausted.budgetExecution);
+    expect(permutedExhausted.exhaustedDimensions).toEqual(canonicalExhausted.exhaustedDimensions);
+    expect(permutedExhausted.reasonCodes).toEqual(canonicalExhausted.reasonCodes);
+    expect(permutedExhausted.compressionRatioObservation)
+      .toEqual(canonicalExhausted.compressionRatioObservation);
+    expect(stageAMeasurementOf(canonicalExhausted, "LINEAGE_OCCURRENCE_WITNESS_COUNT")).toEqual({
+      dimension: "LINEAGE_OCCURRENCE_WITNESS_COUNT",
+      limit: witnessTotal - 1,
+      observedCount: witnessTotal,
+      measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+    });
+  });
+
+  it("Task6.5 simultaneous exhaustion is deterministic", () => {
+    const budget = task6TestBudget({
+      maxMemberEnvelopeCount: 1,
+      maxResourceRoleSlotCount: 1,
+    });
+    const first = task6AccumulatorForTest(budget, task6TestSourceBindings).applyVerifiedEvent({
+      MEMBER_ENVELOPE_COUNT: 2,
+      RESOURCE_ROLE_SLOT_COUNT: 2,
+    }, task6TestEvent()).snapshot;
+    const second = task6AccumulatorForTest(budget, [...task6TestSourceBindings].reverse()).applyVerifiedEvent({
+      RESOURCE_ROLE_SLOT_COUNT: 2,
+      MEMBER_ENVELOPE_COUNT: 2,
+    }, task6TestEvent()).snapshot;
+    if (first === null || second === null) throw new Error("Expected simultaneous exhaustion snapshot");
+
+    expect(first.exhaustedDimensions).toEqual([
+      "MEMBER_ENVELOPE_COUNT",
+      "RESOURCE_ROLE_SLOT_COUNT",
+    ]);
+    expect(first.reasonCodes).toEqual([
+      "MEMBER_ENVELOPE_COUNT_EXHAUSTED",
+      "RESOURCE_ROLE_SLOT_COUNT_EXHAUSTED",
+    ]);
+    expect(first.budgetExecution.measurements).toEqual([
+      {
+        dimension: "MEMBER_ENVELOPE_COUNT",
+        limit: 1,
+        observedCount: 2,
+        measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+      },
+      {
+        dimension: "RESOURCE_ROLE_SLOT_COUNT",
+        limit: 1,
+        observedCount: 2,
+        measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+      },
+    ]);
+    expect(second.exhaustedDimensions).toEqual(first.exhaustedDimensions);
+    expect(second.reasonCodes).toEqual(first.reasonCodes);
+    expect(second.budgetExecution.measurements).toEqual(first.budgetExecution.measurements);
+    expect(second.budgetExecution.exhaustionProvenance?.provenanceHash)
+      .toBe(first.budgetExecution.exhaustionProvenance?.provenanceHash);
+    expect(second.budgetExecution.executionHash).toBe(first.budgetExecution.executionHash);
+  });
+
+  it("Task6.5 every exhaustion nulls complete-only payload and failure identity fields", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    if (baseline.compressionStatus !== "COMPLETE"
+      || baseline.routeToCohortMappings === null
+      || baseline.equivalenceProofs === null) throw new Error("Expected complete Task6.5 baseline");
+    const totals = stageATotalsOf(baseline);
+    const mappingCount = baseline.routeToCohortMappings.length;
+    const proofCount = baseline.equivalenceProofs.length;
+    const witnessCount = coverageWitnessTotalOf(prepared.input);
+    expect(Math.min(totals.memberEnvelopeCount, mappingCount, proofCount, witnessCount)).toBeGreaterThan(1);
+    const budgets = [
+      stageABudgetAboveTotals(totals, { maxMemberEnvelopeCount: totals.memberEnvelopeCount - 1 }),
+      stageABudgetAboveTotals(totals, { maxRouteMappingCount: mappingCount - 1 }),
+      stageABudgetAboveTotals(totals, {
+        maxRouteMappingCount: mappingCount,
+        maxEquivalenceProofCount: proofCount - 1,
+      }),
+      stageABudgetAboveTotals(totals, {
+        maxRouteMappingCount: mappingCount,
+        maxEquivalenceProofCount: proofCount,
+        maxLineageOccurrenceWitnessCount: witnessCount - 1,
+      }),
+    ];
+
+    for (const evidenceBudget of budgets) {
+      const result = materializePhaseDTask5V1({ ...prepared.input, evidenceBudget });
+      expect(result.compressionStatus).toBe("INCONCLUSIVE");
+      expectTask6StageATerminalPayload(result);
+    }
+  });
+
+  it("Task6.5 exactly-at-limit is not whole-artifact completion", () => {
+    const prepared = task5InputOf(makeValidPhaseDAdmissionInput());
+    const baseline = prepared.result;
+    if (baseline.compressionStatus !== "COMPLETE" || baseline.routeToCohortMappings === null) {
+      throw new Error("Expected complete Task6.5 mapping baseline");
+    }
+    const totals = stageATotalsOf(baseline);
+    const mappingCount = baseline.routeToCohortMappings.length;
+    expect(Math.min(totals.memberEnvelopeCount, mappingCount)).toBeGreaterThan(1);
+    const result = materializePhaseDTask5V1({
+      ...prepared.input,
+      evidenceBudget: stageABudgetAboveTotals(totals, {
+        maxMemberEnvelopeCount: totals.memberEnvelopeCount,
+        maxRouteMappingCount: mappingCount - 1,
+      }),
+    });
+
+    expect(result.compressionStatus).toBe("INCONCLUSIVE");
+    expect(stageAMeasurementOf(result, "MEMBER_ENVELOPE_COUNT")).toEqual({
+      dimension: "MEMBER_ENVELOPE_COUNT",
+      limit: totals.memberEnvelopeCount,
+      observedCount: totals.memberEnvelopeCount,
+      measurementCompleteness: "EXACT",
+    });
+    expect(result.exhaustedDimensions).not.toContain("MEMBER_ENVELOPE_COUNT");
+    expect(stageAMeasurementOf(result, "ROUTE_MAPPING_COUNT")).toEqual({
+      dimension: "ROUTE_MAPPING_COUNT",
+      limit: mappingCount - 1,
+      observedCount: mappingCount,
+      measurementCompleteness: "LOWER_BOUND_AT_EXHAUSTION",
+    });
+  });
+});
+
 describe("Strategic cohort compression V1 contracts", () => {
   it("freezes the cohort hard gate outside caller budget", () => {
     expect(HARD_MAX_COHORT_COUNT_V1).toBe(49);
@@ -3238,6 +3511,53 @@ function task4WithReversedClosures(task4: PhaseDTask4ArtifactV1): PhaseDTask4Art
     ...reversedPayload,
     routeRelevantConflictClosures: [...reversedPayload.routeRelevantConflictClosures]
       .sort((left, right) => compareTask6Text(canonicalSerialize(left), canonicalSerialize(right))),
+  };
+  return { ...reversedPayload, artifactHash: canonicalHash(canonicalPayload) };
+}
+
+function task4WithReversedOccurrences(task4: PhaseDTask4ArtifactV1): PhaseDTask4ArtifactV1 {
+  if (task4.routeRelevantConflictClosures === null || task4.occurrenceUniverse === null) {
+    throw new Error("Expected Task 4 closures and occurrence universe");
+  }
+  const { occurrenceUniverseHash: _occurrenceUniverseHash, ...universePayload } = task4.occurrenceUniverse;
+  const reversedUniversePayload = {
+    ...universePayload,
+    sourceRouteIds: [...universePayload.sourceRouteIds].reverse(),
+    physicalOccurrenceKeys: [...universePayload.physicalOccurrenceKeys].reverse(),
+    wildcardOccurrenceKeys: [...universePayload.wildcardOccurrenceKeys].reverse(),
+    familyMemberOccurrenceKeys: [...universePayload.familyMemberOccurrenceKeys].reverse(),
+    reservationOccurrenceKeys: [...universePayload.reservationOccurrenceKeys].reverse(),
+    conflictOccurrenceKeys: [...universePayload.conflictOccurrenceKeys].reverse(),
+    endpointOccurrenceKeys: [...universePayload.endpointOccurrenceKeys].reverse(),
+  };
+  const canonicalUniversePayload = {
+    ...reversedUniversePayload,
+    sourceRouteIds: [...reversedUniversePayload.sourceRouteIds].sort(compareTask6Text),
+    physicalOccurrenceKeys: [...reversedUniversePayload.physicalOccurrenceKeys].sort(compareTextTuple),
+    wildcardOccurrenceKeys: [...reversedUniversePayload.wildcardOccurrenceKeys].sort(compareTextTuple),
+    familyMemberOccurrenceKeys: [...reversedUniversePayload.familyMemberOccurrenceKeys].sort(compareTextTuple),
+    reservationOccurrenceKeys: [...reversedUniversePayload.reservationOccurrenceKeys].sort(compareTextTuple),
+    conflictOccurrenceKeys: [...reversedUniversePayload.conflictOccurrenceKeys].sort(compareTextTuple),
+    endpointOccurrenceKeys: [...reversedUniversePayload.endpointOccurrenceKeys].sort(compareTextTuple),
+  };
+  const reversedUniverse = {
+    ...reversedUniversePayload,
+    occurrenceUniverseHash: canonicalHash(canonicalUniversePayload),
+  };
+  const { artifactHash: _artifactHash, ...task4Payload } = task4;
+  const reversedPayload = {
+    ...task4Payload,
+    routeRelevantConflictClosures: [...task4.routeRelevantConflictClosures].reverse(),
+    occurrenceUniverse: reversedUniverse,
+  };
+  const canonicalPayload = {
+    ...reversedPayload,
+    routeRelevantConflictClosures: [...reversedPayload.routeRelevantConflictClosures]
+      .sort((left, right) => compareTask6Text(canonicalSerialize(left), canonicalSerialize(right))),
+    occurrenceUniverse: {
+      ...canonicalUniversePayload,
+      occurrenceUniverseHash: reversedUniverse.occurrenceUniverseHash,
+    },
   };
   return { ...reversedPayload, artifactHash: canonicalHash(canonicalPayload) };
 }
